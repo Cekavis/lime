@@ -2,6 +2,8 @@
 
 ## Phase 0：工程骨架
 
+状态：已完成（2026-08-30）。详细文件与验证记录见 [Phase 0 实现记录](phase-0.md)。
+
 - 初始化 Rust workspace、Tauri 2 管理窗口、Windows C++ TSF 工程。
 - 建立资源目录、配置 schema、IPC schema 和统一错误码。
 - 将 `_archive/2026-08-25-ime-context-probe` 与 `tools/pinyin-eval` 标记为实验/评测资产，不作为生产 crate 依赖。

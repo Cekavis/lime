@@ -1,0 +1,22 @@
+[package]
+name = "lime-management"
+version = "0.1.0"
+description = "Lime management window (Tauri 2 scaffold)"
+authors = ["Lime contributors"]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+# Keep the desktop shell as an independently buildable crate. The root
+# workspace intentionally contains only the cross-platform production crates;
+# this prevents Tauri's platform dependencies from entering core CI.
+[workspace]

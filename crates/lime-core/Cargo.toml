@@ -1,0 +1,11 @@
+[package]
+name = "lime-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Configuration and service-domain primitives for Lime"
+
+[dependencies]
+lime-protocol = { path = "../lime-protocol" }
+serde.workspace = true

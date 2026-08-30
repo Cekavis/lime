@@ -2,7 +2,7 @@
 
 Lime（Language model IME）是一个本地优先的中文拼音输入法项目。它在 Rime/雾凇拼音候选召回之上，利用光标前文本和本地语言模型改善候选排序。
 
-当前阶段：**设计阶段，暂不实现主工程**。
+当前阶段：**Phase 0 工程骨架已建立，核心输入能力按 roadmap 进入后续阶段**。
 
 ## 统一入口
 
@@ -14,6 +14,7 @@ Lime（Language model IME）是一个本地优先的中文拼音输入法项目�
 - [UI 与 Design Tokens](docs/design/ui.md)
 - [实现计划](docs/implementation/roadmap.md)
 - [验证与发布](docs/implementation/quality-and-release.md)
+- [Phase 0 实现记录](docs/implementation/phase-0.md)
 - [决策记录](docs/decisions/decision-log.md)
 
 ## 现有实验资产

@@ -10,10 +10,14 @@
 4. [配置与数据目录](design/configuration.md)：设置、模型、Rime 用户数据和日志。
 5. [UI 与 Design Tokens](design/ui.md)：Tauri 管理界面、原生候选窗口和 token 规则。
 
+契约的机器可读版本位于仓库根目录 [`schemas/`](../schemas/)。
+
 ## 实现
 
 - [实现计划](implementation/roadmap.md)
 - [验证与发布](implementation/quality-and-release.md)
+- [Phase 0 实现记录](implementation/phase-0.md)
+- [实验资产边界](implementation/experimental-assets.md)
 
 ## 决策
 

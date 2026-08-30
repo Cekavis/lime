@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lime.invalid/schemas/errors.json",
+  "title": "Lime unified error codes",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "codes"],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "codes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "name", "retryable"],
+        "properties": {
+          "code": { "type": "string", "pattern": "^LIME-[0-9]{4}$" },
+          "name": { "type": "string" },
+          "retryable": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

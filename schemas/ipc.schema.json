@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lime.invalid/schemas/ipc.schema.json",
+  "title": "Lime IPC messages",
+  "oneOf": [
+    { "$ref": "#/$defs/input_request" },
+    { "$ref": "#/$defs/input_response" }
+  ],
+  "$defs": {
+    "input_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "preedit", "preceding_text", "context_available", "config_revision"],
+      "properties": {
+        "request_id": { "type": "integer", "minimum": 0 },
+        "preedit": { "type": "string" },
+        "preceding_text": { "type": "string" },
+        "context_available": { "type": "boolean" },
+        "config_revision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "input_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "candidates", "context_used", "service_state"],
+      "properties": {
+        "request_id": { "type": "integer", "minimum": 0 },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
+        "context_used": { "type": "boolean" },
+        "service_state": { "enum": ["ready", "rime_only", "reloading", "unavailable"] }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["display_text", "commit_text"],
+      "properties": {
+        "display_text": { "type": "string" },
+        "commit_text": { "type": "string" }
+      }
+    }
+  }
+}

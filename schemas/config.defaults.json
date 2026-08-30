@@ -1,0 +1,10 @@
+{
+  "preceding_text_char_limit": 128,
+  "context_preview_char_limit": 32,
+  "page_size": 9,
+  "llm_rerank_count": 32,
+  "llm_effective_count": 3,
+  "llm_context_token_limit": 32,
+  "llm_enabled": true,
+  "auto_start_service": false
+}

@@ -23,6 +23,13 @@
 - `vMAJOR.MINOR.PATCH` tag：Windows x64 构建、打包、产物校验、Release 草稿。
 - GGUF、用户词库和大型 Rime 构建产物不进入 Git；Action 使用固定版本资源或缓存。
 
+Phase 0 已落地的门禁入口：
+
+- 根 workspace：`cargo fmt --all -- --check`、`cargo check --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`。
+- IPC/config/error schema：CI 使用 `ajv-cli` 校验默认配置、请求/响应示例和错误码目录。
+- Tauri 管理窗口：`npm --prefix frontend run build`，再由 `src-tauri` 执行 Tauri 构建（平台依赖准备好后启用）。
+- Windows TSF：`cmake -S platform/windows/tsf -B build/tsf -A x64` 与 Release 构建。
+
 ## 版本
 
 - SemVer。

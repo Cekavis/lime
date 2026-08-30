@@ -1,0 +1,6 @@
+{
+  "request_id": 1,
+  "candidates": [{ "display_text": "你好", "commit_text": "你好" }],
+  "context_used": true,
+  "service_state": "rime_only"
+}

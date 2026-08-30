@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "codes": [
+    { "code": "LIME-0001", "name": "invalid_request", "retryable": false },
+    { "code": "LIME-0002", "name": "config_validation_failed", "retryable": false },
+    { "code": "LIME-0003", "name": "protocol_version_mismatch", "retryable": false },
+    { "code": "LIME-0004", "name": "service_unavailable", "retryable": true },
+    { "code": "LIME-0005", "name": "rime_initialization_failed", "retryable": false },
+    { "code": "LIME-0006", "name": "model_load_failed", "retryable": false },
+    { "code": "LIME-0007", "name": "model_not_found", "retryable": false },
+    { "code": "LIME-0008", "name": "ipc_transport_failed", "retryable": true },
+    { "code": "LIME-0009", "name": "request_cancelled", "retryable": true },
+    { "code": "LIME-0010", "name": "internal", "retryable": false }
+  ]
+}

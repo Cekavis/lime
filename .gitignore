@@ -3,6 +3,7 @@ target/
 src-tauri/target/
 dist/
 build/
+frontend/node_modules/
 
 # Local models and native runtime binaries
 *.gguf
@@ -33,3 +34,6 @@ tools/pinyin-eval/repro.*.log
 *.user
 *.suo
 *.DS_Store
+
+/_archive
+/tools
