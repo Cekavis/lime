@@ -10,6 +10,8 @@
 
 ## Phase 1：Rust 核心服务
 
+状态：已完成（2026-08-30）。详细文件与验证记录见 [Phase 1 实现记录](phase-1.md)。
+
 - 实现单实例、按需启动、Named Pipe 服务。
 - 抽取 `RimeEngine`，复用 pinyin-eval 的 librime 动态加载和用户目录隔离逻辑。
 - 抽取 `LlamaRuntime`，首期 CPU-only，支持 GGUF 加载/卸载和 token/logits 评分。

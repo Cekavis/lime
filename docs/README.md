@@ -17,6 +17,7 @@
 - [实现计划](implementation/roadmap.md)
 - [验证与发布](implementation/quality-and-release.md)
 - [Phase 0 实现记录](implementation/phase-0.md)
+- [Phase 1 实现记录](implementation/phase-1.md)
 - [实验资产边界](implementation/experimental-assets.md)
 
 ## 决策

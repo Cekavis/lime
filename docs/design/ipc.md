@@ -46,7 +46,9 @@ Candidate {
 
 ## 管理 API
 
-Tauri 使用同一 IPC 通道调用配置、模型和词库管理操作。管理响应可以包含状态和错误码，但不回传输入原文；详细信息写结构化日志。
+Tauri 使用同一 IPC 通道调用配置、模型和词库管理操作。管理响应可以包含状态和错误码，但不回传输入原文；详细信息写结构化日志。Phase 1 使用 4 字节 little-endian 长度前缀 + UTF-8 JSON 帧，单帧上限 16 MiB；Unix 使用用户私有 socket，Windows 使用本地 Named Pipe。
+
+管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`learn`、`export_dictionary`、`import_dictionary` 和 `clear_dictionary`。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型。
 
 ## 过期请求
 

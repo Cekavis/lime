@@ -4,7 +4,9 @@
   "title": "Lime IPC messages",
   "oneOf": [
     { "$ref": "#/$defs/input_request" },
-    { "$ref": "#/$defs/input_response" }
+    { "$ref": "#/$defs/input_response" },
+    { "$ref": "#/$defs/management_request" },
+    { "$ref": "#/$defs/management_response" }
   ],
   "$defs": {
     "input_request": {
@@ -38,6 +40,24 @@
         "display_text": { "type": "string" },
         "commit_text": { "type": "string" }
       }
+    },
+    "management_request": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["get_config", "set_config", "get_status", "load_model", "unload_model", "learn", "export_dictionary", "import_dictionary", "clear_dictionary"] },
+        "payload": {}
+      },
+      "additionalProperties": false
+    },
+    "management_response": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["accepted", "config", "status", "dictionary", "error"] },
+        "payload": {}
+      },
+      "additionalProperties": false
     }
   }
 }

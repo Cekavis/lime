@@ -9,3 +9,5 @@ description = "Configuration and service-domain primitives for Lime"
 [dependencies]
 lime-protocol = { path = "../lime-protocol" }
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

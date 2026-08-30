@@ -1,7 +1,7 @@
 use lime_protocol::{Config, ConfigSnapshot, ErrorCode};
 use serde::{Deserialize, Serialize};
 
-/// Inclusive bounds used by Phase 0 configuration validation.
+/// Inclusive bounds used by service configuration validation.
 ///
 /// The design document specifies defaults but not numeric limits. These conservative
 /// limits keep accidental pathological values out of the service while leaving room for
@@ -50,7 +50,7 @@ impl ConfigValidationError {
     }
 }
 
-/// Validate a wire configuration using the default Phase 0 limits.
+/// Validate a wire configuration using the default limits.
 pub fn validate(config: &Config) -> Result<(), ConfigValidationError> {
     validate_with(config, &Limits::default())
 }

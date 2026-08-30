@@ -122,6 +122,28 @@ pub struct ConfigSnapshot {
     pub config: Config,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub path: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub sha256: Option<String>,
+    pub loaded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceStatus {
+    pub state: ServiceState,
+    pub config: ConfigSnapshot,
+    pub model: ModelInfo,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DictionaryEntry {
+    pub pinyin: String,
+    pub text: String,
+    pub weight: i64,
+}
+
 /// Stable error categories shared by IPC clients and management UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,7 +206,7 @@ impl ErrorCode {
     }
 }
 
-/// Requests supported by the Phase 0 contract. The actual transport/server is deferred.
+/// Requests supported by the local service contract.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum Request {
@@ -192,16 +214,25 @@ pub enum Request {
     Input(InputRequest),
     GetConfig,
     SetConfig(Config),
+    GetStatus,
+    LoadModel { path: String },
+    UnloadModel,
+    Learn { pinyin: String, text: String },
+    ExportDictionary,
+    ImportDictionary { entries: Vec<DictionaryEntry> },
+    ClearDictionary,
 }
 
-/// Responses supported by the Phase 0 contract. Management/model/dictionary operations
-/// will add variants as their service implementations land.
+/// Responses supported by the local service contract, including Phase 1 management APIs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum Response {
     Handshake(HandshakeResponse),
     Input(InputResponse),
     Config(ConfigSnapshot),
+    Status(ServiceStatus),
+    Dictionary(Vec<DictionaryEntry>),
+    Accepted,
     Error { code: ErrorCode },
 }
 
