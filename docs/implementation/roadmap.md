@@ -20,6 +20,8 @@
 
 ## Phase 2：Windows TSF
 
+状态：已完成（2026-08-30）。详细文件与验证记录见 [Phase 2 实现记录](phase-2.md)。
+
 - 从 context probe 重组 TSF/COM、前文读取、preedit 状态机和英文透传。
 - 实现原生候选窗口、分页、选择、提交和前文预览。
 - 实现服务发现、握手、断线重连和 unavailable 透传行为。

@@ -1,62 +1,61 @@
 #include "tsf_module.h"
+#include "lime_tsf.h"
 
-#include <windows.h>
 #include <objbase.h>
 
-#include <atomic>
+using namespace lime::tsf;
 
-namespace {
-std::atomic<unsigned long> g_module_references{0};
-thread_local bool g_com_initialized = false;
-}
+#ifdef _WIN64
+#pragma comment(linker, "/EXPORT:DllCanUnloadNow,PRIVATE")
+#pragma comment(linker, "/EXPORT:DllGetClassObject,PRIVATE")
+#pragma comment(linker, "/EXPORT:DllRegisterServer,PRIVATE")
+#pragma comment(linker, "/EXPORT:DllUnregisterServer,PRIVATE")
+#else
+#pragma comment(linker, "/EXPORT:DllCanUnloadNow=_DllCanUnloadNow@0,PRIVATE")
+#pragma comment(linker, "/EXPORT:DllGetClassObject=_DllGetClassObject@12,PRIVATE")
+#pragma comment(linker, "/EXPORT:DllRegisterServer=_DllRegisterServer@0,PRIVATE")
+#pragma comment(linker, "/EXPORT:DllUnregisterServer=_DllUnregisterServer@0,PRIVATE")
+#endif
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
-  UNREFERENCED_PARAMETER(instance);
   UNREFERENCED_PARAMETER(reserved);
-
   if (reason == DLL_PROCESS_ATTACH) {
-    // COM/TSF initialization must happen on the owning thread, never in DllMain.
+    g_instance = instance;
     DisableThreadLibraryCalls(instance);
   }
   return TRUE;
 }
 
 extern "C" LIME_TSF_API HRESULT LimeTsfInitialize() {
-  if (g_com_initialized) {
-    return S_FALSE;
-  }
-
   const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  if (FAILED(hr)) {
-    return hr;
-  }
-
-  // Phase 0 placeholder: Phase 2 will create the ITfThreadMgr/TSF profile objects
-  // on this same owning thread.
-  g_com_initialized = true;
-  g_module_references.fetch_add(1, std::memory_order_relaxed);
-  return S_OK;
+  return FAILED(hr) ? hr : S_OK;
 }
 
 extern "C" LIME_TSF_API HRESULT LimeTsfShutdown() {
-  if (!g_com_initialized) {
-    return S_FALSE;
-  }
-
-  auto current = g_module_references.load(std::memory_order_relaxed);
-  while (current != 0 && !g_module_references.compare_exchange_weak(
-      current, current - 1, std::memory_order_relaxed)) {
-  }
-  g_com_initialized = false;
   CoUninitialize();
   return S_OK;
 }
 
-extern "C" HRESULT __declspec(dllexport) STDAPICALLTYPE DllRegisterServer() {
-  // Registration is intentionally deferred until the TSF implementation lands.
-  return E_NOTIMPL;
+STDAPI DllCanUnloadNow() {
+  return g_module_references.load(std::memory_order_relaxed) == 0 ? S_OK : S_FALSE;
 }
 
-extern "C" HRESULT __declspec(dllexport) STDAPICALLTYPE DllUnregisterServer() {
-  return E_NOTIMPL;
+STDAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void** object) {
+  if (clsid != kClsid) return CLASS_E_CLASSNOTAVAILABLE;
+  return CreateClassFactory(iid, object);
+}
+
+STDAPI DllRegisterServer() {
+  HRESULT hr = RegisterComServer();
+  if (SUCCEEDED(hr)) hr = RegisterTsfProfile();
+  return hr;
+}
+
+STDAPI DllUnregisterServer() {
+  UnregisterTsfProfile();
+  wchar_t guid[64]{};
+  StringFromGUID2(kClsid, guid, ARRAYSIZE(guid));
+  const std::wstring key = std::wstring(L"CLSID\\") + guid;
+  const LSTATUS status = RegDeleteTreeW(HKEY_CLASSES_ROOT, key.c_str());
+  return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND ? S_OK : HRESULT_FROM_WIN32(status);
 }
