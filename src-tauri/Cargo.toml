@@ -12,6 +12,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+lime-core = { path = "../crates/lime-core" }
+lime-protocol = { path = "../crates/lime-protocol" }
 
 [lints.rust]
 unsafe_code = "deny"

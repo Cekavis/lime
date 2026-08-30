@@ -14,6 +14,24 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+const CONFIG_FILE_VERSION: u32 = 1;
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PersistedConfig {
+    Versioned {
+        version: u32,
+        config: lime_protocol::Config,
+    },
+    Legacy(lime_protocol::Config),
+}
+
+#[derive(serde::Serialize)]
+struct VersionedConfig<'a> {
+    version: u32,
+    config: &'a lime_protocol::Config,
+}
+
 #[derive(Clone)]
 pub struct CoreService {
     config: Arc<Mutex<ConfigStore>>,
@@ -41,8 +59,13 @@ impl CoreService {
                 }
             }
         }
+        let config = data_dir
+            .as_deref()
+            .and_then(load_config)
+            .and_then(|value| ConfigStore::from_config(value).ok())
+            .unwrap_or_default();
         Self {
-            config: Arc::new(Mutex::new(ConfigStore::new())),
+            config: Arc::new(Mutex::new(config)),
             engine: Arc::new(Mutex::new(engine)),
             model: Arc::new(Mutex::new(None)),
             generation: Arc::new(GenerationTracker::default()),
@@ -74,23 +97,39 @@ impl CoreService {
                 .map(Response::Input)
                 .unwrap_or_else(|code| Response::Error { code }),
             Request::GetConfig => Response::Config(self.config_snapshot()),
-            Request::SetConfig(config) => match self
-                .config
-                .lock()
-                .expect("config mutex poisoned")
-                .replace(config)
-            {
-                Ok(snapshot) => Response::Config(snapshot),
-                Err(_) => {
-                    self.logger.event(
-                        "config_validation_failed",
-                        Some(ErrorCode::ConfigValidationFailed),
-                    );
-                    Response::Error {
-                        code: ErrorCode::ConfigValidationFailed,
+            Request::SetConfig(config) => {
+                let result = {
+                    let mut store = self.config.lock().expect("config mutex poisoned");
+                    let before = store.snapshot();
+                    match store.replace(config) {
+                        Ok(snapshot) => {
+                            if self.persist_config(&snapshot.config).is_ok() {
+                                Ok(snapshot)
+                            } else {
+                                store.restore(before);
+                                Err(ErrorCode::Internal)
+                            }
+                        }
+                        Err(_) => Err(ErrorCode::ConfigValidationFailed),
+                    }
+                };
+                match result {
+                    Ok(snapshot) => Response::Config(snapshot),
+                    Err(ErrorCode::ConfigValidationFailed) => {
+                        self.logger.event(
+                            "config_validation_failed",
+                            Some(ErrorCode::ConfigValidationFailed),
+                        );
+                        Response::Error {
+                            code: ErrorCode::ConfigValidationFailed,
+                        }
+                    }
+                    Err(code) => {
+                        self.logger.event("config_persist_failed", Some(code));
+                        Response::Error { code }
                     }
                 }
-            },
+            }
             Request::GetStatus => Response::Status(self.status()),
             Request::LoadModel { path } => self.load_model(Path::new(&path)),
             Request::UnloadModel => {
@@ -254,6 +293,33 @@ impl CoreService {
         fs::write(&temp, bytes)?;
         fs::rename(temp, target)
     }
+
+    fn persist_config(&self, config: &lime_protocol::Config) -> Result<(), std::io::Error> {
+        let Some(dir) = &self.data_dir else {
+            return Ok(());
+        };
+        fs::create_dir_all(dir)?;
+        let target = dir.join("config.json");
+        let temp = dir.join("config.json.tmp");
+        let bytes = serde_json::to_vec_pretty(&VersionedConfig {
+            version: CONFIG_FILE_VERSION,
+            config,
+        })
+        .map_err(std::io::Error::other)?;
+        fs::write(&temp, bytes)?;
+        fs::rename(temp, target)
+    }
+}
+
+fn load_config(path: &Path) -> Option<lime_protocol::Config> {
+    let bytes = fs::read(path.join("config.json")).ok()?;
+    match serde_json::from_slice::<PersistedConfig>(&bytes).ok()? {
+        PersistedConfig::Versioned { version, config } if version == CONFIG_FILE_VERSION => {
+            Some(config)
+        }
+        PersistedConfig::Versioned { .. } => None,
+        PersistedConfig::Legacy(config) => Some(config),
+    }
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -294,6 +360,7 @@ pub mod framing {
 mod tests {
     use super::*;
     use lime_protocol::Config;
+
     #[test]
     fn service_starts_in_rime_only() {
         let service = CoreService::default();
@@ -346,5 +413,36 @@ mod tests {
                 code: ErrorCode::RequestCancelled
             }
         );
+    }
+
+    #[test]
+    fn config_survives_restart_and_legacy_format_is_migrated() {
+        let directory =
+            std::env::temp_dir().join(format!("lime-core-config-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let service = CoreService::new(Some(directory.clone()));
+        let config = Config {
+            page_size: 12,
+            ..Config::default()
+        };
+        assert!(matches!(
+            service.handle(Request::SetConfig(config)),
+            Response::Config(_)
+        ));
+        let restarted = CoreService::new(Some(directory.clone()));
+        assert_eq!(restarted.config_snapshot().config.page_size, 12);
+
+        fs::write(
+            directory.join("config.json"),
+            serde_json::to_vec(&Config {
+                page_size: 7,
+                ..Config::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let migrated = CoreService::new(Some(directory.clone()));
+        assert_eq!(migrated.config_snapshot().config.page_size, 7);
+        let _ = fs::remove_dir_all(directory);
     }
 }

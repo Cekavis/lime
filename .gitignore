@@ -1,6 +1,8 @@
 # Rust / Tauri build output
 target/
 src-tauri/target/
+src-tauri/gen/
+src-tauri/icons/
 dist/
 build/
 frontend/node_modules/

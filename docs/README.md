@@ -19,6 +19,7 @@
 - [Phase 0 实现记录](implementation/phase-0.md)
 - [Phase 1 实现记录](implementation/phase-1.md)
 - [Phase 2 实现记录](implementation/phase-2.md)
+- [Phase 3 实现记录](implementation/phase-3.md)
 - [实验资产边界](implementation/experimental-assets.md)
 
 ## 决策

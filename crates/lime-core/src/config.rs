@@ -128,21 +128,32 @@ impl Default for ConfigStore {
 
 impl ConfigStore {
     pub fn new() -> Self {
-        Self {
-            config: Config::default(),
-            revision: 0,
-            limits: Limits::default(),
-        }
+        Self::from_config(Config::default()).expect("default config is valid")
     }
 
-    pub fn with_limits(limits: Limits) -> Result<Self, ConfigValidationError> {
-        let config = Config::default();
+    pub fn from_config(config: Config) -> Result<Self, ConfigValidationError> {
+        let limits = Limits::default();
         validate_with(&config, &limits)?;
         Ok(Self {
             config,
             revision: 0,
             limits,
         })
+    }
+
+    pub fn restore(&mut self, snapshot: ConfigSnapshot) {
+        self.config = snapshot.config;
+        self.revision = snapshot.revision;
+    }
+
+    pub fn with_limits(limits: Limits) -> Result<Self, ConfigValidationError> {
+        let store = Self {
+            config: Config::default(),
+            revision: 0,
+            limits,
+        };
+        validate_with(&store.config, &store.limits)?;
+        Ok(store)
     }
 
     pub fn snapshot(&self) -> ConfigSnapshot {
