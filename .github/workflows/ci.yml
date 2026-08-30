@@ -24,7 +24,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
-      - run: bunx --yes ajv-cli@5 validate -s schemas/config.schema.json -d schemas/config.defaults.json
+      - run: bunx --yes ajv-cli@5 validate -s schemas/config.schema.json -d schemas/config.defaults.json --spec=draft2020
       - run: bunx --yes ajv-cli@5 validate -s schemas/ipc.schema.json -d schemas/ipc.request.example.json --spec=draft2020
       - run: bunx --yes ajv-cli@5 validate -s schemas/ipc.schema.json -d schemas/ipc.response.example.json --spec=draft2020
       - run: bunx --yes ajv-cli@5 validate -s schemas/errors.json -d schemas/errors.catalog.json --spec=draft2020
