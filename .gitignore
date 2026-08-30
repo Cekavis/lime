@@ -1,0 +1,35 @@
+# Rust / Tauri build output
+target/
+src-tauri/target/
+dist/
+build/
+
+# Local models and native runtime binaries
+*.gguf
+*.bin
+*.dll
+*.dylib
+*.so
+*.pdb
+*.ilk
+*.exe
+*.msi
+*.dmg
+
+# User data and local runtime state
+.lime/
+models/
+user-data/
+logs/
+*.userdb/
+
+# Local evaluation output
+tools/pinyin-eval/target/
+tools/pinyin-eval/repro.*.log
+
+# IDE / OS
+.vscode/
+.idea/
+*.user
+*.suo
+*.DS_Store
