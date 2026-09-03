@@ -17,9 +17,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const CONFIG_FILE_VERSION: u32 = 1;
@@ -91,6 +91,7 @@ pub struct CoreService {
     logger: Arc<PrivacyLogger>,
     history: Arc<Mutex<Vec<InputHistoryEntry>>>,
     history_clock: Arc<AtomicU64>,
+    history_revision: Arc<(Mutex<u64>, Condvar)>,
     model_presets: Arc<Mutex<BTreeMap<String, ModelPreset>>>,
     /// Path of the last model that loaded successfully.  This is separate from
     /// `ModelPreset::loaded`, which is a runtime-only status bit exposed to clients.
@@ -207,6 +208,7 @@ impl CoreService {
             logger,
             history: Arc::new(Mutex::new(Vec::new())),
             history_clock: Arc::new(AtomicU64::new(now_unix_ms())),
+            history_revision: Arc::new((Mutex::new(0), Condvar::new())),
             model_presets: Arc::new(Mutex::new(model_presets)),
             active_model_path: Arc::new(Mutex::new(active_model_path.clone())),
             model_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -358,8 +360,12 @@ impl CoreService {
             Request::GetInputHistoryPage { page, page_size } => {
                 Response::InputHistoryPage(self.history_page(page, page_size))
             }
+            Request::WaitForInputHistory { revision } => {
+                Response::InputHistoryRevision(self.wait_for_history_revision(revision))
+            }
             Request::ClearInputHistory => {
                 self.history.lock().expect("history mutex poisoned").clear();
+                self.bump_history_revision();
                 Response::Accepted
             }
         }
@@ -815,6 +821,25 @@ impl CoreService {
         }
     }
 
+    /// Return the current history revision, waiting until it changes from the
+    /// caller's last observed value.  The revision is separate from the
+    /// entries so a client can wait without transferring input content.
+    fn wait_for_history_revision(&self, revision: u64) -> u64 {
+        let (lock, changed) = &*self.history_revision;
+        let current = lock.lock().expect("history revision mutex poisoned");
+        let (current, _) = changed
+            .wait_timeout_while(current, Duration::from_secs(30), |value| *value == revision)
+            .expect("history revision mutex poisoned");
+        *current
+    }
+
+    fn bump_history_revision(&self) {
+        let (lock, changed) = &*self.history_revision;
+        let mut revision = lock.lock().expect("history revision mutex poisoned");
+        *revision = revision.saturating_add(1);
+        changed.notify_all();
+    }
+
     fn record_input_history(
         &self,
         request: &InputRequest,
@@ -837,6 +862,7 @@ impl CoreService {
                 service_state,
                 diagnostics,
             });
+        self.bump_history_revision();
     }
 
     fn next_timestamp_ms(&self) -> u64 {
@@ -1105,6 +1131,37 @@ mod tests {
         };
         assert_eq!(second.items.len(), 5);
         assert_eq!(second.items[0].request_id, 5);
+    }
+
+    #[test]
+    fn history_revision_wait_wakes_for_new_and_cleared_entries() {
+        let service = CoreService::default();
+        let waiter = service.clone();
+        let thread =
+            std::thread::spawn(move || waiter.handle(Request::WaitForInputHistory { revision: 0 }));
+        service.handle(Request::Input(InputRequest {
+            request_id: 1,
+            preedit: "nihao".into(),
+            preceding_text: String::new(),
+            context_available: false,
+            config_revision: 0,
+        }));
+        assert_eq!(
+            thread.join().expect("history waiter should finish"),
+            Response::InputHistoryRevision(1)
+        );
+
+        let waiter = service.clone();
+        let thread =
+            std::thread::spawn(move || waiter.handle(Request::WaitForInputHistory { revision: 1 }));
+        assert_eq!(
+            service.handle(Request::ClearInputHistory),
+            Response::Accepted
+        );
+        assert_eq!(
+            thread.join().expect("history waiter should finish"),
+            Response::InputHistoryRevision(2)
+        );
     }
 
     #[test]

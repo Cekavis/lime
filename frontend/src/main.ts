@@ -87,6 +87,7 @@ interface DictionaryEntry {
 type RefreshReason = "initial" | "manual" | "poll" | "tab" | "visibility" | "mutation";
 
 const REFRESH_INTERVAL_MS = 3000;
+const HISTORY_WATCH_RETRY_MS = 1000;
 
 const stateLabel: Record<ServiceState, string> = {
   ready: "可用",
@@ -198,9 +199,7 @@ let currentPresets: ModelPreset[] = [];
 
 let configFormDirty = false;
 let pendingConfigSnapshot: ConfigSnapshot | null = null;
-let pendingHistoryPage: HistoryPage | null = null;
 let pendingPresets: ModelPreset[] | null = null;
-let historyPointerInside = false;
 let renderedDictionaryKey = "";
 let renderedHistoryKey = "";
 let renderedPresetsKey = "";
@@ -208,6 +207,9 @@ let refreshInFlight: Promise<void> | null = null;
 let refreshQueued = false;
 let queuedRefreshReason: RefreshReason | null = null;
 let mutationEpoch = 0;
+let historyRevision = 0;
+let historyRefreshEpoch = 0;
+let historyWatchStopped = false;
 let noticeTimer: number | null = null;
 
 const query = <T extends Element>(selector: string) => document.querySelector<T>(selector);
@@ -217,12 +219,6 @@ function isFocusedWithin(selector: string): boolean {
   const container = query<HTMLElement>(selector);
   const focused = document.activeElement;
   return Boolean(container && focused instanceof Node && container.contains(focused));
-}
-
-function isHistoryInteractionActive(): boolean {
-  const detail = query<HTMLElement>("[data-history-detail]");
-  return historyPointerInside || isFocusedWithin("[data-history-table]") ||
-    isFocusedWithin("[data-history-detail]") || Boolean(detail && !detail.classList.contains("is-hidden"));
 }
 
 function markMutation() {
@@ -581,6 +577,46 @@ function candidateText(candidates: Candidate[], limit = 3): string {
   return values.length ? values.join(" / ") : "—";
 }
 
+function historyEntryKey(entry: InputData, index: number): string {
+  if (entry.timestampMs != null) return "timestamp:" + entry.timestampMs;
+  if (entry.requestId != null) return "request:" + entry.requestId;
+  return "fallback:" + index + ":" + entry.precedingText + ":" + entry.preedit;
+}
+
+function historyRowContent(entry: InputData): string {
+  const rime = entry.rimeCandidates.length ? entry.rimeCandidates : entry.diagnostics.map((item) => item.rimeCandidate).filter((item): item is Candidate => item !== null);
+  const diagnosticLlm = entry.diagnostics.map((item) => item.llmCandidate).filter((item): item is Candidate => item !== null);
+  const llm = diagnosticLlm.length ? diagnosticLlm : entry.finalCandidates;
+  return '<td>' + escapeHtml(entry.precedingText || "（空）") + '</td><td class="mono">' + escapeHtml(entry.preedit || "—") + "</td><td>" + escapeHtml(candidateText(rime)) + "</td><td>" + escapeHtml(candidateText(llm)) + "</td>";
+}
+
+function renderHistoryTable(table: HTMLTableSectionElement, page: HistoryPage) {
+  const existing = new Map<string, HTMLTableRowElement>();
+  for (const row of [...table.querySelectorAll<HTMLTableRowElement>("tr[data-history-key]")]) {
+    if (row.dataset.historyKey) existing.set(row.dataset.historyKey, row);
+  }
+  const rows: HTMLTableRowElement[] = [];
+  page.items.forEach((entry, index) => {
+    const key = historyEntryKey(entry, index);
+    const row = existing.get(key) ?? document.createElement("tr");
+    row.className = "history-row";
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.dataset.historyKey = key;
+    row.dataset.historyIndex = String(index);
+    const content = historyRowContent(entry);
+    if (row.innerHTML !== content) row.innerHTML = content;
+    rows.push(row);
+  });
+  if (!rows.length) {
+    table.innerHTML = '<tr><td colspan="4" class="muted">暂无输入记录</td></tr>';
+    return;
+  }
+  // Moving existing rows instead of replacing the whole table preserves the
+  // focused row and pointer interaction while prepending a new entry.
+  table.replaceChildren(...rows);
+}
+
 function effectiveDisplayCandidate(diagnostic: CandidateDiagnostic, rowIndex: number, data: InputData): Candidate | null {
   if (diagnostic.hasDisplayCandidate) return diagnostic.displayCandidate;
   const effectiveCount = Math.max(0, Math.trunc(currentConfig.llm_effective_count || 0));
@@ -623,11 +659,6 @@ function renderTestResult(data: InputData) {
 function renderHistory(page: HistoryPage, options: { force?: boolean } = {}) {
   page = sortHistory(page);
   const key = JSON.stringify(page);
-  if (!options.force && key !== renderedHistoryKey && isHistoryInteractionActive()) {
-    pendingHistoryPage = page;
-    return;
-  }
-  pendingHistoryPage = null;
   currentHistory = page.items;
   currentHistoryPage = page.page;
   currentHistoryTotal = page.total;
@@ -635,13 +666,7 @@ function renderHistory(page: HistoryPage, options: { force?: boolean } = {}) {
   if (count) count.textContent = page.total + " 条";
   const table = query<HTMLTableSectionElement>("[data-history-table]");
   if (table && (options.force || key !== renderedHistoryKey)) {
-    const rows = page.items.map((entry, index) => {
-      const rime = entry.rimeCandidates.length ? entry.rimeCandidates : entry.diagnostics.map((item) => item.rimeCandidate).filter((item): item is Candidate => item !== null);
-      const diagnosticLlm = entry.diagnostics.map((item) => item.llmCandidate).filter((item): item is Candidate => item !== null);
-      const llm = diagnosticLlm.length ? diagnosticLlm : entry.finalCandidates;
-      return '<tr class="history-row" tabindex="0" role="button" data-history-index="' + index + '"><td>' + escapeHtml(entry.precedingText || "（空）") + '</td><td class="mono">' + escapeHtml(entry.preedit || "—") + "</td><td>" + escapeHtml(candidateText(rime)) + "</td><td>" + escapeHtml(candidateText(llm)) + "</td></tr>";
-    });
-    table.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4" class="muted">暂无输入记录</td></tr>';
+    renderHistoryTable(table, page);
   }
   renderedHistoryKey = key;
   const totalPages = Math.max(1, Math.ceil(page.total / HISTORY_PAGE_SIZE));
@@ -711,6 +736,7 @@ function renderModelPresets(presets: ModelPreset[], options: { force?: boolean }
 }
 
 async function performRefresh(reason: RefreshReason, mutationAtStart: number) {
+  const historyAtStart = historyRefreshEpoch;
   const results = await Promise.allSettled([
     invoke<unknown>("get_config"),
     invoke<unknown>("get_status"),
@@ -780,8 +806,9 @@ async function performRefresh(reason: RefreshReason, mutationAtStart: number) {
       } catch (error) {
         errors.push(error);
       }
-      if (mutationAtStart !== mutationEpoch) return;
+      if (mutationAtStart !== mutationEpoch || historyAtStart !== historyRefreshEpoch) return;
     }
+    if (mutationAtStart !== mutationEpoch || historyAtStart !== historyRefreshEpoch) return;
     renderHistory(history);
   } else errors.push(historyResult.reason);
 
@@ -834,16 +861,50 @@ function refresh() {
   return requestRefresh("manual");
 }
 
+async function watchInputHistory() {
+  // Keep one native long-poll active for the lifetime of the window. Unlike a
+  // browser timer, the Tauri command continues waiting while the window is in
+  // the background and resolves as soon as the service records or clears data.
+  while (!historyWatchStopped) {
+    try {
+      const value = await invoke<unknown>("wait_for_input_history", { revision: historyRevision });
+      const nextRevision = asNumber(value);
+      if (nextRevision == null) throw new Error("历史更新通知无效");
+      if (nextRevision !== historyRevision) {
+        historyRevision = nextRevision;
+        void refreshHistoryNow();
+      }
+    } catch {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, HISTORY_WATCH_RETRY_MS));
+    }
+  }
+}
+
+async function refreshHistoryNow() {
+  const mutationAtStart = mutationEpoch;
+  const refreshAtStart = ++historyRefreshEpoch;
+  try {
+    let history = await fetchHistoryPage(currentHistoryPage);
+    if (mutationAtStart !== mutationEpoch || refreshAtStart !== historyRefreshEpoch) return;
+    const totalPages = Math.max(1, Math.ceil(history.total / HISTORY_PAGE_SIZE));
+    if (history.page > totalPages) {
+      currentHistoryPage = totalPages;
+      history = await fetchHistoryPage(totalPages);
+      if (mutationAtStart !== mutationEpoch || refreshAtStart !== historyRefreshEpoch) return;
+    }
+    renderHistory(history);
+  } catch {
+    // The regular management refresh will report service errors. History
+    // notifications retry through the long-poll loop without surfacing a
+    // transient connection failure as a toast.
+  }
+}
+
 function flushDeferredRenders() {
   if (pendingConfigSnapshot && !configFormDirty && !isFocusedWithin("[data-config-form]")) {
     const snapshot = pendingConfigSnapshot;
     pendingConfigSnapshot = null;
     applyConfig(snapshot);
-  }
-  if (pendingHistoryPage && !isHistoryInteractionActive()) {
-    const page = pendingHistoryPage;
-    pendingHistoryPage = null;
-    renderHistory(page, { force: true });
   }
   if (pendingPresets && !isFocusedWithin("[data-model-presets]")) {
     const presets = pendingPresets;
@@ -1141,13 +1202,6 @@ query<HTMLButtonElement>("[data-clear-history]")?.addEventListener("click", asyn
 query<HTMLButtonElement>("[data-refresh]")?.addEventListener("click", () => { void refresh(); });
 query<HTMLButtonElement>("[data-notice-close]")?.addEventListener("click", () => setNotice(""));
 document.addEventListener("focusout", () => { queueMicrotask(flushDeferredRenders); });
-for (const selector of ["[data-history-table]", "[data-history-detail]"]) {
-  query<HTMLElement>(selector)?.addEventListener("pointerenter", () => { historyPointerInside = true; });
-  query<HTMLElement>(selector)?.addEventListener("pointerleave", () => {
-    historyPointerInside = false;
-    queueMicrotask(flushDeferredRenders);
-  });
-}
 for (const tab of all<HTMLButtonElement>("[data-tab]")) {
   tab.addEventListener("click", () => {
     const name = tab.dataset.tab;
@@ -1203,12 +1257,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") void requestRefresh("visibility");
-});
+window.addEventListener("beforeunload", () => { historyWatchStopped = true; });
+document.addEventListener("visibilitychange", () => { void requestRefresh("visibility"); });
 
 window.setInterval(() => {
-  if (document.visibilityState === "visible") void requestRefresh("poll");
+  void requestRefresh("poll");
 }, REFRESH_INTERVAL_MS);
 
 void requestRefresh("initial");
+void watchInputHistory();

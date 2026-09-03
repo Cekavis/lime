@@ -327,18 +327,44 @@ pub enum Request {
     GetConfig,
     SetConfig(Config),
     GetStatus,
-    LoadModel { path: String },
+    LoadModel {
+        path: String,
+    },
     UnloadModel,
     ListModelPresets,
-    SaveModelPreset { name: String, path: String },
-    DeleteModelPreset { name: String },
-    SelectModelPreset { name: String },
-    Learn { pinyin: String, text: String },
+    SaveModelPreset {
+        name: String,
+        path: String,
+    },
+    DeleteModelPreset {
+        name: String,
+    },
+    SelectModelPreset {
+        name: String,
+    },
+    Learn {
+        pinyin: String,
+        text: String,
+    },
     ExportDictionary,
-    ImportDictionary { entries: Vec<DictionaryEntry> },
+    ImportDictionary {
+        entries: Vec<DictionaryEntry>,
+    },
     ClearDictionary,
     GetInputHistory,
-    GetInputHistoryPage { page: u32, page_size: u32 },
+    GetInputHistoryPage {
+        page: u32,
+        page_size: u32,
+    },
+    /// Wait until the in-memory input history revision differs from `revision`.
+    ///
+    /// Management clients use this long-poll request instead of relying on a
+    /// throttled browser timer, so history updates are observable while the
+    /// management window is in the background. The service may return the same
+    /// revision after a keepalive timeout so clients can reconnect cleanly.
+    WaitForInputHistory {
+        revision: u64,
+    },
     ClearInputHistory,
 }
 
@@ -355,6 +381,7 @@ pub enum Response {
     Dictionary(Vec<DictionaryEntry>),
     InputHistory(Vec<InputHistoryEntry>),
     InputHistoryPage(InputHistoryPage),
+    InputHistoryRevision(u64),
     Accepted,
     Error { code: ErrorCode },
 }
@@ -456,5 +483,20 @@ mod tests {
         );
         assert!(!ErrorCode::ConfigValidationFailed.retryable());
         assert!(ErrorCode::RequestCancelled.retryable());
+    }
+
+    #[test]
+    fn history_watch_messages_round_trip() {
+        let request = Request::WaitForInputHistory { revision: 12 };
+        let json = serde_json::to_string(&request).expect("serialize history watch request");
+        let decoded: Request =
+            serde_json::from_str(&json).expect("deserialize history watch request");
+        assert_eq!(decoded, request);
+
+        let response = Response::InputHistoryRevision(13);
+        let json = serde_json::to_string(&response).expect("serialize history revision response");
+        let decoded: Response =
+            serde_json::from_str(&json).expect("deserialize history revision response");
+        assert_eq!(decoded, response);
     }
 }

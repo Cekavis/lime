@@ -150,6 +150,18 @@ fn get_input_history_page(page: u32, page_size: Option<u32>) -> Result<InputHist
 }
 
 #[tauri::command]
+async fn wait_for_input_history(revision: u64) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        match ipc::call(Request::WaitForInputHistory { revision })? {
+            Response::InputHistoryRevision(value) => Ok(value),
+            _ => Err("unexpected wait_for_input_history response".to_owned()),
+        }
+    })
+    .await
+    .map_err(|error| format!("history wait task failed: {error}"))?
+}
+
+#[tauri::command]
 fn clear_input_history() -> Result<(), String> {
     match ipc::call(Request::ClearInputHistory)? {
         Response::Accepted => Ok(()),
@@ -175,6 +187,7 @@ fn main() {
             test_input,
             get_input_history,
             get_input_history_page,
+            wait_for_input_history,
             clear_input_history,
         ])
         .run(tauri::generate_context!())

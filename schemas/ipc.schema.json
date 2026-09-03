@@ -98,7 +98,7 @@
       "type": "object",
       "required": ["kind"],
       "properties": {
-        "kind": { "enum": ["get_config", "set_config", "get_status", "load_model", "unload_model", "list_model_presets", "save_model_preset", "delete_model_preset", "select_model_preset", "learn", "export_dictionary", "import_dictionary", "clear_dictionary", "get_input_history", "get_input_history_page", "clear_input_history"] },
+        "kind": { "enum": ["get_config", "set_config", "get_status", "load_model", "unload_model", "list_model_presets", "save_model_preset", "delete_model_preset", "select_model_preset", "learn", "export_dictionary", "import_dictionary", "clear_dictionary", "get_input_history", "get_input_history_page", "wait_for_input_history", "clear_input_history"] },
         "payload": {}
       },
       "additionalProperties": false
@@ -107,7 +107,7 @@
       "type": "object",
       "required": ["kind"],
       "properties": {
-        "kind": { "enum": ["accepted", "config", "status", "model_presets", "model_preset", "dictionary", "input_history", "input_history_page", "error"] },
+        "kind": { "enum": ["accepted", "config", "status", "model_presets", "model_preset", "dictionary", "input_history", "input_history_page", "input_history_revision", "error"] },
         "payload": {}
       },
       "additionalProperties": false
