@@ -1,0 +1,32 @@
+{
+  "runtime": "llama.cpp",
+  "version": "b10743",
+  "upstream_commit": "8887a48f050554f0ee59f56753860c061836b02d",
+  "platform": "windows-x64",
+  "backend": "cuda",
+  "cuda_version": "13.3",
+  "asset": {
+    "name": "llama-b10743-bin-win-cuda-13.3-x64.zip",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10743/llama-b10743-bin-win-cuda-13.3-x64.zip",
+    "sha256": "b99615bbc975bef4ab7c9f043c1f03b6baf1c40a69c735bc222962cf31493fd7"
+  },
+  "cuda_runtime_asset": {
+    "name": "cudart-llama-bin-win-cuda-13.3-x64.zip",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10743/cudart-llama-bin-win-cuda-13.3-x64.zip",
+    "sha256": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e"
+  },
+  "required_files": [
+    "llama.dll",
+    "ggml.dll",
+    "ggml-base.dll",
+    "ggml-cuda.dll"
+  ],
+  "required_patterns": [
+    "cublas*.dll",
+    "cudart*.dll"
+  ],
+  "license_files": [
+    "LICENSE-LLVM-OpenMP"
+  ],
+  "notes": "The official CUDA 13.3 Windows x64 llama.cpp archive is paired with its cudart archive. Lime selects this runtime by default for current NVIDIA/Blackwell Windows systems and packages a separate CPU runtime for explicit selection or automatic fallback. GGUF model files remain user-managed and are not bundled."
+}

@@ -1,0 +1,15 @@
+[package]
+name = "llama-cpp-v3"
+version = "0.1.8"
+edition = "2021"
+license = "MIT"
+description = "Safe runtime-loaded llama.cpp wrapper vendored for Lime"
+autobins = false
+
+[lib]
+name = "llama_cpp_v3"
+path = "src/lib.rs"
+
+[dependencies]
+llama-cpp-sys-v3 = { path = "../llama-cpp-sys-v3" }
+thiserror = "2"

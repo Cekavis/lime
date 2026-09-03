@@ -5,7 +5,7 @@
 1. 文档/配置：schema 校验、默认值和迁移测试。
 2. Rust 核心：单元测试、Rime smoke test、llama.cpp 评分回归、IPC 协议测试。
 3. Windows：TSF 注册、前文读取、候选定位、提交、断线透传和高 DPI 测试。
-4. 安装：当前用户无管理员权限安装、升级保留用户数据、卸载清理。
+4. 安装：管理员许可安装 TSF、升级保留用户数据、卸载清理。
 
 ## 回归重点
 
@@ -16,6 +16,9 @@
 - 前文获取失败仍可中文输入，但按空上下文处理。
 - Rust 服务不可用时只透传英文/数字/标点。
 - 默认日志不包含原始输入。
+- Windows 发布校验必须确认 `llama/cuda/` 与 `llama/cpu/` 两套 DLL 均存在；CUDA 默认路径
+  需要在具备 NVIDIA 驱动和设备的 runner 上执行真实 GGUF logits smoke test，CPU fallback
+  需要在无 CUDA 设备的 runner 上执行同一测试。
 
 ## GitHub Actions
 
@@ -29,6 +32,11 @@ Phase 0 已落地的门禁入口：
 - IPC/config/error schema：CI 使用 `ajv-cli` 校验默认配置、请求/响应示例和错误码目录。
 - Tauri 管理窗口：`npm --prefix frontend run build`，再由 `src-tauri` 执行 Tauri 构建（平台依赖准备好后启用）。
 - Windows TSF：`cmake -S platform/windows/tsf -B build/tsf -A x64` 与 Release 构建。
+
+Phase 4 发布工作流位于 `.github/workflows/release.yml`：推送 `vMAJOR.MINOR.PATCH`
+tag 后复用 `tools/release/build-windows.ps1` 生成当前用户 NSIS 安装器，并上传安装器与
+SHA-256 校验文件到 GitHub Release 草稿。NSIS 使用 ZLIB 压缩，以较小的安装包体积增幅
+换取 CUDA runtime 大型 DLL 的更快解压安装。
 
 ## 版本
 

@@ -9,6 +9,7 @@
 3. [候选与 LLM 排序](design/ranking.md)：Rime 召回、llama.cpp 评分和候选合并。
 4. [配置与数据目录](design/configuration.md)：设置、模型、Rime 用户数据和日志。
 5. [UI 与 Design Tokens](design/ui.md)：Tauri 管理界面、原生候选窗口和 token 规则。
+6. [WeaselUI 候选窗口与主题迁移](design/weasel-ui-integration.md)：WeaselUI 集成边界、前文显示、主题覆盖和 GPL 分发要求。
 
 契约的机器可读版本位于仓库根目录 [`schemas/`](../schemas/)。
 
@@ -20,6 +21,8 @@
 - [Phase 1 实现记录](implementation/phase-1.md)
 - [Phase 2 实现记录](implementation/phase-2.md)
 - [Phase 3 实现记录](implementation/phase-3.md)
+- [Phase 4 实现记录](implementation/phase-4.md)
+- [Phase 4 验收矩阵](implementation/phase-4-acceptance.md)
 - [实验资产边界](implementation/experimental-assets.md)
 
 ## 决策

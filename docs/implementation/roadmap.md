@@ -14,7 +14,7 @@
 
 - 实现单实例、按需启动、Named Pipe 服务。
 - 抽取 `RimeEngine`，复用 pinyin-eval 的 librime 动态加载和用户目录隔离逻辑。
-- 抽取 `LlamaRuntime`，首期 CPU-only，支持 GGUF 加载/卸载和 token/logits 评分。
+- 抽取 `LlamaRuntime`，Windows 默认 CUDA、CPU fallback，支持 GGUF 加载/卸载和 token/logits 评分。
 - 实现 Rime-only、模型重排、取消旧代际和配置热更新。
 - 实现用户词库学习、导入导出和隐私安全日志。
 
@@ -36,6 +36,8 @@
 
 ## Phase 4：验收与发布
 
+状态：实现完成（2026-08-30），待在目标 Windows 主机执行真实验收矩阵。详细记录见 [Phase 4 实现记录](phase-4.md) 与 [Phase 4 验收矩阵](phase-4-acceptance.md)。
+
 - Windows 10 22H2+ x64 安装/卸载/升级验证。
 - 中文输入、前文获取、Rime-only、LLM 重排和服务崩溃透传验证。
 - 生成签名/校验信息，使用版本 tag 触发 GitHub Actions。
@@ -44,7 +46,6 @@
 
 - macOS 可用输入法实现
 - 远程模型或自动下载
-- 双拼、模糊音、脚本扩展
 - LLM 自主生成候选
-- GPU 加速必达
+- 其他 GPU 后端（Vulkan/ROCm 等）
 - 敏感控件特殊处理

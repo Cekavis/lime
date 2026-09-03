@@ -34,21 +34,37 @@ InputResponse {
   candidates: Candidate[]
   context_used: bool
   service_state: ready | rime_only | reloading | unavailable
+  diagnostics: CandidateDiagnostic[]
 }
 
 Candidate {
   display_text: string
   commit_text: string
 }
+
+CandidateDiagnostic {
+  rank: u32
+  rime_candidate: Candidate?
+  llm_candidate: Candidate?
+  logprob: f64
+  logprobs: f64[]
+  mismatch: bool
+  display_candidate: Candidate?
+}
 ```
 
-前端/TSF 根据数组顺序生成页码和选中状态。生产响应不包含分数、延迟、候选来源、token、prompt、Rime 内部词频或 debug 字段。
+前端/TSF 根据 `candidates` 数组顺序生成页码和选中状态。`diagnostics` 只供用户主动打开的测试/历史详情页使用，不应在原生候选窗口展示。启用模型时，`logprob` 与 `logprobs` 来自真实 llama.cpp vocabulary logits，且 `logprobs` 的和与 `logprob` 一致（允许浮点误差）；没有模型时该行保持 Rime-only 语义。`mismatch` 使用同一 GGUF 的 llama.cpp tokenizer 检查上文/候选边界。
 
 ## 管理 API
 
-Tauri 使用同一 IPC 通道调用配置、模型和词库管理操作。管理响应可以包含状态和错误码，但不回传输入原文；详细信息写结构化日志。Phase 1 使用 4 字节 little-endian 长度前缀 + UTF-8 JSON 帧，单帧上限 16 MiB；Unix 使用用户私有 socket，Windows 使用本地 Named Pipe。
+Tauri 使用同一 IPC 通道调用配置、模型、词库和输入诊断操作。除用户主动请求的历史接口外，管理响应不回传输入原文；详细信息写结构化日志。Phase 1 使用 4 字节 little-endian 长度前缀 + UTF-8 JSON 帧，单帧上限 16 MiB；Unix 使用用户私有 socket，Windows 使用本地 Named Pipe。
 
-管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`learn`、`export_dictionary`、`import_dictionary` 和 `clear_dictionary`。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型。
+管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`list_model_presets`、`save_model_preset`、`delete_model_preset`、`select_model_preset`、`learn`、`export_dictionary`、`import_dictionary`、`clear_dictionary`、`get_input_history`、`get_input_history_page` 和 `clear_input_history`。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型；模型预设保存于服务数据目录的 `model-presets.json`，切换失败时保留当前模型。
+
+模型预设命令按名称寻址：`save_model_preset` 使用 `{ name, path }`，`delete_model_preset`
+和 `select_model_preset` 使用 `{ name }`。`ModelPreset` 不定义独立的 `id` 或 `key` 字段。
+
+`get_input_history` 返回服务本次启动后收到的全部输入请求，按 `timestamp_ms` 从新到旧排序，包含上文、拼音、Rime 原始候选、LLM 排序、诊断行和最终候选顺序；历史只保存在服务内存中，用户可在管理窗口清空。新 UI 使用 `get_input_history_page { page, page_size }`，页码从 1 开始，服务将单页大小限制为 100，并返回 `items`、`total`、`page` 和 `page_size`。`request_id` 仅为旧客户端兼容字段，不作为 UI 排序或关联依据。
 - Windows TSF 默认连接 `\\.\pipe\lime-core-v1`，可由 `LIME_PIPE` 覆盖；若设置 `LIME_SERVICE_PATH`，TSF 首次连接失败时按需启动本地服务并重试。TSF 在首次握手后读取 `get_status.config.revision`，所有输入请求携带该 revision。
 
 ## 过期请求

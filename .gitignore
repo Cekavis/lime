@@ -29,6 +29,11 @@ logs/
 # Local evaluation output
 tools/pinyin-eval/target/
 tools/pinyin-eval/repro.*.log
+.tmp-rime-ice/
+.tmp-rime-small/
+.tmp-ipc-test/
+.tmp_engine_harness/
+*.log
 
 # IDE / OS
 .vscode/
@@ -38,4 +43,16 @@ tools/pinyin-eval/repro.*.log
 *.DS_Store
 
 /_archive
-/tools
+/tools/*
+!/tools/release/
+!/tools/release/build-windows.ps1
+!/tools/release/prepare-rime-runtime.ps1
+!/tools/release/prepare-llama-runtime.ps1
+
+# Large upstream Rime text assets are fetched and verified by the release scripts.
+# Keep only the project-facing documentation, license, and Weasel theme in Git.
+resources/rime/*
+!resources/rime/.gitkeep
+!resources/rime/README.md
+!resources/rime/LICENSE
+!resources/rime/weasel.yaml

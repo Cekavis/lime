@@ -5,11 +5,11 @@
 核心逻辑沿用 `tools/pinyin-eval`：
 
 1. Rime/雾凇拼音根据 `preedit` 召回候选。
-2. 过滤不能完整覆盖当前拼音的短候选。
-3. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证。
-4. 使用 llama.cpp 完整 vocabulary logits 计算候选 token 的链式 logprob。
+2. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
+3. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
+4. 使用 llama.cpp 完整 vocabulary logits 计算候选 token 的链式 logprob；运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
 5. 边界不匹配候选沿用现有逐 token 评分路径。
-6. LLM 只返回候选索引排序，不生成新词、不修改提交文本。
+6. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
 
 拼音用于 Rime 召回，不直接写入 LLM prompt。
 
@@ -18,16 +18,17 @@
 | 设置 | 默认 | 作用 |
 |---|---:|---|
 | `page_size` | 9 | 前端每页显示数量，仅影响候选 UI |
-| `llm_rerank_count` | 32 | 送入 LLM 重排的 Rime 候选数量 |
-| `llm_effective_count` | 3 | 从 LLM 排序中置顶采纳的候选数量 |
+| `llm_rerank_count` | 32 | 检查并尝试送入 LLM 的 Rime 候选前缀长度；其中未完整消费输入的候选会被排除 |
+| `llm_effective_count` | 3 | 从完整候选的 LLM 排序中置顶采纳的候选数量 |
 
 最终顺序：
 
 ```text
-final = llm_top_k + rime_candidates_without(llm_top_k)
+complete_pool = candidates_whose_preview_consumes_all_input(first_N_rime_candidates)
+final = llm_top_k(complete_pool) + rime_candidates_without(llm_top_k)
 ```
 
-其余候选严格保持 Rime 原始顺序。重复、越界或无法解析的索引丢弃；有效结果少于 K 时不补造候选。
+未完整消费输入的候选不会被 LLM 提升，但仍保留在最终候选列表中。其余候选严格保持 Rime 原始顺序。重复、越界或无法解析的索引丢弃；完整候选或有效结果少于 K 时不补造候选。
 
 ## 时序与降级
 
@@ -43,9 +44,22 @@ final = llm_top_k + rime_candidates_without(llm_top_k)
 - `llm_context_token_limit` 默认 32，也可在设置中修改。
 - 平台层先按字符裁剪，Rust/llama.cpp 再按 token 后缀截断。
 
+## llama.cpp 后端
+
+- `llm_backend` 默认值为 `cuda`，可切换为 `cpu`。
+- `cuda` 会先加载安装包 `llama/cuda/` 下的 CUDA 13.3 runtime，并验证至少一个可用
+  CUDA device；DLL、驱动或设备初始化失败时尝试 `llama/cpu/`。
+- `cpu` 直接加载 `llama/cpu/`，不依赖 CUDA 驱动。
+- 两种后端都使用同一 GGUF、tokenizer、batch decode 和完整 vocabulary logits 计算路径；
+  后端只改变 llama.cpp 的 native device 分配，不改变候选排序契约。
+
+## 诊断行
+
+管理接口的 `CandidateDiagnostic` 同时保留 Rime 原始顺序、LLM 排序顺序、最终展示顺序、聚合/逐 token logprob 和边界 mismatch 标记。诊断只由测试页和历史详情页主动读取，不进入原生候选窗口。
+
 ## 模型
 
 - 模型输入为用户导入的单个 GGUF 文件；不要求额外 manifest。
 - 当前开发模型：`tools/pinyin-eval/native/llama/models/qwen3.5-4b-base-q4_k_m/qwen3.5-4b-base-q4_k_m.gguf`。
-- 模型切换通过服务受控重载；同一时间只激活一个模型。
-- 首期 CPU-only；GPU 后端以后通过 llama.cpp 适配器增加。
+- 模型切换通过服务受控重载；同一时间只激活一个模型。多个命名预设由服务持久化到 `model-presets.json`，可列出、保存、删除和切换；切换失败不会替换当前模型。
+- Windows 首期默认 CUDA，并随安装包提供 CPU 回退；未安装可用模型时仍保持 Rime-only。

@@ -1,0 +1,33 @@
+{
+  "librime": {
+    "version": "1.17.0",
+    "repository": "rime/librime",
+    "tag": "1.17.0",
+    "platform": "windows-x64",
+    "assets": [
+      {
+        "name": "rime-33e7814-Windows-msvc-x64.7z",
+        "sha256": "7478c7caa4ff6b37de86daba1f7ce4a994a4f5ba24872a820fb2b3a9b01fed15"
+      },
+      {
+        "name": "rime-deps-33e7814-Windows-msvc-x64.7z",
+        "sha256": "9ef5608d8a54ff52bbad7a9b4128de42b232f8e3dd1f5fd3bff42a0b1bacd7e8"
+      }
+    ]
+  },
+  "rime_ice": {
+    "version": "2026.06.30",
+    "repository": "iDvel/rime-ice",
+    "asset": "full_compiled.zip",
+    "sha256": "ae810e0023f28d3eb45ff98a7c58830dd0b505c2272638a321fa6d5a6f5d5418"
+  },
+  "required_files": [
+    "rime.dll",
+    "build/default.yaml",
+    "build/rime_ice.schema.yaml",
+    "build/rime_ice.prism.bin",
+    "build/rime_ice.table.bin",
+    "build/rime_ice.reverse.bin"
+  ],
+  "notes": "Use the official librime and Rime-Ice release assets above. The extracted full_compiled payload is copied without modifying its text or compiled files; only the generated VERSION markers, manifest copy, and package placement are Lime build metadata."
+}

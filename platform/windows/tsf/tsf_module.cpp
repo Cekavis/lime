@@ -55,7 +55,17 @@ STDAPI DllUnregisterServer() {
   UnregisterTsfProfile();
   wchar_t guid[64]{};
   StringFromGUID2(kClsid, guid, ARRAYSIZE(guid));
-  const std::wstring key = std::wstring(L"CLSID\\") + guid;
-  const LSTATUS status = RegDeleteTreeW(HKEY_CLASSES_ROOT, key.c_str());
-  return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND ? S_OK : HRESULT_FROM_WIN32(status);
+  const std::wstring key = std::wstring(L"Software\\Classes\\CLSID\\") + guid;
+  // Current releases register the COM class machine-wide because the NSIS
+  // package is per-machine.  Also remove the old per-user key written by
+  // pre-fix builds so it cannot shadow the machine registration in HKCR.
+  LSTATUS failure = ERROR_SUCCESS;
+  for (HKEY root : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    const LSTATUS status = RegDeleteTreeW(root, key.c_str());
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND &&
+        failure == ERROR_SUCCESS) {
+      failure = status;
+    }
+  }
+  return failure == ERROR_SUCCESS ? S_OK : HRESULT_FROM_WIN32(failure);
 }

@@ -57,6 +57,23 @@ pub fn validate(config: &Config) -> Result<(), ConfigValidationError> {
 
 /// Validate a wire configuration using explicit limits.
 pub fn validate_with(config: &Config, limits: &Limits) -> Result<(), ConfigValidationError> {
+    if config.rime_schema.trim().is_empty()
+        || config.rime_schema.contains('\0')
+        || config.rime_schema.chars().count() > 128
+    {
+        return Err(ConfigValidationError {
+            field: "rime_schema",
+            value: config.rime_schema.chars().count() as u32,
+            reason: "must be a non-empty schema id of at most 128 characters",
+        });
+    }
+    if !matches!(config.llm_backend.as_str(), "cuda" | "cpu") {
+        return Err(ConfigValidationError {
+            field: "llm_backend",
+            value: config.llm_backend.chars().count() as u32,
+            reason: "must be either cuda or cpu",
+        });
+    }
     check(
         "preceding_text_char_limit",
         config.preceding_text_char_limit,
@@ -183,7 +200,21 @@ mod tests {
     fn defaults_are_valid_and_revision_starts_at_zero() {
         let store = ConfigStore::new();
         assert_eq!(store.snapshot().revision, 0);
+        assert_eq!(
+            store.snapshot().config.llm_backend,
+            lime_protocol::DEFAULT_LLM_BACKEND
+        );
         assert!(validate(&store.snapshot().config).is_ok());
+    }
+
+    #[test]
+    fn unsupported_llm_backend_is_rejected() {
+        let config = Config {
+            llm_backend: "vulkan".to_owned(),
+            ..Config::default()
+        };
+        let error = validate(&config).expect_err("unsupported backend must be rejected");
+        assert_eq!(error.field, "llm_backend");
     }
 
     #[test]

@@ -1611,7 +1611,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf"
 dependencies = [
  "gtk-sys",
- "libloading",
+ "libloading 0.7.4",
  "once_cell",
 ]
 
@@ -1641,6 +1641,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link 0.2.1",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1654,6 +1664,8 @@ name = "lime-core"
 version = "0.1.0"
 dependencies = [
  "lime-protocol",
+ "llama-cpp-sys-v3",
+ "llama-cpp-v3",
  "serde",
  "serde_json",
  "sha2",
@@ -1681,6 +1693,22 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "llama-cpp-sys-v3"
+version = "0.1.8"
+dependencies = [
+ "libloading 0.8.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "llama-cpp-v3"
+version = "0.1.8"
+dependencies = [
+ "llama-cpp-sys-v3",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "lock_api"

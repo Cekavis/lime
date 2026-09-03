@@ -4,15 +4,15 @@
   "version": "0.1.0",
   "identifier": "dev.lime.ime",
   "build": {
-    "beforeDevCommand": "npm run dev --prefix ../frontend",
+    "beforeDevCommand": "npm run dev --prefix frontend",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build --prefix ../frontend",
+    "beforeBuildCommand": "npm run build --prefix frontend",
     "frontendDist": "../frontend/dist"
   },
   "app": {
     "windows": [
       {
-        "title": "Lime 设置",
+        "title": "Lime",
         "width": 720,
         "height": 640,
         "minWidth": 480,
@@ -25,7 +25,28 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "../target/release/lime-service.exe": "lime-service.exe",
+      "../build/tsf/Release/lime-tsf.dll": "lime-tsf.dll",
+      "../target/rime-package": "rime",
+      "../target/llama-runtime": "llama",
+      "../third_party/weasel-ui/LICENSE.txt": "licenses/WeaselUI-GPL-3.0.txt"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "allowDowngrades": false,
+      "nsis": {
+        "compression": "zlib",
+        "installMode": "perMachine",
+        "languages": ["SimpChinese", "English"],
+        "installerHooks": "windows/nsis/hooks.nsh",
+        "startMenuFolder": "Lime"
+      }
+    }
   }
 }

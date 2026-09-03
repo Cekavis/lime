@@ -2,19 +2,38 @@ use crate::{
     config::ConfigStore,
     engine::{CandidateEngine, RimeEngine},
     logging::PrivacyLogger,
-    ranking::{rerank_candidates, GenerationTracker, LlamaRuntime},
+    ranking::{try_rerank_selected_candidates_with_diagnostics, GenerationTracker, LlamaRuntime},
 };
 use lime_protocol::{
-    ConfigSnapshot, DictionaryEntry, ErrorCode, InputRequest, InputResponse, ModelInfo, Request,
-    Response, ServiceState, ServiceStatus,
+    CandidateDiagnostic, ConfigSnapshot, ErrorCode, InputHistoryEntry, InputHistoryPage,
+    InputRequest, InputResponse, ModelInfo, ModelPreset, Request, Response, ServiceState,
+    ServiceStatus, INPUT_HISTORY_PAGE_SIZE,
 };
+use llama_cpp_v3::BackendPreference;
 use std::{
+    cmp::Reverse,
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const CONFIG_FILE_VERSION: u32 = 1;
+const MODEL_PRESETS_FILE_VERSION: u32 = 1;
+
+fn backend_preference_for(value: &str) -> BackendPreference {
+    match value {
+        "cpu" => BackendPreference::Cpu,
+        // Config validation only accepts `cuda` or `cpu`; treating any
+        // unexpected persisted value as CUDA preserves the safe default while
+        // still allowing the runtime's documented CPU fallback.
+        _ => BackendPreference::Cuda,
+    }
+}
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
@@ -32,14 +51,34 @@ struct VersionedConfig<'a> {
     config: &'a lime_protocol::Config,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PersistedModelPresets {
+    Versioned {
+        version: u32,
+        presets: Vec<ModelPreset>,
+    },
+    Legacy(Vec<ModelPreset>),
+}
+
+#[derive(serde::Serialize)]
+struct VersionedModelPresets<'a> {
+    version: u32,
+    presets: &'a [ModelPreset],
+}
+
 #[derive(Clone)]
 pub struct CoreService {
     config: Arc<Mutex<ConfigStore>>,
     engine: Arc<Mutex<RimeEngine>>,
     model: Arc<Mutex<Option<LlamaRuntime>>>,
+    model_load: Arc<Mutex<()>>,
     generation: Arc<GenerationTracker>,
     data_dir: Option<PathBuf>,
     logger: Arc<PrivacyLogger>,
+    history: Arc<Mutex<Vec<InputHistoryEntry>>>,
+    history_clock: Arc<AtomicU64>,
+    model_presets: Arc<Mutex<BTreeMap<String, ModelPreset>>>,
 }
 
 impl Default for CoreService {
@@ -50,27 +89,105 @@ impl Default for CoreService {
 
 impl CoreService {
     pub fn new(data_dir: Option<PathBuf>) -> Self {
-        let mut engine = RimeEngine::new();
+        Self::new_with_rime_dir(data_dir, None)
+    }
+
+    pub fn new_with_rime_dir(data_dir: Option<PathBuf>, rime_dir: Option<PathBuf>) -> Self {
+        let schema_override = std::env::var("LIME_RIME_SCHEMA")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        Self::new_with_rime_dir_and_schema_override(data_dir, rime_dir, schema_override)
+    }
+
+    fn new_with_rime_dir_and_schema_override(
+        data_dir: Option<PathBuf>,
+        rime_dir: Option<PathBuf>,
+        schema_override: Option<String>,
+    ) -> Self {
         if let Some(dir) = &data_dir {
             let _ = fs::create_dir_all(dir);
-            if let Ok(bytes) = fs::read(dir.join("dictionary.json")) {
-                if let Ok(entries) = serde_json::from_slice::<Vec<DictionaryEntry>>(&bytes) {
-                    let _ = engine.import_dictionary(&entries);
-                }
-            }
         }
-        let config = data_dir
+        let logger = Arc::new(PrivacyLogger::new(data_dir.clone(), false));
+        let stored_config = data_dir
             .as_deref()
             .and_then(load_config)
             .and_then(|value| ConfigStore::from_config(value).ok())
             .unwrap_or_default();
+        // The environment override is an effective startup setting. Reflect it in the
+        // revisioned config snapshot as well as in the native session, otherwise GetStatus/GetConfig
+        // report a schema different from the one actually used by librime. Invalid overrides are
+        // ignored and leave the persisted, validated configuration active.
+        let config = if let Some(schema) = schema_override {
+            let mut effective = stored_config.snapshot().config;
+            effective.rime_schema = schema;
+            match ConfigStore::from_config(effective) {
+                Ok(config) => config,
+                Err(_) => {
+                    logger.event(
+                        "config_validation_failed",
+                        Some(ErrorCode::ConfigValidationFailed),
+                    );
+                    stored_config
+                }
+            }
+        } else {
+            stored_config
+        };
+        let configured_schema = config.snapshot().config.rime_schema.clone();
+        let engine = match rime_dir {
+            Some(path) => {
+                let result = if let Some(data_dir) = &data_dir {
+                    RimeEngine::with_resource_dir_and_user_dir_and_schema(
+                        &path,
+                        data_dir.join("rime-user"),
+                        &configured_schema,
+                    )
+                } else {
+                    RimeEngine::with_resource_dir_and_schema(&path, &configured_schema)
+                };
+                match result {
+                    Ok(engine) => engine,
+                    Err(error) => {
+                        logger.event("rime_initialization_failed", Some(error.code));
+                        eprintln!(
+                            "librime initialization failed for {}: {}",
+                            path.display(),
+                            error
+                        );
+                        RimeEngine::new()
+                    }
+                }
+            }
+            None => {
+                logger.event(
+                    "rime_initialization_failed",
+                    Some(ErrorCode::RimeInitializationFailed),
+                );
+                RimeEngine::new()
+            }
+        };
+        let model_presets = data_dir
+            .as_deref()
+            .and_then(load_model_presets)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut preset| {
+                // `loaded` is a runtime status bit and must never survive a service restart.
+                preset.loaded = false;
+                (preset.name.clone(), preset)
+            })
+            .collect::<BTreeMap<_, _>>();
         Self {
             config: Arc::new(Mutex::new(config)),
             engine: Arc::new(Mutex::new(engine)),
             model: Arc::new(Mutex::new(None)),
+            model_load: Arc::new(Mutex::new(())),
             generation: Arc::new(GenerationTracker::default()),
             data_dir: data_dir.clone(),
-            logger: Arc::new(PrivacyLogger::new(data_dir.clone(), false)),
+            logger,
+            history: Arc::new(Mutex::new(Vec::new())),
+            history_clock: Arc::new(AtomicU64::new(now_unix_ms())),
+            model_presets: Arc::new(Mutex::new(model_presets)),
         }
     }
 
@@ -103,9 +220,35 @@ impl CoreService {
                     let before = store.snapshot();
                     match store.replace(config) {
                         Ok(snapshot) => {
-                            if self.persist_config(&snapshot.config).is_ok() {
+                            let schema_changed =
+                                before.config.rime_schema != snapshot.config.rime_schema;
+                            let schema_result = if schema_changed {
+                                let mut engine = self.engine.lock().expect("engine mutex poisoned");
+                                if engine.is_available() {
+                                    engine
+                                        .select_schema(&snapshot.config.rime_schema)
+                                        .map_err(|error| error.code)
+                                } else {
+                                    // Defer applying the schema until the native runtime is
+                                    // available; configuration remains the source of truth.
+                                    Ok(())
+                                }
+                            } else {
+                                Ok(())
+                            };
+                            if let Err(code) = schema_result {
+                                store.restore(before);
+                                Err(code)
+                            } else if self.persist_config(&snapshot.config).is_ok() {
                                 Ok(snapshot)
                             } else {
+                                if schema_changed {
+                                    let mut engine =
+                                        self.engine.lock().expect("engine mutex poisoned");
+                                    if engine.is_available() {
+                                        let _ = engine.select_schema(&before.config.rime_schema);
+                                    }
+                                }
                                 store.restore(before);
                                 Err(ErrorCode::Internal)
                             }
@@ -124,6 +267,15 @@ impl CoreService {
                             code: ErrorCode::ConfigValidationFailed,
                         }
                     }
+                    Err(ErrorCode::RimeInitializationFailed) => {
+                        self.logger.event(
+                            "rime_schema_change_failed",
+                            Some(ErrorCode::RimeInitializationFailed),
+                        );
+                        Response::Error {
+                            code: ErrorCode::RimeInitializationFailed,
+                        }
+                    }
                     Err(code) => {
                         self.logger.event("config_persist_failed", Some(code));
                         Response::Error { code }
@@ -133,36 +285,51 @@ impl CoreService {
             Request::GetStatus => Response::Status(self.status()),
             Request::LoadModel { path } => self.load_model(Path::new(&path)),
             Request::UnloadModel => {
+                let _load_guard = self.model_load.lock().expect("model load mutex poisoned");
                 *self.model.lock().expect("model mutex poisoned") = None;
+                self.mark_loaded_preset(None);
                 Response::Accepted
             }
+            Request::ListModelPresets => Response::ModelPresets(self.model_presets()),
+            Request::SaveModelPreset { name, path } => {
+                self.save_model_preset(&name, Path::new(&path))
+            }
+            Request::DeleteModelPreset { name } => self.delete_model_preset(&name),
+            Request::SelectModelPreset { name } => self.select_model_preset(&name),
             Request::Learn { pinyin, text } => self.learn(&pinyin, &text),
-            Request::ExportDictionary => Response::Dictionary(
-                self.engine
-                    .lock()
-                    .expect("engine mutex poisoned")
-                    .export_dictionary(),
-            ),
+            Request::ExportDictionary => match self
+                .engine
+                .lock()
+                .expect("engine mutex poisoned")
+                .export_dictionary()
+            {
+                Ok(entries) => Response::Dictionary(entries),
+                Err(error) => Response::Error { code: error.code },
+            },
             Request::ImportDictionary { entries } => match self
                 .engine
                 .lock()
                 .expect("engine mutex poisoned")
                 .import_dictionary(&entries)
             {
-                Ok(()) => {
-                    let _ = self.persist_dictionary();
-                    Response::Accepted
-                }
-                Err(_) => Response::Error {
-                    code: ErrorCode::InvalidRequest,
-                },
+                Ok(()) => Response::Accepted,
+                Err(error) => Response::Error { code: error.code },
             },
-            Request::ClearDictionary => {
-                self.engine
-                    .lock()
-                    .expect("engine mutex poisoned")
-                    .clear_dictionary();
-                let _ = self.persist_dictionary();
+            Request::ClearDictionary => match self
+                .engine
+                .lock()
+                .expect("engine mutex poisoned")
+                .clear_dictionary()
+            {
+                Ok(()) => Response::Accepted,
+                Err(error) => Response::Error { code: error.code },
+            },
+            Request::GetInputHistory => Response::InputHistory(self.history_snapshot()),
+            Request::GetInputHistoryPage { page, page_size } => {
+                Response::InputHistoryPage(self.history_page(page, page_size))
+            }
+            Request::ClearInputHistory => {
+                self.history.lock().expect("history mutex poisoned").clear();
                 Response::Accepted
             }
         }
@@ -171,35 +338,83 @@ impl CoreService {
     fn input(&self, request: InputRequest) -> Result<InputResponse, ErrorCode> {
         let snapshot = self.config_snapshot();
         if request.config_revision != snapshot.revision {
+            self.record_input_history(
+                &request,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                self.current_service_state(),
+            );
             return Err(ErrorCode::RequestCancelled);
         }
         let generation = self.generation.next();
-        let mut candidates = self
-            .engine
-            .lock()
-            .map_err(|_| ErrorCode::Internal)?
-            .candidates(&request.preedit)
-            .map_err(|_| ErrorCode::RimeInitializationFailed)?;
         let config = snapshot.config;
-        let preceding_text = truncate_chars(
-            &request.preceding_text,
-            config.preceding_text_char_limit as usize,
-        );
         let model = self.model.lock().map_err(|_| ErrorCode::Internal)?;
+        let runtime = if config.llm_enabled {
+            model.as_ref()
+        } else {
+            None
+        };
         let service_state = if model.is_some() {
             ServiceState::Ready
         } else {
             ServiceState::RimeOnly
         };
-        if config.llm_enabled {
-            candidates = rerank_candidates(
-                &candidates,
-                &preceding_text,
-                model.as_ref(),
-                config.llm_rerank_count as usize,
-                config.llm_effective_count as usize,
-            );
-        }
+        let rime_result = self
+            .engine
+            .lock()
+            .map_err(|_| ErrorCode::Internal)
+            .and_then(|mut engine| {
+                engine
+                    .candidates_for_rerank(
+                        &request.preedit,
+                        runtime.map_or(0, |_| config.llm_rerank_count as usize),
+                    )
+                    .map_err(|error| error.code)
+            });
+        let rime_batch = match rime_result {
+            Ok(batch) => batch,
+            Err(code) => {
+                self.record_input_history(
+                    &request,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    service_state,
+                );
+                return Err(code);
+            }
+        };
+        let rime_candidates = rime_batch.candidates;
+        let preceding_text = truncate_chars(
+            &request.preceding_text,
+            config.preceding_text_char_limit as usize,
+        );
+        let ranking = match try_rerank_selected_candidates_with_diagnostics(
+            &rime_candidates,
+            &rime_batch.complete_candidate_indices,
+            &preceding_text,
+            runtime,
+            config.llm_rerank_count as usize,
+            config.llm_effective_count as usize,
+        ) {
+            Ok(ranking) => ranking,
+            Err(error) => {
+                self.logger
+                    .event("llama_rerank_failed", Some(ErrorCode::ModelLoadFailed));
+                eprintln!("llama.cpp rerank failed: {error}");
+                return Err(ErrorCode::ModelLoadFailed);
+            }
+        };
+        let candidates = ranking.candidates;
+        let diagnostics = ranking.diagnostics;
+        self.record_input_history(
+            &request,
+            rime_candidates,
+            candidates.clone(),
+            diagnostics.clone(),
+            service_state,
+        );
         if !self.generation.is_current(generation) {
             return Err(ErrorCode::RequestCancelled);
         }
@@ -208,13 +423,38 @@ impl CoreService {
             candidates,
             context_used: request.context_available && !request.preceding_text.is_empty(),
             service_state,
+            diagnostics,
         })
     }
 
     fn load_model(&self, path: &Path) -> Response {
-        match LlamaRuntime::load(path.to_path_buf()) {
+        // Loading a native runtime mutates process-global llama.cpp state and
+        // the Windows DLL search path. Serialize the whole load/replace
+        // operation while leaving inference protected by the model mutex.
+        let _load_guard = self.model_load.lock().expect("model load mutex poisoned");
+        let (context_tokens, backend_preference) = self
+            .config
+            .lock()
+            .map(|config| {
+                let snapshot = config.snapshot();
+                (
+                    snapshot.config.llm_context_token_limit as usize,
+                    backend_preference_for(&snapshot.config.llm_backend),
+                )
+            })
+            .unwrap_or((
+                crate::llama::DEFAULT_CONTEXT_TOKENS,
+                BackendPreference::Cuda,
+            ));
+        match LlamaRuntime::load_with_backend_preference(
+            path.to_path_buf(),
+            context_tokens,
+            backend_preference,
+        ) {
             Ok(model) => {
+                let loaded_path = model.path.clone();
                 *self.model.lock().expect("model mutex poisoned") = Some(model);
+                self.mark_loaded_preset(Some(&loaded_path));
                 Response::Accepted
             }
             Err(_) => {
@@ -236,6 +476,181 @@ impl CoreService {
             }
         }
     }
+
+    fn model_presets(&self) -> Vec<ModelPreset> {
+        let loaded_path = self
+            .model
+            .lock()
+            .expect("model mutex poisoned")
+            .as_ref()
+            .map(|model| normalize_path_string(&model.path));
+        let mut presets = self
+            .model_presets
+            .lock()
+            .expect("model presets mutex poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for preset in &mut presets {
+            preset.loaded = loaded_path
+                .as_deref()
+                .is_some_and(|path| path == preset.path);
+        }
+        presets
+    }
+
+    fn mark_loaded_preset(&self, path: Option<&Path>) {
+        let normalized = path.map(normalize_path_string);
+        let mut presets = self
+            .model_presets
+            .lock()
+            .expect("model presets mutex poisoned");
+        for preset in presets.values_mut() {
+            preset.loaded = normalized
+                .as_deref()
+                .is_some_and(|value| value == preset.path);
+        }
+    }
+
+    fn save_model_preset(&self, name: &str, path: &Path) -> Response {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 128 || name.contains('\0') {
+            return Response::Error {
+                code: ErrorCode::InvalidRequest,
+            };
+        }
+        let metadata = match LlamaRuntime::inspect_gguf(path.to_path_buf()) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                let code = if path.exists() {
+                    ErrorCode::ModelLoadFailed
+                } else {
+                    ErrorCode::ModelNotFound
+                };
+                self.logger.event("model_preset_save_failed", Some(code));
+                return Response::Error { code };
+            }
+        };
+        let normalized_path = normalize_path_string(path);
+        let loaded = self
+            .model
+            .lock()
+            .expect("model mutex poisoned")
+            .as_ref()
+            .map(|current| normalize_path_string(&current.path))
+            .is_some_and(|current| current == normalized_path);
+        let preset = ModelPreset {
+            name: name.to_owned(),
+            path: normalized_path,
+            size_bytes: Some(metadata.size_bytes),
+            sha256: Some(metadata.sha256),
+            loaded,
+        };
+        let mut presets = self
+            .model_presets
+            .lock()
+            .expect("model presets mutex poisoned");
+        let previous = presets.insert(name.to_owned(), preset.clone());
+        if self.persist_model_presets_locked(&presets).is_err() {
+            if let Some(previous) = previous {
+                presets.insert(name.to_owned(), previous);
+            } else {
+                presets.remove(name);
+            }
+            return Response::Error {
+                code: ErrorCode::Internal,
+            };
+        }
+        Response::ModelPreset(preset)
+    }
+
+    fn delete_model_preset(&self, name: &str) -> Response {
+        let name = name.trim();
+        if name.is_empty() {
+            return Response::Error {
+                code: ErrorCode::InvalidRequest,
+            };
+        }
+        let mut presets = self
+            .model_presets
+            .lock()
+            .expect("model presets mutex poisoned");
+        let Some(removed) = presets.remove(name) else {
+            return Response::Error {
+                code: ErrorCode::ModelNotFound,
+            };
+        };
+        if self.persist_model_presets_locked(&presets).is_err() {
+            presets.insert(name.to_owned(), removed);
+            return Response::Error {
+                code: ErrorCode::Internal,
+            };
+        }
+        Response::Accepted
+    }
+
+    fn select_model_preset(&self, name: &str) -> Response {
+        let _load_guard = self.model_load.lock().expect("model load mutex poisoned");
+        let name = name.trim();
+        if name.is_empty() {
+            return Response::Error {
+                code: ErrorCode::InvalidRequest,
+            };
+        }
+        let preset = {
+            let presets = self
+                .model_presets
+                .lock()
+                .expect("model presets mutex poisoned");
+            presets.get(name).cloned()
+        };
+        let Some(preset) = preset else {
+            return Response::Error {
+                code: ErrorCode::ModelNotFound,
+            };
+        };
+        let (context_tokens, backend_preference) = self
+            .config
+            .lock()
+            .map(|config| {
+                let snapshot = config.snapshot();
+                (
+                    snapshot.config.llm_context_token_limit as usize,
+                    backend_preference_for(&snapshot.config.llm_backend),
+                )
+            })
+            .unwrap_or((
+                crate::llama::DEFAULT_CONTEXT_TOKENS,
+                BackendPreference::Cuda,
+            ));
+        match LlamaRuntime::load_with_backend_preference(
+            PathBuf::from(&preset.path),
+            context_tokens,
+            backend_preference,
+        ) {
+            Ok(model) => {
+                let loaded_path = model.path.clone();
+                *self.model.lock().expect("model mutex poisoned") = Some(model);
+                self.mark_loaded_preset(Some(&loaded_path));
+                Response::ModelPreset(
+                    self.model_presets()
+                        .into_iter()
+                        .find(|item| item.name == name)
+                        .unwrap_or(preset),
+                )
+            }
+            Err(_) => {
+                let code = if Path::new(&preset.path).exists() {
+                    ErrorCode::ModelLoadFailed
+                } else {
+                    ErrorCode::ModelNotFound
+                };
+                self.logger.event("model_preset_select_failed", Some(code));
+                Response::Error { code }
+            }
+        }
+    }
+
     fn learn(&self, pinyin: &str, text: &str) -> Response {
         match self
             .engine
@@ -243,22 +658,28 @@ impl CoreService {
             .expect("engine mutex poisoned")
             .learn(pinyin, text)
         {
-            Ok(()) => {
-                let _ = self.persist_dictionary();
-                Response::Accepted
-            }
+            Ok(()) => Response::Accepted,
             Err(error) => Response::Error { code: error.code },
         }
     }
     fn status(&self) -> ServiceStatus {
+        let (rime_available, active_schema) = {
+            let engine = self.engine.lock().expect("engine mutex poisoned");
+            (
+                engine.is_available(),
+                engine.active_schema().map(str::to_owned),
+            )
+        };
         let model = self.model.lock().expect("model mutex poisoned");
+        let mut config = self.config_snapshot();
+        // Keep status truthful even if a schema was selected through a native session
+        // operation rather than through the persisted config path.
+        if let Some(schema) = active_schema {
+            config.config.rime_schema = schema;
+        }
         ServiceStatus {
-            state: if model.is_some() {
-                ServiceState::Ready
-            } else {
-                ServiceState::RimeOnly
-            },
-            config: self.config_snapshot(),
+            state: service_state(rime_available, model.is_some()),
+            config,
             model: model
                 .as_ref()
                 .map(|item| ModelInfo {
@@ -275,23 +696,116 @@ impl CoreService {
                 }),
         }
     }
-    fn persist_dictionary(&self) -> Result<(), std::io::Error> {
+
+    fn current_service_state(&self) -> ServiceState {
+        let rime_available = self
+            .engine
+            .lock()
+            .expect("engine mutex poisoned")
+            .is_available();
+        let model_loaded = self.model.lock().expect("model mutex poisoned").is_some();
+        service_state(rime_available, model_loaded)
+    }
+
+    fn history_snapshot(&self) -> Vec<InputHistoryEntry> {
+        let mut entries = self.history.lock().expect("history mutex poisoned").clone();
+        // Newest first. `request_id` remains a wire-compatibility field, but never participates
+        // in history ordering.
+        entries.sort_by_key(|entry| Reverse(entry.timestamp_ms));
+        entries
+    }
+
+    fn history_page(&self, page: u32, page_size: u32) -> InputHistoryPage {
+        let entries = self.history_snapshot();
+        let total = entries.len() as u64;
+        let page = page.max(1);
+        let page_size = if page_size == 0 {
+            INPUT_HISTORY_PAGE_SIZE
+        } else {
+            page_size.clamp(1, INPUT_HISTORY_PAGE_SIZE)
+        };
+        let start = (u64::from(page - 1) * u64::from(page_size)) as usize;
+        let items = entries
+            .into_iter()
+            .skip(start)
+            .take(page_size as usize)
+            .collect();
+        InputHistoryPage {
+            items,
+            total,
+            page,
+            page_size,
+        }
+    }
+
+    fn record_input_history(
+        &self,
+        request: &InputRequest,
+        rime_candidates: Vec<lime_protocol::Candidate>,
+        final_candidates: Vec<lime_protocol::Candidate>,
+        diagnostics: Vec<CandidateDiagnostic>,
+        service_state: ServiceState,
+    ) {
+        let timestamp_ms = self.next_timestamp_ms();
+        self.history
+            .lock()
+            .expect("history mutex poisoned")
+            .push(InputHistoryEntry {
+                request_id: request.request_id,
+                timestamp_ms,
+                preceding_text: request.preceding_text.clone(),
+                preedit: request.preedit.clone(),
+                rime_candidates,
+                final_candidates,
+                service_state,
+                diagnostics,
+            });
+    }
+
+    fn next_timestamp_ms(&self) -> u64 {
+        let now = now_unix_ms();
+        let mut previous = self.history_clock.load(Ordering::Acquire);
+        loop {
+            let next = now.max(previous.saturating_add(1));
+            match self.history_clock.compare_exchange(
+                previous,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return next,
+                Err(observed) => previous = observed,
+            }
+        }
+    }
+
+    fn persist_model_presets_locked(
+        &self,
+        presets: &BTreeMap<String, ModelPreset>,
+    ) -> Result<(), std::io::Error> {
         let Some(dir) = &self.data_dir else {
             return Ok(());
         };
         fs::create_dir_all(dir)?;
-        let target = dir.join("dictionary.json");
-        let temp = dir.join("dictionary.json.tmp");
-        let bytes = serde_json::to_vec_pretty(
-            &self
-                .engine
-                .lock()
-                .expect("engine mutex poisoned")
-                .export_dictionary(),
-        )
+        let target = dir.join("model-presets.json");
+        let temp = dir.join("model-presets.json.tmp");
+        let values = presets.values().cloned().collect::<Vec<_>>();
+        let bytes = serde_json::to_vec_pretty(&VersionedModelPresets {
+            version: MODEL_PRESETS_FILE_VERSION,
+            presets: &values,
+        })
         .map_err(std::io::Error::other)?;
         fs::write(&temp, bytes)?;
-        fs::rename(temp, target)
+        match fs::rename(&temp, &target) {
+            Ok(()) => Ok(()),
+            Err(_error) if target.exists() => {
+                // Windows does not replace an existing file with rename(2).  Remove only the
+                // exact managed target, then complete the atomic-ish temp-file replacement.
+                fs::remove_file(&target)?;
+                fs::rename(temp, target)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn persist_config(&self, config: &lime_protocol::Config) -> Result<(), std::io::Error> {
@@ -315,10 +829,60 @@ fn load_config(path: &Path) -> Option<lime_protocol::Config> {
     let bytes = fs::read(path.join("config.json")).ok()?;
     match serde_json::from_slice::<PersistedConfig>(&bytes).ok()? {
         PersistedConfig::Versioned { version, config } if version == CONFIG_FILE_VERSION => {
-            Some(config)
+            Some(migrate_persisted_config(config))
         }
         PersistedConfig::Versioned { .. } => None,
-        PersistedConfig::Legacy(config) => Some(config),
+        PersistedConfig::Legacy(config) => Some(migrate_persisted_config(config)),
+    }
+}
+
+/// Normalize backend names written by pre-CUDA builds before validating the rest of the
+/// persisted configuration.  In particular, an older `auto` value means "prefer acceleration"
+/// and must become the new CUDA default without discarding unrelated user settings.
+fn migrate_persisted_config(mut config: lime_protocol::Config) -> lime_protocol::Config {
+    match config.llm_backend.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "default" | "cuda" => {
+            config.llm_backend = lime_protocol::DEFAULT_LLM_BACKEND.to_owned();
+        }
+        "cpu" => {
+            config.llm_backend = "cpu".to_owned();
+        }
+        _ => {}
+    }
+    config
+}
+
+fn load_model_presets(path: &Path) -> Option<Vec<ModelPreset>> {
+    let bytes = fs::read(path.join("model-presets.json")).ok()?;
+    match serde_json::from_slice::<PersistedModelPresets>(&bytes).ok()? {
+        PersistedModelPresets::Versioned { version, presets }
+            if version == MODEL_PRESETS_FILE_VERSION =>
+        {
+            Some(presets)
+        }
+        PersistedModelPresets::Versioned { .. } => None,
+        PersistedModelPresets::Legacy(presets) => Some(presets),
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn normalize_path_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn service_state(rime_available: bool, model_loaded: bool) -> ServiceState {
+    if !rime_available {
+        ServiceState::Unavailable
+    } else if model_loaded {
+        ServiceState::Ready
+    } else {
+        ServiceState::RimeOnly
     }
 }
 
@@ -362,8 +926,12 @@ mod tests {
     use lime_protocol::Config;
 
     #[test]
-    fn service_starts_in_rime_only() {
+    fn service_without_packaged_rime_is_unavailable() {
         let service = CoreService::default();
+        match service.handle(Request::GetStatus) {
+            Response::Status(status) => assert_eq!(status.state, ServiceState::Unavailable),
+            _ => panic!("unexpected status response"),
+        }
         let response = service.handle(Request::Input(InputRequest {
             request_id: 1,
             preedit: "nihao".into(),
@@ -371,13 +939,166 @@ mod tests {
             context_available: false,
             config_revision: 0,
         }));
-        match response {
-            Response::Input(value) => {
-                assert_eq!(value.service_state, ServiceState::RimeOnly);
-                assert!(!value.candidates.is_empty());
+        assert_eq!(
+            response,
+            Response::Error {
+                code: ErrorCode::RimeInitializationFailed
             }
-            _ => panic!("unexpected response"),
+        );
+        match service.handle(Request::GetInputHistory) {
+            Response::InputHistory(history) => {
+                assert_eq!(history.len(), 1);
+                assert_eq!(history[0].preedit, "nihao");
+                assert!(history[0].rime_candidates.is_empty());
+            }
+            _ => panic!("unexpected history response"),
         }
+    }
+
+    #[test]
+    fn history_is_newest_first_and_page_size_is_bounded_to_one_hundred() {
+        let service = CoreService::default();
+        for request_id in 1..=105 {
+            let response = service.handle(Request::Input(InputRequest {
+                request_id,
+                preedit: format!("p{request_id}"),
+                preceding_text: String::new(),
+                context_available: false,
+                config_revision: 0,
+            }));
+            assert!(matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::RimeInitializationFailed
+                }
+            ));
+        }
+        let page = match service.handle(Request::GetInputHistoryPage {
+            page: 1,
+            page_size: 500,
+        }) {
+            Response::InputHistoryPage(page) => page,
+            other => panic!("unexpected history page response: {other:?}"),
+        };
+        assert_eq!(page.page, 1);
+        assert_eq!(page.page_size, INPUT_HISTORY_PAGE_SIZE);
+        assert_eq!(page.total, 105);
+        assert_eq!(page.items.len(), 100);
+        assert_eq!(page.items[0].request_id, 105);
+        assert!(page
+            .items
+            .windows(2)
+            .all(|rows| rows[0].timestamp_ms > rows[1].timestamp_ms));
+        let second = match service.handle(Request::GetInputHistoryPage {
+            page: 2,
+            page_size: INPUT_HISTORY_PAGE_SIZE,
+        }) {
+            Response::InputHistoryPage(page) => page,
+            other => panic!("unexpected history page response: {other:?}"),
+        };
+        assert_eq!(second.items.len(), 5);
+        assert_eq!(second.items[0].request_id, 5);
+    }
+
+    #[test]
+    fn model_presets_save_metadata_and_reject_unloadable_activation() {
+        let directory = std::env::temp_dir().join(format!(
+            "lime-core-model-preset-test-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let model_path = directory.join("demo.gguf");
+        fs::write(&model_path, b"GGUF-test-model").unwrap();
+        let service = CoreService::new(Some(directory.clone()));
+
+        let saved = match service.handle(Request::SaveModelPreset {
+            name: "demo".into(),
+            path: model_path.to_string_lossy().into_owned(),
+        }) {
+            Response::ModelPreset(preset) => preset,
+            other => panic!("unexpected save response: {other:?}"),
+        };
+        assert_eq!(saved.name, "demo");
+        assert!(!saved.loaded);
+        // Saving the same name updates the preset in place rather than creating duplicates.
+        let updated = match service.handle(Request::SaveModelPreset {
+            name: "demo".into(),
+            path: model_path.to_string_lossy().into_owned(),
+        }) {
+            Response::ModelPreset(preset) => preset,
+            other => panic!("unexpected update response: {other:?}"),
+        };
+        assert_eq!(updated.name, "demo");
+        assert!(matches!(
+            service.handle(Request::ListModelPresets),
+            Response::ModelPresets(presets) if presets.len() == 1
+        ));
+        // A four-byte test file is sufficient to exercise metadata persistence, but it is not a
+        // loadable GGUF model.  Activation must therefore fail clearly and leave the current
+        // model untouched instead of pretending that validation alone loaded the model.
+        assert_eq!(
+            service.handle(Request::SelectModelPreset {
+                name: "demo".into(),
+            }),
+            Response::Error {
+                code: ErrorCode::ModelLoadFailed
+            }
+        );
+        match service.handle(Request::GetStatus) {
+            Response::Status(status) => {
+                assert!(!status.model.loaded);
+                assert!(status.model.path.is_none());
+            }
+            other => panic!("unexpected status response: {other:?}"),
+        }
+        assert_eq!(
+            service.handle(Request::DeleteModelPreset {
+                name: "demo".into()
+            }),
+            Response::Accepted
+        );
+        let restarted = CoreService::new(Some(directory.clone()));
+        match restarted.handle(Request::ListModelPresets) {
+            Response::ModelPresets(presets) => assert!(presets.is_empty()),
+            other => panic!("unexpected restarted preset response: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn schema_override_is_reflected_in_config_and_status() {
+        let service = CoreService::new_with_rime_dir_and_schema_override(
+            None,
+            None,
+            Some("double_pinyin_flypy".to_owned()),
+        );
+        assert_eq!(
+            service.config_snapshot().config.rime_schema,
+            "double_pinyin_flypy"
+        );
+        match service.handle(Request::GetStatus) {
+            Response::Status(status) => {
+                assert_eq!(status.config.config.rime_schema, "double_pinyin_flypy");
+                assert_eq!(status.state, ServiceState::Unavailable);
+            }
+            _ => panic!("unexpected status response"),
+        }
+    }
+
+    #[test]
+    fn learn_request_propagates_native_unavailable_error() {
+        let service = CoreService::default();
+        assert_eq!(
+            service.handle(Request::Learn {
+                pinyin: "nihao".into(),
+                text: "你好".into(),
+            }),
+            Response::Error {
+                code: ErrorCode::RimeInitializationFailed,
+            }
+        );
     }
 
     #[test]
@@ -422,6 +1143,7 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         let service = CoreService::new(Some(directory.clone()));
         let config = Config {
+            rime_schema: "double_pinyin_flypy".into(),
             page_size: 12,
             ..Config::default()
         };
@@ -431,6 +1153,10 @@ mod tests {
         ));
         let restarted = CoreService::new(Some(directory.clone()));
         assert_eq!(restarted.config_snapshot().config.page_size, 12);
+        assert_eq!(
+            restarted.config_snapshot().config.rime_schema,
+            "double_pinyin_flypy"
+        );
 
         fs::write(
             directory.join("config.json"),
@@ -443,6 +1169,94 @@ mod tests {
         .unwrap();
         let migrated = CoreService::new(Some(directory.clone()));
         assert_eq!(migrated.config_snapshot().config.page_size, 7);
+
+        // `auto` was accepted by the pre-CUDA runtime policy.  It must migrate to the new CUDA
+        // default without throwing away unrelated settings from the same config file.
+        let mut legacy_backend_config = Config {
+            page_size: 13,
+            ..Config::default()
+        };
+        legacy_backend_config.llm_backend = "auto".into();
+        fs::write(
+            directory.join("config.json"),
+            serde_json::to_vec(&legacy_backend_config).unwrap(),
+        )
+        .unwrap();
+        let migrated_backend = CoreService::new(Some(directory.clone()));
+        assert_eq!(migrated_backend.config_snapshot().config.page_size, 13);
+        assert_eq!(
+            migrated_backend.config_snapshot().config.llm_backend,
+            lime_protocol::DEFAULT_LLM_BACKEND
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn native_schema_config_change_reloads_the_librime_session_when_requested() {
+        let Ok(rime_dir) = std::env::var("LIME_TEST_RIME_DIR") else {
+            return;
+        };
+        if std::env::var_os("LIME_TEST_RIME_SERVICE_SCHEMA").is_none() {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "lime-core-schema-service-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let service =
+            CoreService::new_with_rime_dir(Some(directory.clone()), Some(PathBuf::from(rime_dir)));
+        let mut config = service.config_snapshot().config;
+        config.rime_schema = "double_pinyin_flypy".into();
+        assert!(matches!(
+            service.handle(Request::SetConfig(config)),
+            Response::Config(_)
+        ));
+        let revision = service.config_snapshot().revision;
+        let response = service.handle(Request::Input(InputRequest {
+            request_id: 99,
+            preedit: "nh".into(),
+            preceding_text: String::new(),
+            context_available: false,
+            config_revision: revision,
+        }));
+        match response {
+            Response::Input(value) => assert!(!value.candidates.is_empty()),
+            other => panic!("unexpected schema-switch response: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn native_learn_request_updates_rime_user_dictionary_when_requested() {
+        if std::env::var_os("LIME_TEST_RIME_LEARN_REQUEST").is_none() {
+            return;
+        }
+        let Ok(rime_dir) = std::env::var("LIME_TEST_RIME_DIR") else {
+            return;
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "lime-core-learn-request-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let service =
+            CoreService::new_with_rime_dir(Some(directory.clone()), Some(PathBuf::from(rime_dir)));
+        assert_eq!(service.handle(Request::ClearDictionary), Response::Accepted);
+        assert_eq!(
+            service.handle(Request::Learn {
+                pinyin: "nihao".into(),
+                text: "拟好".into(),
+            }),
+            Response::Accepted
+        );
+        match service.handle(Request::ExportDictionary) {
+            Response::Dictionary(entries) => assert!(entries.iter().any(|entry| {
+                entry.pinyin == "nihao" && entry.text == "拟好" && entry.weight >= 1
+            })),
+            other => panic!("unexpected dictionary response: {other:?}"),
+        }
+        assert_eq!(service.handle(Request::ClearDictionary), Response::Accepted);
         let _ = fs::remove_dir_all(directory);
     }
 }

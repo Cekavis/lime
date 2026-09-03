@@ -8,6 +8,8 @@ description = "Configuration and service-domain primitives for Lime"
 
 [dependencies]
 lime-protocol = { path = "../lime-protocol" }
+llama-cpp-v3 = { path = "../../third_party/llama-cpp-v3" }
+llama-cpp-sys-v3 = { path = "../../third_party/llama-cpp-sys-v3" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

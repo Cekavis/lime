@@ -1,6 +1,6 @@
 # Phase 2 实现记录
 
-日期：2026-08-30
+日期：2026-08-31
 
 ## 目标
 
@@ -9,11 +9,11 @@
 ## 已落地
 
 - `platform/windows/tsf/lime_tsf.cpp` 重组 context probe 的 TSF 注册、COM class factory、`ITfTextInputProcessorEx` 和 `ITfKeyEventSink` 实现。
-- 通过 `ITfContextComposition` 管理组合串；字母键更新 preedit，退格/ESC 清理，回车、空格和数字键提交候选或原始拼音。
+- 通过 `ITfContextComposition` 管理组合串；字母键更新宿主中的未确认 preedit，退格/ESC 清理，空格和数字键提交候选，回车提交当前英文 preedit 原文。取消先删除组合范围并把光标留在组合末端。
 - 使用 `ITfRangeACP` 优先读取光标前最多 128 个 UTF-16 单元，失败时回退到 anchor shifting；读取结果只在输入请求中传给 Rust 服务。
 - 增加 4 字节 little-endian 长度前缀 + UTF-8 JSON Named Pipe 客户端，连接后执行 protocol v1 握手；支持 `LIME_PIPE` 覆盖管道名。
 - 首次连接失败时可通过 `LIME_SERVICE_PATH` 启动本地 `lime-service`，随后自动重试；连接/握手/解析失败立即清除候选并让按键透传。
-- 增加原生 Win32 popup 候选窗，显示 1-9 编号、当前选中项和分页结果；PageUp/PageDown 翻页，候选窗不依赖 Tauri。
+- 增加原生 Win32 popup 候选窗，显示 1-9 编号、当前选中项和分页结果；宿主光标矩形从客户区坐标转为屏幕坐标后定位 popup；PageUp/PageDown、Rime 默认 `-`/`=` 及 Weasel 滚轮翻页，候选窗不依赖 Tauri。候选窗只显示前文 auxiliary 行和候选，不重复显示宿主中的拼音。
 - 连接成功后读取 `get_status` 的配置 revision；输入请求携带最新 revision，服务配置更新导致的过期响应不会覆盖当前候选。
 - 保留敏感控件不做特殊处理的首期决策；不记录原始前文、preedit 或候选分数。
 
@@ -35,4 +35,4 @@ cmake --build build/tsf --config Release
 
 产物：`build/tsf/Release/lime-tsf.dll`。
 
-由于当前仓库没有签名安装包、librime/Rime 资源或可自动化的真实编辑器宿主，TSF 注册、候选定位、高 DPI 和真实文本控件兼容性仍需在 Phase 4 的 Windows 验收矩阵中执行。
+由于当前仓库尚无签名安装包或可自动化的真实编辑器宿主，且原生 librime DLL 需由发布构建提供，TSF 注册、候选定位、高 DPI 和真实文本控件兼容性仍需在 Phase 4 的 Windows 验收矩阵中执行。

@@ -24,12 +24,13 @@
     "input_response": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["request_id", "candidates", "context_used", "service_state"],
+      "required": ["request_id", "candidates", "context_used", "service_state", "diagnostics"],
       "properties": {
         "request_id": { "type": "integer", "minimum": 0 },
         "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
         "context_used": { "type": "boolean" },
-        "service_state": { "enum": ["ready", "rime_only", "reloading", "unavailable"] }
+        "service_state": { "enum": ["ready", "rime_only", "reloading", "unavailable"] },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/candidate_diagnostic" } }
       }
     },
     "candidate": {
@@ -41,11 +42,63 @@
         "commit_text": { "type": "string" }
       }
     },
+    "candidate_diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rank", "rime_candidate", "llm_candidate", "logprob", "logprobs", "mismatch", "display_candidate"],
+      "properties": {
+        "rank": { "type": "integer", "minimum": 1 },
+        "rime_candidate": { "anyOf": [{ "$ref": "#/$defs/candidate" }, { "type": "null" }] },
+        "llm_candidate": { "anyOf": [{ "$ref": "#/$defs/candidate" }, { "type": "null" }] },
+        "logprob": { "type": "number" },
+        "logprobs": { "type": "array", "items": { "type": "number" } },
+        "mismatch": { "type": "boolean" },
+        "display_candidate": { "anyOf": [{ "$ref": "#/$defs/candidate" }, { "type": "null" }] }
+      }
+    },
+    "input_history_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "timestamp_ms", "preceding_text", "preedit", "rime_candidates", "final_candidates", "service_state", "diagnostics"],
+      "properties": {
+        "request_id": { "type": "integer", "minimum": 0 },
+        "timestamp_ms": { "type": "integer", "minimum": 0 },
+        "preceding_text": { "type": "string" },
+        "preedit": { "type": "string" },
+        "rime_candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
+        "final_candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
+        "service_state": { "enum": ["ready", "rime_only", "reloading", "unavailable"] },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/candidate_diagnostic" } }
+      }
+    },
+    "input_history_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "total", "page", "page_size"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/input_history_entry" } },
+        "total": { "type": "integer", "minimum": 0 },
+        "page": { "type": "integer", "minimum": 1 },
+        "page_size": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "model_preset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "size_bytes", "sha256", "loaded"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "path": { "type": "string", "minLength": 1 },
+        "size_bytes": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "sha256": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "loaded": { "type": "boolean" }
+      }
+    },
     "management_request": {
       "type": "object",
       "required": ["kind"],
       "properties": {
-        "kind": { "enum": ["get_config", "set_config", "get_status", "load_model", "unload_model", "learn", "export_dictionary", "import_dictionary", "clear_dictionary"] },
+        "kind": { "enum": ["get_config", "set_config", "get_status", "load_model", "unload_model", "list_model_presets", "save_model_preset", "delete_model_preset", "select_model_preset", "learn", "export_dictionary", "import_dictionary", "clear_dictionary", "get_input_history", "get_input_history_page", "clear_input_history"] },
         "payload": {}
       },
       "additionalProperties": false
@@ -54,7 +107,7 @@
       "type": "object",
       "required": ["kind"],
       "properties": {
-        "kind": { "enum": ["accepted", "config", "status", "dictionary", "error"] },
+        "kind": { "enum": ["accepted", "config", "status", "model_presets", "model_preset", "dictionary", "input_history", "input_history_page", "error"] },
         "payload": {}
       },
       "additionalProperties": false

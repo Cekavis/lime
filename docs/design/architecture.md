@@ -35,7 +35,7 @@ macOS 未来只替换最上层平台适配器和候选 UI，复用 Rust 服务 A
 1. TSF 接收按键并更新 preedit。
 2. TSF 读取光标前文本，按设置裁剪字符窗口；读取失败按空上下文处理。
 3. TSF 请求 Rust 服务生成候选。
-4. Rust 调用 Rime 获取候选并过滤不能完整覆盖拼音的短候选。
+4. Rust 只调用 librime 获取候选，不自行解析词库、补造候选或按猜测过滤结果。
 5. Rime 候选先返回/显示；若启用 LLM，异步对候选池重排。
 6. Rust 返回新的候选顺序；TSF 仅在 request generation 仍然有效时替换显示。
 7. 用户选择候选后由 TSF 提交 `commit_text`，Rust 可通知 Rime 学习。

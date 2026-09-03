@@ -3,6 +3,7 @@ use lime_protocol::{Request, Response};
 use std::{
     env,
     io::{self, Read, Write},
+    path::PathBuf,
     process::Command,
     thread,
     time::Duration,
@@ -70,13 +71,41 @@ fn connect_once() -> io::Result<Transport> {
     ))
 }
 
+fn service_path() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("LIME_SERVICE_PATH") {
+        return Some(PathBuf::from(path));
+    }
+
+    #[cfg(windows)]
+    {
+        let executable = env::current_exe().ok()?;
+        let directory = executable.parent()?;
+        for candidate in [
+            directory.join("lime-service.exe"),
+            directory.join("resources").join("lime-service.exe"),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
 fn connect_service() -> Result<Transport, String> {
     if let Ok(stream) = connect_once() {
         return Ok(stream);
     }
 
-    if let Some(path) = env::var_os("LIME_SERVICE_PATH") {
-        Command::new(path)
+    if let Some(path) = service_path() {
+        let mut command = Command::new(path);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        command
             .spawn()
             .map_err(|error| format!("unable to start Lime service: {error}"))?;
         for _ in 0..MAX_CONNECT_ATTEMPTS {

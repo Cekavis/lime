@@ -1,7 +1,7 @@
 # Lime 数据契约 schema
 
-- `config.schema.json`：用户设置字段、默认值和 Phase 0 范围。
-- `ipc.schema.json`：生产输入请求/响应的最小字段集合。
+- `config.schema.json`：用户设置字段、默认值和 Phase 0 范围；`llm_backend` 默认使用 CUDA，旧配置缺失该字段或写入旧的 `auto`/`default` 值时按 CUDA 处理。
+- `ipc.schema.json`：生产输入请求/响应、候选诊断、历史分页和模型预设字段集合。
 - `errors.json` + `errors.catalog.json`：统一错误码目录及其 schema。
 - `config.defaults.json`、`ipc.*.example.json`：CI 使用的可校验示例。
 

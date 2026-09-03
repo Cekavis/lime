@@ -2,5 +2,14 @@
   "request_id": 1,
   "candidates": [{ "display_text": "你好", "commit_text": "你好" }],
   "context_used": true,
-  "service_state": "rime_only"
+  "service_state": "rime_only",
+  "diagnostics": [{
+    "rank": 1,
+    "rime_candidate": { "display_text": "你好", "commit_text": "你好" },
+    "llm_candidate": { "display_text": "你好", "commit_text": "你好" },
+    "logprob": 0.0,
+    "logprobs": [0.0],
+    "mismatch": false,
+    "display_candidate": { "display_text": "你好", "commit_text": "你好" }
+  }]
 }
