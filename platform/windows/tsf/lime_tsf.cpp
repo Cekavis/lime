@@ -524,18 +524,49 @@ bool ReadPrecedingRange(ITfContext* context, TfEditCookie cookie, uint32_t limit
   return true;
 }
 
+// Match Weasel's TSF positioning path: resolve the composition/selection
+// start inside the edit session and ask the active view for its screen-space
+// text extent.  A GUI-thread caret rectangle can lag behind an asynchronous
+// composition update and may place the popup over the host's text.
+bool ReadInputPosition(ITfContext* context, TfEditCookie cookie,
+                       ITfRange* composition_range, RECT& rect) {
+  rect = {};
+  if (!context) return false;
+
+  ComPtr<ITfRange> range;
+  if (composition_range) {
+    if (FAILED(composition_range->Clone(&range)) || !range) return false;
+  } else {
+    TF_SELECTION selection{};
+    ULONG fetched = 0;
+    const HRESULT hr = context->GetSelection(cookie, TF_DEFAULT_SELECTION, 1,
+                                              &selection, &fetched);
+    if (FAILED(hr) || fetched != 1 || !selection.range) return false;
+    range.Attach(selection.range);
+  }
+  if (FAILED(range->Collapse(cookie, TF_ANCHOR_START))) return false;
+
+  ComPtr<ITfContextView> view;
+  if (FAILED(context->GetActiveView(&view)) || !view) return false;
+  BOOL clipped = FALSE;
+  const HRESULT hr = view->GetTextExt(cookie, range.Get(), &rect, &clipped);
+  return SUCCEEDED(hr) && rect.bottom > rect.top;
+}
+
 class CandidateWindow {
  public:
   void Show(ITfContext* context, const std::vector<TextService::Candidate>& candidates,
             size_t page, size_t selected, size_t page_size,
-            std::wstring_view preedit = {}, std::wstring_view preview = {}) {
+            std::wstring_view preedit = {}, std::wstring_view preview = {},
+            const RECT* anchor = nullptr) {
 #if defined(LIME_WITH_WEASEL_UI)
-    weasel_ui_.Show(context, candidates, page, selected, page_size, preedit, preview);
+    weasel_ui_.Show(context, candidates, page, selected, page_size, preedit,
+                    preview, anchor);
     return;
 #else
     Snapshot snapshot;
     snapshot.visible = true;
-    snapshot.anchor = Anchor(context);
+    snapshot.anchor = anchor ? *anchor : Anchor(context);
     snapshot.preview = std::wstring(preview);
     const size_t begin = page * page_size;
     for (size_t i = begin; i < std::min(candidates.size(), begin + page_size); ++i) {
@@ -704,7 +735,9 @@ class CandidateWindow {
     const int content_rows = snapshot.is_status ? 1 : static_cast<int>(snapshot.rows.size());
     const int height = std::max(54 * scale, header_height + content_rows * row_height + 12 * scale);
     const int x = snapshot.anchor.left;
-    const int y = snapshot.anchor.bottom + 4 * scale;
+    // Keep the same gap used by WeaselPanel::MoveTo so the popup does not
+    // touch the host's composition text when the vendored UI is disabled.
+    const int y = snapshot.anchor.bottom + 6 * scale;
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 14 * scale, 14 * scale);
     if (region) SetWindowRgn(hwnd, region, TRUE);
@@ -1426,7 +1459,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       // it consumed when TSF rejects the edit; forwarding it would insert a
       // digit into the host while the old composition is still active.
       g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                        page_size_, {}, preceding_preview_);
+                        page_size_, {}, preceding_preview_, CandidateAnchor());
       return true;
     }
     LearnCandidate(pinyin, commit);
@@ -1465,7 +1498,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       const std::wstring commit = candidates_[index].commit;
       if (!RequestEdit(context, Action::Commit, commit)) {
         g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                          page_size_, {}, preceding_preview_);
+                          page_size_, {}, preceding_preview_, CandidateAnchor());
         return true;
       }
       LearnCandidate(pinyin, commit);
@@ -1514,13 +1547,13 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       --candidate_page_;
       selected_candidate_ = candidate_page_ * page_size_;
       g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                        page_size_, {}, preceding_preview_);
+                        page_size_, {}, preceding_preview_, CandidateAnchor());
     } else if (next_page &&
                (candidate_page_ + 1) * page_size_ < candidates_.size()) {
       ++candidate_page_;
       selected_candidate_ = candidate_page_ * page_size_;
       g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                        page_size_, {}, preceding_preview_);
+                        page_size_, {}, preceding_preview_, CandidateAnchor());
     }
     // Page keys are owned by the candidate window even at the ends; treating
     // the boundary as a no-op prevents the host from scrolling unexpectedly.
@@ -1551,7 +1584,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       selected_candidate_ = candidate_page_ * page_size_;
     }
     g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                      page_size_, {}, preceding_preview_);
+                      page_size_, {}, preceding_preview_, CandidateAnchor());
     return true;
   }
   if (IsChinesePunctuationKey(key)) {
@@ -1601,27 +1634,72 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
 
 bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preedit,
                                   std::vector<Candidate>& result_candidates,
-                                  std::wstring& preceding, bool& context_available) {
+                                  std::wstring& preceding, bool& context_available,
+                                  RECT& anchor, bool& anchor_available) {
   if (!context) return false;
   result_candidates.clear();
   preceding.clear();
   context_available = false;
+  anchor = {};
+  anchor_available = false;
   // Read context in a read-only edit session, then synchronously ask the local service.
   class ReadSession final : public ITfEditSession {
-   public: std::atomic<ULONG> refs{1}; TextService* owner; ComPtr<ITfContext> ctx; ComPtr<ITfComposition> composition; std::wstring* before; bool* available; ReadSession(TextService* o, ITfContext* c, ITfComposition* comp, std::wstring* b, bool* a):owner(o),ctx(c),composition(comp),before(b),available(a){owner->AddRef();} ~ReadSession(){owner->Release();}
-   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** p) override { if(!p)return E_POINTER;*p=nullptr;if(iid!=IID_IUnknown&&iid!=IID_ITfEditSession)return E_NOINTERFACE;*p=static_cast<ITfEditSession*>(this);AddRef();return S_OK; }
-   ULONG STDMETHODCALLTYPE AddRef() override{return ++refs;} ULONG STDMETHODCALLTYPE Release() override{auto v=--refs;if(!v)delete this;return v;}
-   HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie c) override {
+   public:
+    std::atomic<ULONG> refs{1};
+    TextService* owner;
+    ComPtr<ITfContext> ctx;
+    ComPtr<ITfComposition> composition;
+    std::wstring* before;
+    bool* available;
+    RECT* anchor;
+    bool* anchor_available;
+
+    ReadSession(TextService* o, ITfContext* c, ITfComposition* comp,
+                std::wstring* b, bool* a, RECT* r, bool* r_available)
+        : owner(o),
+          ctx(c),
+          composition(comp),
+          before(b),
+          available(a),
+          anchor(r),
+          anchor_available(r_available) {
+      owner->AddRef();
+    }
+    ~ReadSession() { owner->Release(); }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** p) override {
+      if (!p) return E_POINTER;
+      *p = nullptr;
+      if (iid != IID_IUnknown && iid != IID_ITfEditSession)
+        return E_NOINTERFACE;
+      *p = static_cast<ITfEditSession*>(this);
+      AddRef();
+      return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override {
+      const ULONG value = --refs;
+      if (!value) delete this;
+      return value;
+    }
+    HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie c) override {
       ComPtr<ITfRange> composition_range;
       if (composition) composition->GetRange(&composition_range);
-      *available = ReadPrecedingRange(ctx.Get(), c, owner->ContextLimit(), *before,
-                                      composition_range.Get());
-     if (!*available) before->clear();
-     return S_OK;
-   }
-     } session(this, context, composition_.Get(), &preceding, &context_available);
+      *available = ReadPrecedingRange(ctx.Get(), c, owner->ContextLimit(),
+                                      *before, composition_range.Get());
+      if (!*available) before->clear();
+      *anchor_available = ReadInputPosition(ctx.Get(), c,
+                                             composition_range.Get(), *anchor);
+      return S_OK;
+    }
+  } session(this, context, composition_.Get(), &preceding, &context_available,
+            &anchor, &anchor_available);
   HRESULT result = E_FAIL, request = context->RequestEditSession(client_id_, &session, TF_ES_READ | TF_ES_SYNC, &result);
-  if (FAILED(request) || FAILED(result)) { preceding.clear(); context_available = false; }
+  if (FAILED(request) || FAILED(result)) {
+    preceding.clear();
+    context_available = false;
+    anchor = {};
+    anchor_available = false;
+  }
   std::string body; const std::string json = "{\"kind\":\"input\",\"payload\":{\"request_id\":" + std::to_string(++request_id_) + ",\"preedit\":\"" + JsonEscape(preedit) + "\",\"preceding_text\":\"" + JsonEscape(preceding) + "\",\"context_available\":" + (context_available ? "true" : "false") + ",\"config_revision\":" + std::to_string(config_revision_) + "}}";
    if (!g_pipe.Request(json, body)) { connected_ = false; return false; }
    if (body.find("\"kind\":\"error\"") != std::string::npos) { RefreshConfigRevision(context); return false; }
@@ -1647,20 +1725,37 @@ bool TextService::UpdateCandidates(ITfContext* context) {
   if (!context) return false;
   std::wstring preceding;
   bool context_available = false;
-  if (!FetchCandidates(context, preedit_, candidates_, preceding, context_available)) {
+  RECT anchor{};
+  bool anchor_available = false;
+  if (!FetchCandidates(context, preedit_, candidates_, preceding, context_available,
+                       anchor, anchor_available)) {
     candidates_.clear();
     preceding_preview_.clear();
+    candidate_anchor_ = {};
+    candidate_anchor_available_ = false;
     HideCandidates();
     return false;
   }
+  candidate_anchor_ = anchor;
+  candidate_anchor_available_ = anchor_available;
   if (!RequestEdit(context, Action::Update, preedit_)) {
     candidates_.clear();
     preceding_preview_.clear();
+    candidate_anchor_ = {};
+    candidate_anchor_available_ = false;
     HideCandidates();
     return false;
   }
   preceding_preview_ = PreviewText(preceding, context_preview_limit_);
-  candidate_page_ = 0; selected_candidate_ = 0; if (candidates_.empty()) HideCandidates(); else g_candidates.Show(context, candidates_, 0, 0, page_size_, {}, preceding_preview_); return true;
+  candidate_page_ = 0;
+  selected_candidate_ = 0;
+  if (candidates_.empty()) {
+    HideCandidates();
+  } else {
+    g_candidates.Show(context, candidates_, 0, 0, page_size_, {},
+                      preceding_preview_, CandidateAnchor());
+  }
+  return true;
 }
 
 void TextService::RefreshConfigRevision(ITfContext* context) {
@@ -1713,6 +1808,8 @@ bool TextService::ResetCompositionForSchemaChange(ITfContext* context) {
   preedit_.clear();
   candidates_.clear();
   preceding_preview_.clear();
+  candidate_anchor_ = {};
+  candidate_anchor_available_ = false;
   candidate_page_ = 0;
   selected_candidate_ = 0;
   HideCandidates();
@@ -1960,6 +2057,8 @@ void TextService::ClearCompositionState() {
   terminal_edit_generation_ = 0;
   preedit_.clear();
   preceding_preview_.clear();
+  candidate_anchor_ = {};
+  candidate_anchor_available_ = false;
   candidates_.clear();
   candidate_page_ = 0;
   selected_candidate_ = 0;

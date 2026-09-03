@@ -32,7 +32,8 @@ class WeaselUiAdapter final {
             size_t selected,
             size_t page_size,
             std::wstring_view preedit,
-            std::wstring_view preceding);
+            std::wstring_view preceding,
+            const RECT* anchor = nullptr);
   void ShowStatus(ITfContext* context, std::wstring_view message);
   void Hide();
 

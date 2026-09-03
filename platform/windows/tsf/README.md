@@ -25,7 +25,7 @@ cmake --build build/tsf --config Release
 
 发布安装器使用 `perMachine`，以管理员权限将 TSF profile 注册到系统，并在当前用户 profile 下显式启用 Lime；服务进程仍按当前用户 SID 配置 Named Pipe ACL。卸载时会撤销 profile 与 COM 注册。
 
-候选窗口由独立 Win32 UI 线程维护，将宿主提供的客户区光标矩形转换为屏幕坐标后跟随输入光标。默认使用固定版本的 WeaselUI（GPLv3），复用 Weasel 的布局、DPI、字体、颜色、圆角、阴影和自定义主题语义；宿主编辑器负责显示未确认拼音，候选窗不再绘制第二行拼音。TSF 读取的光标前文通过 WeaselUI auxiliary row 显示在候选区域上方，不改变 Weasel 的 Context 序列化布局。安装包同时携带 `licenses/WeaselUI-GPL-3.0.txt` 和对应源码快照。
+候选窗口由独立 Win32 UI 线程维护；TSF 在只读 edit session 中获取组合串起点的 `GetTextExt` 屏幕矩形（无可用 layout 时回退到 GUI caret），再按小狼毫的输入位置规则在下方留出 6px 间距。默认使用固定版本的 WeaselUI（GPLv3），复用 Weasel 的布局、DPI、字体、颜色、圆角、阴影和自定义主题语义；宿主编辑器负责显示未确认拼音，候选窗不再绘制第二行拼音。TSF 读取的光标前文通过 WeaselUI auxiliary row 显示在候选区域上方，不改变 Weasel 的 Context 序列化布局。安装包同时携带 `licenses/WeaselUI-GPL-3.0.txt` 和对应源码快照。
 
 `OnTestKeyDown` 只做轻量探测，不在探测阶段打开 edit session 或请求服务；部分宿主会在探测回调期间持有 TSF 锁，提前读取上下文会让随后的写会话返回 `TF_E_LOCKED`。候选读取和组合更新统一在 `OnKeyDown` 中执行。
 

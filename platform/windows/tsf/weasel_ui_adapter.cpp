@@ -646,7 +646,8 @@ void WeaselUiAdapter::Show(ITfContext* context,
                            size_t selected,
                            size_t page_size,
                            std::wstring_view preedit,
-                           std::wstring_view preceding) {
+                           std::wstring_view preceding,
+                           const RECT* anchor) {
   Snapshot snapshot;
   snapshot.visible = true;
   snapshot.target_window = GetForegroundWindow();
@@ -655,7 +656,7 @@ void WeaselUiAdapter::Show(ITfContext* context,
     if (context && SUCCEEDED(context->GetActiveView(&view)) && view)
       view->GetWnd(&snapshot.target_window);
   }
-  snapshot.anchor = Anchor(context);
+  snapshot.anchor = anchor ? *anchor : Anchor(context);
   if (!preceding.empty()) snapshot.preceding.assign(preceding.data(), preceding.size());
   // The unconfirmed pinyin is a real TSF composition rendered by the host
   // editor.  Never copy it into Weasel's Context: doing so creates a second
@@ -920,7 +921,7 @@ namespace lime::tsf {
 WeaselUiAdapter::~WeaselUiAdapter() = default;
 void WeaselUiAdapter::Show(ITfContext*, const std::vector<TextService::Candidate>&,
                            size_t, size_t, size_t, std::wstring_view,
-                           std::wstring_view) {}
+                           std::wstring_view, const RECT*) {}
 void WeaselUiAdapter::ShowStatus(ITfContext*, std::wstring_view) {}
 void WeaselUiAdapter::Hide() {}
 }  // namespace lime::tsf

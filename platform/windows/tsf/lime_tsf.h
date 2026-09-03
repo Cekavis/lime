@@ -68,7 +68,8 @@ class TextService final : public ITfTextInputProcessorEx,
   wchar_t PreeditChar(WPARAM key) const;
   bool FetchCandidates(ITfContext* context, const std::wstring& preedit,
                        std::vector<Candidate>& candidates, std::wstring& preceding,
-                       bool& context_available);
+                       bool& context_available, RECT& anchor,
+                       bool& anchor_available);
   bool UpdateCandidates(ITfContext* context);
   void RefreshConfigRevision(ITfContext* context = nullptr);
   bool ResetCompositionForSchemaChange(ITfContext* context);
@@ -80,6 +81,9 @@ class TextService final : public ITfTextInputProcessorEx,
   bool SetSelectionToCompositionEnd(TfEditCookie cookie);
   void ClearCompositionState();
   void HideCandidates();
+  const RECT* CandidateAnchor() const {
+    return candidate_anchor_available_ ? &candidate_anchor_ : nullptr;
+  }
 
   std::atomic<ULONG> references_{1};
   Microsoft::WRL::ComPtr<ITfThreadMgr> thread_manager_;
@@ -93,6 +97,8 @@ class TextService final : public ITfTextInputProcessorEx,
   Microsoft::WRL::ComPtr<ITfContext> composition_context_;
   std::wstring preedit_;
   std::wstring preceding_preview_;
+  RECT candidate_anchor_{};
+  bool candidate_anchor_available_ = false;
   std::vector<Candidate> candidates_;
   size_t candidate_page_ = 0;
   size_t selected_candidate_ = 0;

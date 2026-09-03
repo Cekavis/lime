@@ -40,7 +40,7 @@ Weasel 的官方构建要求 Visual Studio C++（ATL/MFC）、CMake、Boost，�
 
 1. 把 Lime 候选快照映射为 `weasel::Context::cinfo.candies/comments/labels`，设置 `currentPage/totalPages/highlighted/is_last_page`。
 2. 不把 `preedit_` 映射为 `Context::preedit`：未确认拼音属于 TSF composition，由宿主文本控件渲染；adapter 只把服务状态映射为 `Status::composing/disabled/ascii_mode`。
-3. 把 TSF 获取到的 caret RECT 传给 `UI::UpdateInputPosition`；不要让 WeaselUI 读取 TSF context。
+3. 在 TSF 只读 edit session 中对组合串（无组合串时为当前 selection）的起点调用 `ITfContextView::GetTextExt`，把得到的屏幕坐标 RECT 传给 `UI::UpdateInputPosition`；不要让 WeaselUI 读取 TSF context。若宿主暂时没有可用 layout，才回退到 GUI caret 矩形。
 4. 每次状态机产生新快照时调用 `UI::Update`; 失焦、取消或提交后调用 `UI::Hide`，销毁时调用 `UI::Destroy(true)`。
 5. WeaselUI 的鼠标/滚轮回调只报告“候选索引/翻页意图”；adapter 将其转换成现有数字键、PageUp/PageDown 或上下键事件，让 TSF 线程继续拥有 context、提交和 IPC，UI 层不直接提交文本或发 IPC。
 
@@ -51,6 +51,7 @@ Weasel 的 `Context` 没有 preceding-text 字段。Lime 不修改 `WeaselIPCDat
 - `include/WeaselUI.h` 的 `UI` 增加 `SetPrecedingText(std::wstring_view)` 和只读 accessor；
 - `UI::Update` 在调用方没有提供 `Context::aux` 时，把 sidecar 合并为 Weasel 的 auxiliary row；显式 Rime auxiliary 内容优先；
 - 这样复用了 WeaselPanel 已有的字体、布局、DPI 和省略逻辑，不需要另画一套候选窗口；前文作为 auxiliary row 显示，拼音不在候选窗重复出现；键盘翻页和滚轮仍由 Lime 状态机处理；
+- 候选窗沿用 WeaselPanel 在输入位置下方的 6px 间距，避免覆盖宿主正在绘制的组合串；无 WeaselUI 的内置回退也使用同一间距。
 - 不修改 `WeaselIPCData::Context` 的序列化布局，因此不会破坏原有 Weasel IPC。
 
 Lime 在每次候选快照更新时调用 setter；TSF 已按配置读取并裁剪前文，默认预览窗口为 32 个 UTF-16 单元。空字符串不占 auxiliary 行高度。该改动只影响视觉层，不改变按键、分页、选择或提交状态机。
