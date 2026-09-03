@@ -11,6 +11,24 @@ pub struct RerankResult {
     pub diagnostics: Vec<CandidateDiagnostic>,
 }
 
+trait CandidateScorer {
+    fn score_candidates(
+        &self,
+        preceding_text: &str,
+        candidates: &[Candidate],
+    ) -> Result<Vec<CandidateScore>, String>;
+}
+
+impl CandidateScorer for LlamaRuntime {
+    fn score_candidates(
+        &self,
+        preceding_text: &str,
+        candidates: &[Candidate],
+    ) -> Result<Vec<CandidateScore>, String> {
+        LlamaRuntime::score_candidates(self, preceding_text, candidates)
+    }
+}
+
 /// Rank candidates without hiding model failures.
 ///
 /// Existing callers that use the infallible Phase-1 API continue to compile. If a loaded model
@@ -64,13 +82,36 @@ pub(crate) fn try_rerank_selected_candidates_with_diagnostics(
     rerank_count: usize,
     effective_count: usize,
 ) -> Result<RerankResult, String> {
+    try_rerank_selected_candidates_with_scorer(
+        candidates,
+        candidate_indices,
+        preceding_text,
+        runtime,
+        rerank_count,
+        effective_count,
+    )
+}
+
+fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
+    candidates: &[Candidate],
+    candidate_indices: &[usize],
+    preceding_text: &str,
+    runtime: Option<&S>,
+    rerank_count: usize,
+    effective_count: usize,
+) -> Result<RerankResult, String> {
     let pool_indices = selected_pool_indices(candidate_indices, candidates.len(), rerank_count);
     let pool_candidates = pool_indices
         .iter()
         .map(|index| candidates[*index].clone())
         .collect::<Vec<_>>();
 
-    let score_rows = if let Some(runtime) = runtime {
+    let active_runtime = if preceding_text.is_empty() {
+        None
+    } else {
+        runtime
+    };
+    let score_rows = if let Some(runtime) = active_runtime {
         let scores = runtime.score_candidates(preceding_text, &pool_candidates)?;
         if scores.len() != pool_candidates.len() {
             return Err(format!(
@@ -102,7 +143,7 @@ pub(crate) fn try_rerank_selected_candidates_with_diagnostics(
 
     Ok(build_rerank_result(
         candidates,
-        runtime.is_some(),
+        active_runtime.is_some(),
         score_rows,
         effective_count,
     ))
@@ -279,6 +320,33 @@ mod tests {
         let input = vec![c("a")];
         let result = try_rerank_candidates_with_diagnostics(&input, "", None, 1, 1).unwrap();
         assert_eq!(result.candidates, input);
+    }
+
+    #[test]
+    fn empty_preceding_text_skips_available_runtime_and_preserves_rime_order() {
+        struct PanickingScorer;
+
+        impl CandidateScorer for PanickingScorer {
+            fn score_candidates(
+                &self,
+                _: &str,
+                _: &[Candidate],
+            ) -> Result<Vec<CandidateScore>, String> {
+                panic!("empty preceding text must not invoke the LLM scorer");
+            }
+        }
+
+        let input = vec![c("甲"), c("乙"), c("丙")];
+        let scorer = PanickingScorer;
+        let result =
+            try_rerank_selected_candidates_with_scorer(&input, &[0, 1, 2], "", Some(&scorer), 3, 2)
+                .unwrap();
+
+        assert_eq!(result.candidates, input);
+        assert!(result
+            .diagnostics
+            .iter()
+            .all(|row| row.llm_candidate.is_none() && row.logprobs.is_empty()));
     }
 
     #[test]

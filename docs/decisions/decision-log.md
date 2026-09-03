@@ -39,6 +39,7 @@
 | D033 | 中文模式的独立全角符号使用短生命周期 TSF composition 提交，不在按键回调中直接调用 `ITfInsertAtSelection`；所有 IME 提交共用已验证的 composition 生命周期，避免 Chromium/WebView2 文本上下文重入崩溃 |
 | D034 | Tauri 管理窗口的操作反馈统一使用可关闭、4 秒后自动消失的右下角 toast；服务不可用只通过页头 indicator 展示，不重复弹出连接错误 |
 | D035 | 历史更新使用服务端 revision 长轮询通知；管理窗口不依赖可见性受限的 WebView 定时器，新增或清空记录后立即刷新，后台窗口同样接收通知 |
+| D036 | `preceding_text` 为空时跳过 LLM 候选重排并直接采用 Rime 原始顺序，即使模型运行时已加载 |
 
 ## 后续可演进
 

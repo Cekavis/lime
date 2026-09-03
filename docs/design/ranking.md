@@ -6,10 +6,11 @@
 
 1. Rime/雾凇拼音根据 `preedit` 召回候选。
 2. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
-3. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
-4. 使用 llama.cpp 完整 vocabulary logits 计算候选 token 的链式 logprob；运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
-5. 边界不匹配候选沿用现有逐 token 评分路径。
-6. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
+3. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
+4. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
+5. 使用 llama.cpp 完整 vocabulary logits 计算候选 token 的链式 logprob；运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
+6. 边界不匹配候选沿用现有逐 token 评分路径。
+7. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
 
 拼音用于 Rime 召回，不直接写入 LLM prompt。
 
@@ -34,6 +35,7 @@ final = llm_top_k(complete_pool) + rime_candidates_without(llm_top_k)
 
 - Rime 候选立即可见。
 - LLM 在后台异步重排；新输入取消旧代际。
+- 没有上文时不执行 LLM 重排，候选顺序严格采用 Rime 返回值。
 - LLM 超时、模型忙、输出非法或内存不足：保持 Rime-only 顺序。
 - Rust 服务崩溃时不能得到 Rime 候选，TSF 直接英文/数字/标点透传。
 
