@@ -115,7 +115,7 @@ if (!app) throw new Error("Lime UI mount point is missing");
 app.innerHTML = [
   '<div class="shell">',
   '  <header class="header">',
-  '    <div><p class="eyebrow">LIME</p><h1>Lime</h1></div>',
+  '    <div class="brand"><img class="brand-logo" src="/logo.svg" alt="" /><div><p class="eyebrow">LIME</p><h1>Lime</h1></div></div>',
   '    <span class="badge" data-service-state="unavailable" aria-live="polite">服务不可用</span>',
   "  </header>",
   '  <div class="notice is-hidden" data-notice role="status" aria-live="polite"></div>',

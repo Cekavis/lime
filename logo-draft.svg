@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Minimal lime slice</title>
+  <desc id="desc">A simple green lime slice icon.</desc>
+  <g transform="translate(256 256)">
+    <circle r="184" fill="#B8E64B" stroke="#263238" stroke-width="12"/>
+    <circle r="145" fill="#D9F58A"/>
+    <path d="M0-145V145M-125.6-72.5L125.6 72.5M-125.6 72.5L125.6-72.5" fill="none" stroke="#8FCB35" stroke-width="13" stroke-linecap="round"/>
+    <circle r="25" fill="#8FCB35"/>
+  </g>
+</svg>

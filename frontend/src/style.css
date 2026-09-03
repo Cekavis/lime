@@ -78,6 +78,8 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 }
 
 .header { margin-bottom: var(--space-6); }
+.brand { display: flex; align-items: center; gap: var(--space-3); }
+.brand-logo { width: 3rem; height: 3rem; flex: 0 0 auto; }
 .eyebrow { margin: 0 0 var(--space-1); color: var(--color-accent); font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); letter-spacing: var(--letter-spacing-eyebrow); }
 h1, h2, h3 { margin: 0; font-weight: var(--font-weight-semibold); }
 h1 { font-size: var(--font-size-xl); line-height: var(--line-height-tight); }
