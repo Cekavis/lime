@@ -84,9 +84,13 @@ interface DictionaryEntry {
   weight: number;
 }
 
+type RefreshReason = "initial" | "manual" | "poll" | "tab" | "visibility" | "mutation";
+
+const REFRESH_INTERVAL_MS = 3000;
+
 const stateLabel: Record<ServiceState, string> = {
   ready: "可用",
-  rime_only: "Rime-only",
+  rime_only: "基础模式",
   reloading: "重载中",
   unavailable: "服务不可用",
 };
@@ -111,7 +115,7 @@ if (!app) throw new Error("Lime UI mount point is missing");
 app.innerHTML = [
   '<div class="shell">',
   '  <header class="header">',
-  '    <div><p class="eyebrow">LIME</p><h1>Lime</h1><p class="muted">本地优先的中文拼音输入法</p></div>',
+  '    <div><p class="eyebrow">LIME</p><h1>Lime</h1></div>',
   '    <span class="badge" data-service-state="unavailable" aria-live="polite">服务不可用</span>',
   "  </header>",
   '  <div class="notice is-hidden" data-notice role="status" aria-live="polite"></div>',
@@ -125,7 +129,7 @@ app.innerHTML = [
   "  </nav>",
   "  <main>",
   '    <section class="panel" data-panel="input">',
-  '      <div class="panel-heading"><div><h2>输入与候选</h2><p class="muted">修改后交给 Rust 核心服务保存。</p></div><span class="revision" data-config-revision>revision —</span></div>',
+  '      <div class="panel-heading"><div><h2>输入与候选</h2></div></div>',
   '      <form data-config-form>',
   '        <div class="form-grid">',
   '          <label class="field"><span>Rime 方案</span><select data-config="rime_schema"><option value="rime_ice">雾凇拼音（全拼）</option><option value="double_pinyin">自然码双拼</option><option value="double_pinyin_abc">智能 ABC 双拼</option><option value="double_pinyin_mspy">微软双拼</option><option value="double_pinyin_sogou">搜狗双拼</option><option value="double_pinyin_flypy">小鹤双拼</option><option value="double_pinyin_ziguang">紫光双拼</option><option value="double_pinyin_jiajia">拼音加加双拼</option></select></label>',
@@ -143,7 +147,7 @@ app.innerHTML = [
   "      </form>",
   "    </section>",
   '    <section class="panel is-hidden" data-panel="test">',
-  '      <div class="panel-heading"><div><h2>输入测试</h2><p class="muted">输入上文和拼音，检查 Rime 召回与 LLM 重排是否逐行对应。</p></div><span class="revision" data-test-request>尚未请求</span></div>',
+  '      <div class="panel-heading"><div><h2>输入测试</h2></div><span class="meta-badge" data-test-request>尚未请求</span></div>',
   '      <form data-test-form>',
   '        <label class="field field-wide field-stacked"><span>上文</span><textarea data-test-context rows="3" placeholder="可选：输入光标前的中文文本"></textarea></label>',
   '        <label class="field field-wide"><span>拼音</span><input data-test-preedit type="text" placeholder="例如 nihao" required /></label>',
@@ -155,25 +159,25 @@ app.innerHTML = [
   '      <div class="panel-heading"><div><h2>模型</h2><p class="muted">可加载 GGUF，并保存多个本机模型预设。</p></div><span class="status-dot" data-model-state>未加载</span></div>',
   '      <div class="model-card"><dl class="status-list"><dt>路径</dt><dd data-model-path>—</dd><dt>大小</dt><dd data-model-size>—</dd><dt>SHA-256</dt><dd class="mono" data-model-sha>—</dd></dl></div>',
   '      <form class="model-form" data-model-form><label class="field field-wide"><span>GGUF 文件路径</span><input data-model-path-input type="text" placeholder="C:\\Models\\lime.gguf" required /></label><div class="actions"><button class="button button-primary" type="submit">加载模型</button><button class="button" data-unload-model type="button">卸载模型</button></div></form>',
-  '      <div class="preset-section"><div class="panel-heading compact-heading"><div><h3>模型预设</h3><p class="muted">点击预设即可切换模型。</p></div><span class="revision" data-preset-count>0 个</span></div>',
+  '      <div class="preset-section"><div class="panel-heading compact-heading"><div><h3>模型预设</h3><p class="muted">点击预设即可切换模型。</p></div><span class="meta-badge" data-preset-count>0 个</span></div>',
   '        <form class="preset-form" data-preset-form><label class="field"><span>名称</span><input data-preset-name type="text" placeholder="例如 Qwen 7B" required /></label><label class="field field-wide"><span>路径</span><input data-preset-path type="text" placeholder="C:\\Models\\lime.gguf" required /></label><button class="button" type="submit">保存预设</button></form>',
   '        <div class="preset-list" data-model-presets><p class="muted">尚未读取预设。</p></div>',
   "      </div>",
   "    </section>",
   '    <section class="panel is-hidden" data-panel="dictionary">',
-  '      <div class="panel-heading"><div><h2>词库</h2><p class="muted">导入前校验 JSON；失败时不会覆盖现有词库。</p></div><span class="revision" data-dictionary-count>— 条</span></div>',
+  '      <div class="panel-heading"><div><h2>词库</h2><p class="muted">导入前校验 JSON；失败时不会覆盖现有词库。</p></div><span class="meta-badge" data-dictionary-count>— 条</span></div>',
   '      <div class="actions"><button class="button" data-import-dictionary type="button">导入 JSON</button><button class="button" data-export-dictionary type="button">导出 JSON</button><button class="button button-danger" data-clear-dictionary type="button">清空用户词库</button><input class="visually-hidden" data-dictionary-file type="file" accept="application/json,.json" /></div>',
   '      <div class="table-wrap"><table><thead><tr><th>拼音</th><th>文本</th><th>权重</th></tr></thead><tbody data-dictionary-table><tr><td colspan="3" class="muted">尚未读取词库</td></tr></tbody></table></div>',
   "    </section>",
   '    <section class="panel is-hidden" data-panel="history">',
-  '      <div class="panel-heading"><div><h2>历史</h2><p class="muted">按时间从新到旧显示输入记录，每页 100 条。点击记录查看完整诊断。</p></div><div class="actions-inline"><span class="revision" data-history-count>0 条</span><button class="button button-danger" data-clear-history type="button">清空历史</button></div></div>',
+  '      <div class="panel-heading"><div><h2>历史</h2><p class="muted">按时间从新到旧显示输入记录，每页 100 条。点击记录查看详情。</p></div><div class="actions-inline"><span class="meta-badge" data-history-count>0 条</span><button class="button button-danger" data-clear-history type="button">清空历史</button></div></div>',
   '      <div class="table-wrap"><table class="history-table"><thead><tr><th>上文</th><th>拼音</th><th>Rime 候选（前 3）</th><th>LLM 排序（前 3）</th></tr></thead><tbody data-history-table><tr><td colspan="4" class="muted">暂无输入记录</td></tr></tbody></table></div>',
   '      <div class="pagination" data-history-pagination><button class="button" data-history-prev type="button">上一页</button><span data-history-page-label>第 1 页</span><button class="button" data-history-next type="button">下一页</button></div>',
   '      <section class="history-detail is-hidden" data-history-detail aria-live="polite"><div class="panel-heading compact-heading"><div><h3 data-history-detail-title>记录详情</h3><p class="muted" data-history-detail-meta>—</p></div><button class="button" data-history-detail-close type="button">返回列表</button></div><div data-history-detail-table><p class="muted">选择一条记录查看详情。</p></div></section>',
   "    </section>",
   '    <section class="panel is-hidden" data-panel="diagnostics">',
-  '      <div class="panel-heading"><div><h2>诊断</h2><p class="muted">默认不记录原始前文、preedit、候选或 prompt。</p></div><button class="button" data-refresh type="button">刷新</button></div>',
-  '      <dl class="status-list diagnostics-list"><dt>协议</dt><dd>v1</dd><dt>服务状态</dt><dd data-diagnostic-state>—</dd><dt>配置 revision</dt><dd data-diagnostic-revision>—</dd><dt>模型</dt><dd data-diagnostic-model>—</dd><dt>词库条目</dt><dd data-diagnostic-dictionary>—</dd><dt>最近操作</dt><dd data-last-operation>—</dd></dl>',
+  '      <div class="panel-heading"><div><h2>诊断</h2><p class="muted">查看运行状态与最近操作。</p></div><button class="button" data-refresh type="button">刷新</button></div>',
+  '      <dl class="status-list diagnostics-list"><dt>服务状态</dt><dd data-diagnostic-state>—</dd><dt>模型</dt><dd data-diagnostic-model>—</dd><dt>词库条目</dt><dd data-diagnostic-dictionary>—</dd><dt>最近操作</dt><dd data-last-operation>—</dd></dl>',
   "    </section>",
   "  </main>",
   "</div>",
@@ -186,8 +190,38 @@ let currentHistoryPage = 1;
 let currentHistoryTotal = 0;
 let currentPresets: ModelPreset[] = [];
 
+let configFormDirty = false;
+let pendingConfigSnapshot: ConfigSnapshot | null = null;
+let pendingHistoryPage: HistoryPage | null = null;
+let pendingPresets: ModelPreset[] | null = null;
+let historyPointerInside = false;
+let renderedDictionaryKey = "";
+let renderedHistoryKey = "";
+let renderedPresetsKey = "";
+let refreshInFlight: Promise<void> | null = null;
+let refreshQueued = false;
+let queuedRefreshReason: RefreshReason | null = null;
+let mutationEpoch = 0;
+
 const query = <T extends Element>(selector: string) => document.querySelector<T>(selector);
 const all = <T extends Element>(selector: string) => [...document.querySelectorAll<T>(selector)];
+
+function isFocusedWithin(selector: string): boolean {
+  const container = query<HTMLElement>(selector);
+  const focused = document.activeElement;
+  return Boolean(container && focused instanceof Node && container.contains(focused));
+}
+
+function isHistoryInteractionActive(): boolean {
+  const detail = query<HTMLElement>("[data-history-detail]");
+  return historyPointerInside || isFocusedWithin("[data-history-table]") ||
+    isFocusedWithin("[data-history-detail]") || Boolean(detail && !detail.classList.contains("is-hidden"));
+}
+
+function markMutation() {
+  mutationEpoch += 1;
+  if (refreshInFlight) refreshQueued = true;
+}
 
 function setNotice(message: string, tone: "success" | "error" | "info" = "info") {
   const notice = query<HTMLDivElement>("[data-notice]");
@@ -442,12 +476,8 @@ function renderStatus(status: ServiceStatus | null) {
     badge.textContent = "服务 " + stateLabel[state];
     badge.dataset.serviceState = state;
   }
-  const configRevision = query<HTMLElement>("[data-config-revision]");
-  if (configRevision) configRevision.textContent = "revision " + (status?.config.revision ?? "—");
   const stateText = query<HTMLElement>("[data-diagnostic-state]");
   if (stateText) stateText.textContent = stateLabel[state];
-  const revision = query<HTMLElement>("[data-diagnostic-revision]");
-  if (revision) revision.textContent = String(status?.config.revision ?? "—");
   renderModel(status?.model ?? null);
 }
 
@@ -465,19 +495,31 @@ function renderModel(model: ModelInfo | null) {
   const sha = query<HTMLElement>("[data-model-sha]");
   if (sha) sha.textContent = model?.sha256 ?? "—";
   const diagnostic = query<HTMLElement>("[data-diagnostic-model]");
-  if (diagnostic) diagnostic.textContent = loaded ? model?.path ?? "已加载" : "未加载（Rime-only）";
+  if (diagnostic) diagnostic.textContent = loaded ? model?.path ?? "已加载" : "未加载（基础模式）";
   for (const preset of currentPresets) preset.loaded = Boolean(loaded && preset.path && model?.path && preset.path === model.path);
   renderModelPresets(currentPresets);
 }
 
-function applyConfig(snapshot: ConfigSnapshot) {
+function applyConfig(snapshot: ConfigSnapshot, options: { force?: boolean } = {}) {
   currentConfig = { ...defaultConfig, ...snapshot.config };
+  const shouldDefer = !options.force && (configFormDirty || isFocusedWithin("[data-config-form]"));
+  if (shouldDefer) {
+    pendingConfigSnapshot = snapshot;
+    return;
+  }
+  pendingConfigSnapshot = null;
   for (const input of all<HTMLInputElement | HTMLSelectElement>("[data-config]")) {
     const key = input.dataset.config as keyof Config | undefined;
     if (!key) continue;
-    if (input instanceof HTMLInputElement && input.type === "checkbox") input.checked = Boolean(currentConfig[key]);
-    else input.value = String(currentConfig[key]);
+    if (input instanceof HTMLInputElement && input.type === "checkbox") {
+      const nextValue = Boolean(currentConfig[key]);
+      if (input.checked !== nextValue) input.checked = nextValue;
+    } else {
+      const nextValue = String(currentConfig[key]);
+      if (input.value !== nextValue) input.value = nextValue;
+    }
   }
+  configFormDirty = false;
 }
 
 function readConfig(): Config {
@@ -492,15 +534,24 @@ function readConfig(): Config {
   return result;
 }
 
-function renderDictionary(entries: DictionaryEntry[]) {
+function renderDictionary(entries: DictionaryEntry[], options: { force?: boolean } = {}) {
+  const key = JSON.stringify(entries);
+  const table = query<HTMLTableSectionElement>("[data-dictionary-table]");
+  if (!options.force && key === renderedDictionaryKey) {
+    const count = query<HTMLElement>("[data-dictionary-count]");
+    if (count) count.textContent = entries.length + " 条";
+    const diagnostic = query<HTMLElement>("[data-diagnostic-dictionary]");
+    if (diagnostic) diagnostic.textContent = entries.length + " 条";
+    return;
+  }
   const count = query<HTMLElement>("[data-dictionary-count]");
   if (count) count.textContent = entries.length + " 条";
   const diagnostic = query<HTMLElement>("[data-diagnostic-dictionary]");
   if (diagnostic) diagnostic.textContent = entries.length + " 条";
-  const table = query<HTMLTableSectionElement>("[data-dictionary-table]");
   if (!table) return;
   const rows = entries.slice(0, 50).map((entry) => "<tr><td>" + escapeHtml(entry.pinyin) + "</td><td>" + escapeHtml(entry.text) + "</td><td>" + entry.weight + "</td></tr>");
   table.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="3" class="muted">词库为空</td></tr>';
+  renderedDictionaryKey = key;
 }
 
 function candidateText(candidates: Candidate[], limit = 3): string {
@@ -547,15 +598,21 @@ function renderTestResult(data: InputData) {
   target.innerHTML = '<div class="result-summary"><span>服务状态</span><strong>' + escapeHtml(status) + '</strong><span>上文已使用</span><strong>' + context + '</strong><span>拼音</span><strong class="mono">' + escapeHtml(data.preedit || "—") + "</strong></div>" + diagnosticTable(data);
 }
 
-function renderHistory(page: HistoryPage) {
+function renderHistory(page: HistoryPage, options: { force?: boolean } = {}) {
   page = sortHistory(page);
+  const key = JSON.stringify(page);
+  if (!options.force && key !== renderedHistoryKey && isHistoryInteractionActive()) {
+    pendingHistoryPage = page;
+    return;
+  }
+  pendingHistoryPage = null;
   currentHistory = page.items;
   currentHistoryPage = page.page;
   currentHistoryTotal = page.total;
   const count = query<HTMLElement>("[data-history-count]");
   if (count) count.textContent = page.total + " 条";
   const table = query<HTMLTableSectionElement>("[data-history-table]");
-  if (table) {
+  if (table && (options.force || key !== renderedHistoryKey)) {
     const rows = page.items.map((entry, index) => {
       const rime = entry.rimeCandidates.length ? entry.rimeCandidates : entry.diagnostics.map((item) => item.rimeCandidate).filter((item): item is Candidate => item !== null);
       const diagnosticLlm = entry.diagnostics.map((item) => item.llmCandidate).filter((item): item is Candidate => item !== null);
@@ -564,13 +621,16 @@ function renderHistory(page: HistoryPage) {
     });
     table.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4" class="muted">暂无输入记录</td></tr>';
   }
+  renderedHistoryKey = key;
   const totalPages = Math.max(1, Math.ceil(page.total / HISTORY_PAGE_SIZE));
+  const visiblePage = Math.min(Math.max(1, page.page), totalPages);
+  if (visiblePage !== page.page) currentHistoryPage = visiblePage;
   const label = query<HTMLElement>("[data-history-page-label]");
-  if (label) label.textContent = "第 " + page.page + " / " + totalPages + " 页";
+  if (label) label.textContent = "第 " + visiblePage + " / " + totalPages + " 页";
   const previous = query<HTMLButtonElement>("[data-history-prev]");
   const next = query<HTMLButtonElement>("[data-history-next]");
-  if (previous) previous.disabled = page.page <= 1;
-  if (next) next.disabled = page.page >= totalPages;
+  if (previous) previous.disabled = visiblePage <= 1;
+  if (next) next.disabled = visiblePage >= totalPages;
 }
 
 function renderHistoryDetail(entry: InputData) {
@@ -589,25 +649,35 @@ function renderHistoryDetail(entry: InputData) {
 
 function closeHistoryDetail() {
   query<HTMLElement>("[data-history-detail]")?.classList.add("is-hidden");
+  queueMicrotask(flushDeferredRenders);
 }
 
-async function loadModelPresets() {
-  try {
-    const value = await invokeVariants<unknown>("list_model_presets", [undefined, {}]);
-    currentPresets = normalizePresets(value);
-  } catch {
-    currentPresets = [];
+async function fetchModelPresets(): Promise<ModelPreset[]> {
+  const value = await invokeVariants<unknown>("list_model_presets", [undefined, {}]);
+  return normalizePresets(value);
+}
+
+async function loadModelPresets(options: { force?: boolean } = {}) {
+  const presets = await fetchModelPresets();
+  currentPresets = presets;
+  renderModelPresets(currentPresets, options);
+}
+
+function renderModelPresets(presets: ModelPreset[], options: { force?: boolean } = {}) {
+  const key = JSON.stringify(presets);
+  if (!options.force && key !== renderedPresetsKey && isFocusedWithin("[data-model-presets]")) {
+    pendingPresets = presets;
+    return;
   }
-  renderModelPresets(currentPresets);
-}
-
-function renderModelPresets(presets: ModelPreset[]) {
+  pendingPresets = null;
   const count = query<HTMLElement>("[data-preset-count]");
   if (count) count.textContent = presets.length + " 个";
   const target = query<HTMLElement>("[data-model-presets]");
   if (!target) return;
+  if (!options.force && key === renderedPresetsKey) return;
   if (!presets.length) {
     target.innerHTML = '<p class="muted">尚未保存模型预设。</p>';
+    renderedPresetsKey = key;
     return;
   }
   target.innerHTML = presets.map((preset) => {
@@ -615,52 +685,171 @@ function renderModelPresets(presets: ModelPreset[]) {
     const loaded = preset.loaded ? " is-loaded" : "";
     return '<article class="preset-item' + loaded + '"><div class="preset-info"><strong>' + escapeHtml(preset.name) + '</strong><span class="muted mono">' + escapeHtml(preset.path || "—") + '</span></div><div class="preset-actions"><button class="button button-primary" type="button" data-preset-action="select" data-preset-key="' + key + '">切换</button><button class="button button-danger" type="button" data-preset-action="delete" data-preset-key="' + key + '">删除</button></div></article>';
   }).join("");
+  renderedPresetsKey = key;
 }
 
-async function refresh() {
-  try {
-    const [configValue, statusValue, entriesValue, historyPage] = await Promise.all([
-      invoke<unknown>("get_config"),
-      invoke<unknown>("get_status"),
-      invoke<unknown>("export_dictionary"),
-      fetchHistoryPage(currentHistoryPage),
-    ]);
-    const config = normalizeConfigSnapshot(configValue);
-    const rawStatus = asRecord(statusValue);
+async function performRefresh(reason: RefreshReason, mutationAtStart: number) {
+  const results = await Promise.allSettled([
+    invoke<unknown>("get_config"),
+    invoke<unknown>("get_status"),
+    invoke<unknown>("export_dictionary"),
+    fetchHistoryPage(currentHistoryPage),
+    fetchModelPresets(),
+  ]);
+
+  // A user action or a newer refresh request may have completed while these IPC
+  // calls were in flight. Never let that older snapshot overwrite the newer UI.
+  if (mutationAtStart !== mutationEpoch) return;
+
+  const errors: unknown[] = [];
+  const configResult = results[0];
+  const statusResult = results[1];
+  const dictionaryResult = results[2];
+  const historyResult = results[3];
+  const presetsResult = results[4];
+
+  let configSnapshot: ConfigSnapshot | null = null;
+  if (configResult.status === "fulfilled") configSnapshot = normalizeConfigSnapshot(configResult.value);
+  else errors.push(configResult.reason);
+
+  let statusConfig: ConfigSnapshot | null = null;
+  if (statusResult.status === "fulfilled") {
+    const rawStatus = asRecord(statusResult.value);
+    const rawStatusConfig = firstValue(rawStatus, ["config"]);
+    if (rawStatusConfig != null) statusConfig = normalizeConfigSnapshot(rawStatusConfig);
+    const fallbackStatusConfig = statusConfig ?? configSnapshot ?? currentStatus?.config ?? {
+      revision: 0,
+      config: { ...currentConfig },
+    };
     const status: ServiceStatus = {
       state: normalizeState(firstValue(rawStatus, ["state", "service_state", "serviceState"])),
-      config: normalizeConfigSnapshot(firstValue(rawStatus, ["config"]) ?? configValue),
+      config: fallbackStatusConfig,
       model: normalizeModel(firstValue(rawStatus, ["model"]) ?? {}),
     };
-    applyConfig(config);
     currentStatus = status;
     renderStatus(status);
-    renderDictionary(Array.isArray(entriesValue) ? entriesValue as DictionaryEntry[] : []);
-    renderHistory(historyPage);
-    await loadModelPresets();
-    setNotice("");
-    recordOperation("已刷新");
-  } catch (error) {
+  } else {
+    errors.push(statusResult.reason);
     currentStatus = null;
     renderStatus(null);
-    setNotice(errorMessage(error), "error");
-    recordOperation("刷新失败");
+  }
+
+  // Both endpoints can be in flight while another client saves settings. Use
+  // the newest revision and keep the status snapshot on ties. If neither
+  // endpoint returned a snapshot, leave the user's current form untouched.
+  const effectiveConfig = configSnapshot && statusConfig
+    ? (statusConfig.revision >= configSnapshot.revision ? statusConfig : configSnapshot)
+    : configSnapshot ?? statusConfig;
+  if (effectiveConfig) applyConfig(effectiveConfig);
+
+  if (dictionaryResult.status === "fulfilled") {
+    renderDictionary(Array.isArray(dictionaryResult.value) ? dictionaryResult.value as DictionaryEntry[] : []);
+  } else {
+    errors.push(dictionaryResult.reason);
+  }
+
+  if (historyResult.status === "fulfilled") {
+    let history = historyResult.value;
+    const totalPages = Math.max(1, Math.ceil(history.total / HISTORY_PAGE_SIZE));
+    if (history.page > totalPages) {
+      currentHistoryPage = totalPages;
+      try {
+        history = await fetchHistoryPage(totalPages);
+      } catch (error) {
+        errors.push(error);
+      }
+      if (mutationAtStart !== mutationEpoch) return;
+    }
+    renderHistory(history);
+  } else errors.push(historyResult.reason);
+
+  if (presetsResult.status === "fulfilled") {
+    currentPresets = presetsResult.value;
+    renderModelPresets(currentPresets);
+  } else {
+    errors.push(presetsResult.reason);
+  }
+
+  const reportError = reason === "initial" || reason === "manual";
+  if (errors.length) {
+    if (reportError) setNotice(errorMessage(errors[0]), "error");
+    if (reason === "initial" || reason === "manual") recordOperation("刷新失败");
+  } else if (reason === "initial" || reason === "manual") {
+    setNotice("");
+    recordOperation("已刷新");
   }
 }
 
-query<HTMLFormElement>("[data-config-form]")?.addEventListener("submit", async (event) => {
+function requestRefresh(reason: RefreshReason = "poll"): Promise<void> {
+  if (refreshInFlight) {
+    refreshQueued = true;
+    if (reason === "manual" || reason === "mutation" || queuedRefreshReason === null) queuedRefreshReason = reason;
+    return refreshInFlight;
+  }
+
+  const mutationAtStart = mutationEpoch;
+  const task = performRefresh(reason, mutationAtStart).catch((error) => {
+    if (reason === "initial" || reason === "manual") {
+      setNotice(errorMessage(error), "error");
+      recordOperation("刷新失败");
+    }
+  });
+  let tracked: Promise<void>;
+  tracked = task.finally(() => {
+    if (refreshInFlight === tracked) refreshInFlight = null;
+    if (refreshQueued) {
+      refreshQueued = false;
+      const nextReason = queuedRefreshReason ?? "poll";
+      queuedRefreshReason = null;
+      void requestRefresh(nextReason);
+    }
+  });
+  refreshInFlight = tracked;
+  return tracked;
+}
+
+function refresh() {
+  return requestRefresh("manual");
+}
+
+function flushDeferredRenders() {
+  if (pendingConfigSnapshot && !configFormDirty && !isFocusedWithin("[data-config-form]")) {
+    const snapshot = pendingConfigSnapshot;
+    pendingConfigSnapshot = null;
+    applyConfig(snapshot);
+  }
+  if (pendingHistoryPage && !isHistoryInteractionActive()) {
+    const page = pendingHistoryPage;
+    pendingHistoryPage = null;
+    renderHistory(page, { force: true });
+  }
+  if (pendingPresets && !isFocusedWithin("[data-model-presets]")) {
+    const presets = pendingPresets;
+    pendingPresets = null;
+    renderModelPresets(presets, { force: true });
+  }
+}
+
+const configForm = query<HTMLFormElement>("[data-config-form]");
+configForm?.addEventListener("input", () => { configFormDirty = true; });
+configForm?.addEventListener("change", () => { configFormDirty = true; });
+
+configForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  markMutation();
   try {
     const value = await invoke<unknown>("set_config", { config: readConfig() });
     const snapshot = normalizeConfigSnapshot(value);
-    applyConfig(snapshot);
+    applyConfig(snapshot, { force: true });
     if (currentStatus) currentStatus.config = snapshot;
     renderStatus(currentStatus);
     setNotice("设置已保存", "success");
     recordOperation("设置已保存");
+    void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("保存设置失败");
+    void requestRefresh("mutation");
   }
 });
 
@@ -669,32 +858,38 @@ query<HTMLFormElement>("[data-model-form]")?.addEventListener("submit", async (e
   const input = query<HTMLInputElement>("[data-model-path-input]");
   const path = input?.value.trim() ?? "";
   if (!path) return setNotice("请输入 GGUF 文件路径", "error");
+  markMutation();
   try {
     const value = await invokeVariants<unknown>("load_model", [{ path }, { modelPath: path }]);
     const model = normalizeModel(value);
     renderModel(model);
     if (currentStatus) currentStatus.model = model;
-    await loadModelPresets();
+    await loadModelPresets({ force: true });
     setNotice("模型已加载", "success");
     recordOperation("模型已加载");
+    void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("加载模型失败");
+    void requestRefresh("mutation");
   }
 });
 
 query<HTMLButtonElement>("[data-unload-model]")?.addEventListener("click", async () => {
+  markMutation();
   try {
     const value = await invoke<unknown>("unload_model");
     const model = normalizeModel(value);
     renderModel(model);
     if (currentStatus) currentStatus.model = model;
-    await loadModelPresets();
-    setNotice("模型已卸载，当前使用 Rime-only", "success");
+    await loadModelPresets({ force: true });
+    setNotice("模型已卸载，当前使用基础模式", "success");
     recordOperation("模型已卸载");
+    void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("卸载模型失败");
+    void requestRefresh("mutation");
   }
 });
 
@@ -705,14 +900,17 @@ query<HTMLFormElement>("[data-preset-form]")?.addEventListener("submit", async (
   const name = nameInput?.value.trim() ?? "";
   const path = pathInput?.value.trim() ?? "";
   if (!name || !path) return setNotice("请输入预设名称和 GGUF 路径", "error");
+  markMutation();
   try {
     await invokeVariants<unknown>("save_model_preset", [{ name, path }, { preset: { name, path } }]);
-    await loadModelPresets();
+    await loadModelPresets({ force: true });
     setNotice("模型预设已保存", "success");
     recordOperation("模型预设已保存");
+    void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("保存模型预设失败");
+    void requestRefresh("mutation");
   }
 });
 
@@ -724,6 +922,7 @@ query<HTMLElement>("[data-model-presets]")?.addEventListener("click", async (eve
   const preset = currentPresets.find((item) => item.id === key || item.name === key);
   if (!preset) return;
   const action = button.dataset.presetAction;
+  markMutation();
   try {
     if (action === "select") {
       // The Tauri command and protocol identify a preset by its persisted name.
@@ -736,19 +935,21 @@ query<HTMLElement>("[data-model-presets]")?.addEventListener("click", async (eve
         renderModel(model);
         if (currentStatus) currentStatus.model = model;
       }
-      await loadModelPresets();
+      await loadModelPresets({ force: true });
       setNotice("已切换到预设：" + preset.name, "success");
       recordOperation("模型预设已切换");
     } else if (action === "delete") {
       if (!window.confirm("确定删除模型预设“" + preset.name + "”吗？")) return;
       await invoke("delete_model_preset", { name: preset.name });
-      await loadModelPresets();
+      await loadModelPresets({ force: true });
       setNotice("模型预设已删除", "success");
       recordOperation("模型预设已删除");
     }
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("模型预设操作失败");
+  } finally {
+    void requestRefresh("mutation");
   }
 });
 
@@ -760,14 +961,17 @@ query<HTMLInputElement>("[data-dictionary-file]")?.addEventListener("change", as
     const parsed: unknown = JSON.parse(await file.text());
     if (!Array.isArray(parsed)) throw new Error("词库 JSON 必须是条目数组");
     const entries = parsed.map(validateEntry);
+    markMutation();
     await invoke("import_dictionary", { entries });
     const updated = await invoke<unknown>("export_dictionary");
     renderDictionary(Array.isArray(updated) ? updated as DictionaryEntry[] : []);
     setNotice("已导入 " + entries.length + " 条词库记录", "success");
     recordOperation("词库已导入");
+    void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("导入词库失败");
+    void requestRefresh("mutation");
   } finally {
     (event.target as HTMLInputElement).value = "";
   }
@@ -794,14 +998,17 @@ query<HTMLButtonElement>("[data-export-dictionary]")?.addEventListener("click", 
 
 query<HTMLButtonElement>("[data-clear-dictionary]")?.addEventListener("click", async () => {
   if (!window.confirm("确定清空用户词库吗？此操作不可撤销。")) return;
+  markMutation();
   try {
     await invoke("clear_dictionary");
-    renderDictionary([]);
+    renderDictionary([], { force: true });
     setNotice("用户词库已清空", "success");
     recordOperation("词库已清空");
+    void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("清空词库失败");
+    void requestRefresh("mutation");
   }
 });
 
@@ -810,6 +1017,7 @@ query<HTMLFormElement>("[data-test-form]")?.addEventListener("submit", async (ev
   const precedingText = query<HTMLTextAreaElement>("[data-test-context]")?.value ?? "";
   const preedit = query<HTMLInputElement>("[data-test-preedit]")?.value.trim() ?? "";
   if (!preedit) return setNotice("请输入拼音", "error");
+  markMutation();
   try {
     const value = await invokeVariants<unknown>("test_input", [
       { precedingText, preedit },
@@ -824,9 +1032,11 @@ query<HTMLFormElement>("[data-test-form]")?.addEventListener("submit", async (ev
     renderTestResult(response);
     setNotice("候选请求已完成", "success");
     recordOperation("输入测试已完成");
+    void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("输入测试失败");
+    void requestRefresh("mutation");
   }
 });
 
@@ -864,46 +1074,65 @@ query<HTMLTableSectionElement>("[data-history-table]")?.addEventListener("keydow
 query<HTMLButtonElement>("[data-history-detail-close]")?.addEventListener("click", closeHistoryDetail);
 query<HTMLButtonElement>("[data-history-prev]")?.addEventListener("click", async () => {
   if (currentHistoryPage <= 1) return;
+  markMutation();
   try {
     renderHistory(await fetchHistoryPage(currentHistoryPage - 1));
     closeHistoryDetail();
   } catch (error) {
     setNotice(errorMessage(error), "error");
+  } finally {
+    void requestRefresh("mutation");
   }
 });
 query<HTMLButtonElement>("[data-history-next]")?.addEventListener("click", async () => {
   const totalPages = Math.max(1, Math.ceil(currentHistoryTotal / HISTORY_PAGE_SIZE));
   if (currentHistoryPage >= totalPages) return;
+  markMutation();
   try {
     renderHistory(await fetchHistoryPage(currentHistoryPage + 1));
     closeHistoryDetail();
   } catch (error) {
     setNotice(errorMessage(error), "error");
+  } finally {
+    void requestRefresh("mutation");
   }
 });
 
 query<HTMLButtonElement>("[data-clear-history]")?.addEventListener("click", async () => {
   if (!window.confirm("确定清空输入历史吗？")) return;
+  markMutation();
   try {
     await invoke("clear_input_history");
     currentHistoryPage = 1;
-    renderHistory({ items: [], total: 0, page: 1, pageSize: HISTORY_PAGE_SIZE });
+    renderHistory({ items: [], total: 0, page: 1, pageSize: HISTORY_PAGE_SIZE }, { force: true });
     closeHistoryDetail();
     setNotice("输入历史已清空", "success");
     recordOperation("输入历史已清空");
+    void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("清空输入历史失败");
+    void requestRefresh("mutation");
   }
 });
 
-query<HTMLButtonElement>("[data-refresh]")?.addEventListener("click", refresh);
+query<HTMLButtonElement>("[data-refresh]")?.addEventListener("click", () => { void refresh(); });
+document.addEventListener("focusout", () => { queueMicrotask(flushDeferredRenders); });
+for (const selector of ["[data-history-table]", "[data-history-detail]"]) {
+  query<HTMLElement>(selector)?.addEventListener("pointerenter", () => { historyPointerInside = true; });
+  query<HTMLElement>(selector)?.addEventListener("pointerleave", () => {
+    historyPointerInside = false;
+    queueMicrotask(flushDeferredRenders);
+  });
+}
 for (const tab of all<HTMLButtonElement>("[data-tab]")) {
   tab.addEventListener("click", () => {
     const name = tab.dataset.tab;
     if (!name) return;
     for (const item of all<HTMLButtonElement>("[data-tab]")) item.classList.toggle("is-active", item === tab);
     for (const panel of all<HTMLElement>("[data-panel]")) panel.classList.toggle("is-hidden", panel.dataset.panel !== name);
+    flushDeferredRenders();
+    void requestRefresh("tab");
   });
 }
 
@@ -951,4 +1180,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-refresh();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void requestRefresh("visibility");
+});
+
+window.setInterval(() => {
+  if (document.visibilityState === "visible") void requestRefresh("poll");
+}, REFRESH_INTERVAL_MS);
+
+void requestRefresh("initial");

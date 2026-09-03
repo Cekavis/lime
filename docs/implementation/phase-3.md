@@ -11,12 +11,13 @@
 - `src-tauri/src/ipc.rs` 实现跨平台 protocol v1 客户端：Windows 使用当前用户 Named Pipe，Unix 使用本地 socket；每次请求先握手，服务不可用时可通过 `LIME_SERVICE_PATH` 按需启动并重试。
 - `src-tauri/src/main.rs` 注册配置、模型加载/卸载与多预设切换、词库、输入测试和历史分页 Tauri commands。命令只转发管理契约，不直接操作用户数据文件。
 - `frontend/src/main.ts` 完成四个管理页面：
-  - 输入与候选：Rime 方案与八项候选/模型配置、范围由服务端最终校验、revision 展示和保存反馈。
+  - 输入与候选：Rime 方案与八项候选/模型配置、范围由服务端最终校验和保存反馈。
   - 模型：提交本地 GGUF 路径，显示加载状态、大小和 SHA-256，加载失败保留当前模型。
   - 词库：导入 JSON 前校验条目格式，导出 JSON 下载，清空前二次确认，并展示最多 50 条预览。
-  - 诊断：服务状态、协议版本、配置 revision、模型和词库摘要、最近操作结果。
+  - 诊断：服务状态、模型和词库摘要、最近操作结果。
   - 输入测试：提交与 TSF 相同的 `InputRequest`，展示包含 Rime 原始候选、LLM 候选、logprob、token logprobs、边界 mismatch 和最终展示候选的诊断表。
   - 请求历史：按时间倒序分页查看（每页 100 条）输入请求，主列表显示上文/拼音及前 3 条候选，点击记录查看完整诊断；可主动清空，记录只存在内存中。
+- 管理窗口在前台每 3 秒合并刷新配置、服务状态、词库、历史和模型预设；窗口重新可见、切换页面或手动刷新会立即触发同一流程。过时响应会被丢弃，正在编辑的设置、历史详情和预设列表交互不会被轮询打断。
 - `frontend/src/style.css` 集中维护颜色、字体、间距、圆角、阴影和动效 token；页面和组件只使用语义 token。
 - `crates/lime-core/src/service.rs` 增加版本化 `config.json` 原子持久化；读取兼容旧的直接 `Config` 对象，非法配置/未知版本回退默认配置。配置写入失败时恢复内存中的旧 snapshot。
 - `src-tauri/build.rs` 生成被 `.gitignore` 忽略的最小占位 ICO，使无品牌资源时 Tauri 工程仍可独立检查；发布前可直接替换为正式图标资源。

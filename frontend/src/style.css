@@ -85,7 +85,7 @@ h2 { font-size: var(--font-size-lg); line-height: var(--line-height-tight); }
 h3 { font-size: var(--font-size-md); line-height: var(--line-height-tight); }
 .muted { margin: var(--space-1) 0 0; color: var(--color-muted); line-height: var(--line-height-body); }
 
-.badge, .revision, .status-dot {
+.badge, .meta-badge, .status-dot {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
   background: var(--color-surface);
