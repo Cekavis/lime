@@ -109,6 +109,7 @@ const defaultConfig: Config = {
 };
 
 const HISTORY_PAGE_SIZE = 100;
+const NOTICE_DURATION_MS = 4000;
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Lime UI mount point is missing");
 
@@ -118,7 +119,12 @@ app.innerHTML = [
   '    <div class="brand"><img class="brand-logo" src="/logo.svg" alt="" /><div><p class="eyebrow">LIME</p><h1>Lime</h1></div></div>',
   '    <span class="badge" data-service-state="unavailable" aria-live="polite">服务不可用</span>',
   "  </header>",
-  '  <div class="notice is-hidden" data-notice role="status" aria-live="polite"></div>',
+  '  <div class="toast-region" data-notice-region aria-live="polite" aria-atomic="true">',
+  '    <div class="notice is-hidden" data-notice role="status" aria-hidden="true">',
+  '      <span data-notice-message></span>',
+  '      <button class="toast-close" data-notice-close type="button" aria-label="关闭提示">×</button>',
+  "    </div>",
+  "  </div>",
   '  <nav class="tabs" aria-label="Lime 功能">',
   '    <button class="tab is-active" type="button" data-tab="input">设置</button>',
   '    <button class="tab" type="button" data-tab="test">测试</button>',
@@ -202,6 +208,7 @@ let refreshInFlight: Promise<void> | null = null;
 let refreshQueued = false;
 let queuedRefreshReason: RefreshReason | null = null;
 let mutationEpoch = 0;
+let noticeTimer: number | null = null;
 
 const query = <T extends Element>(selector: string) => document.querySelector<T>(selector);
 const all = <T extends Element>(selector: string) => [...document.querySelectorAll<T>(selector)];
@@ -226,9 +233,24 @@ function markMutation() {
 function setNotice(message: string, tone: "success" | "error" | "info" = "info") {
   const notice = query<HTMLDivElement>("[data-notice]");
   if (!notice) return;
-  notice.textContent = message;
+  if (noticeTimer !== null) {
+    window.clearTimeout(noticeTimer);
+    noticeTimer = null;
+  }
+  if (message.toLowerCase().includes("lime service is unavailable")) message = "";
+  const messageTarget = query<HTMLElement>("[data-notice-message]");
+  if (messageTarget) messageTarget.textContent = message;
+  else notice.textContent = message;
   notice.dataset.tone = tone;
   notice.classList.toggle("is-hidden", !message);
+  notice.setAttribute("aria-hidden", String(!message));
+  if (message) {
+    noticeTimer = window.setTimeout(() => {
+      noticeTimer = null;
+      notice.classList.add("is-hidden");
+      notice.setAttribute("aria-hidden", "true");
+    }, NOTICE_DURATION_MS);
+  }
 }
 
 function recordOperation(message: string) {
@@ -1117,6 +1139,7 @@ query<HTMLButtonElement>("[data-clear-history]")?.addEventListener("click", asyn
 });
 
 query<HTMLButtonElement>("[data-refresh]")?.addEventListener("click", () => { void refresh(); });
+query<HTMLButtonElement>("[data-notice-close]")?.addEventListener("click", () => setNotice(""));
 document.addEventListener("focusout", () => { queueMicrotask(flushDeferredRenders); });
 for (const selector of ["[data-history-table]", "[data-history-detail]"]) {
   query<HTMLElement>(selector)?.addEventListener("pointerenter", () => { historyPointerInside = true; });
