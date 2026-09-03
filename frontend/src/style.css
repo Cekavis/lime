@@ -161,6 +161,8 @@ h3 { font-size: var(--font-size-md); line-height: var(--line-height-tight); }
 .actions, .actions-inline, .preset-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .actions { margin-top: var(--space-6); }
 .actions-inline { flex-wrap: nowrap; }
+.preset-actions { flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; }
+.preset-actions .button { flex: 0 0 auto; }
 
 .button {
   border: 1px solid var(--color-border-strong);
@@ -204,8 +206,8 @@ h3 { font-size: var(--font-size-md); line-height: var(--line-height-tight); }
 .preset-list { display: grid; gap: var(--space-2); margin-top: var(--space-4); }
 .preset-item { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-control); padding: var(--space-3) var(--space-4); }
 .preset-item.is-loaded { border-color: var(--color-accent); background: var(--color-surface-accent); }
-.preset-info { display: grid; min-width: 0; gap: var(--space-1); }
-.preset-info .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preset-info { display: grid; min-width: 0; flex: 1 1 auto; gap: var(--space-1); }
+.preset-info .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .table-wrap { overflow: auto; margin-top: var(--space-6); border: 1px solid var(--color-border); border-radius: var(--radius-control); }
 table { width: 100%; border-collapse: collapse; }
