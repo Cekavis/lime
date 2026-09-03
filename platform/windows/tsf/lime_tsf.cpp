@@ -1073,6 +1073,8 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
       // Shift_R is configured as a no-op by the bundled Rime schema.  It is
       // still a chord if pressed while Shift_L is pending, so cancel the
       // pending left-toggle before letting the host receive the key.
+      shift_down_mask_ |= kRightShiftBit;
+      if (right_shift_down_tick_ == 0) right_shift_down_tick_ = GetTickCount64();
       shift_pending_mask_ = 0;
       *eaten = FALSE;
       return S_OK;
@@ -1176,6 +1178,8 @@ HRESULT TextService::OnTestKeyUp(ITfContext*, WPARAM key, LPARAM lparam, BOOL* e
   }
   const uint8_t bit = ShiftKeyBit(key, lparam);
   if (bit == kRightShiftBit) {
+    shift_down_mask_ &= static_cast<uint8_t>(~kRightShiftBit);
+    right_shift_down_tick_ = 0;
     *eaten = FALSE;
     return S_OK;
   }
@@ -1189,6 +1193,8 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
     if (IsShiftKey(key)) {
       const uint8_t bit = ShiftKeyBit(key, lparam);
       if (bit == kRightShiftBit) {
+        shift_down_mask_ |= kRightShiftBit;
+        if (right_shift_down_tick_ == 0) right_shift_down_tick_ = GetTickCount64();
         shift_pending_mask_ = 0;
         *eaten = FALSE;
         return S_OK;
@@ -1257,6 +1263,8 @@ HRESULT TextService::OnKeyUp(ITfContext* context, WPARAM key, LPARAM lparam,
     }
     const uint8_t bit = ShiftKeyBit(key, lparam);
     if (bit == kRightShiftBit) {
+      shift_down_mask_ &= static_cast<uint8_t>(~kRightShiftBit);
+      right_shift_down_tick_ = 0;
       *eaten = FALSE;
       return S_OK;
     }
