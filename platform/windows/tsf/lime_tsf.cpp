@@ -836,15 +836,12 @@ HRESULT CompositionSession::DoEditSession(TfEditCookie cookie) {
     owner->CompleteEditSession(action, generation, succeeded);
     return succeeded ? S_OK : E_FAIL;
   }
-  // A Commit request can represent either the end of a live composition or a
-  // standalone direct insertion (ASCII mode/full-shape punctuation).  Avoid
-  // creating a transient TSF composition for the latter; InsertTextAtSelection
-  // follows the host's normal insertion path and keeps ASCII mode invisible.
-  if (action == TextService::Action::Commit && !owner->HasComposition()) {
-    succeeded = owner->InsertTextAtSelection(context.Get(), cookie, text);
-    owner->CompleteEditSession(action, generation, succeeded);
-    return succeeded ? S_OK : E_FAIL;
-  }
+  // Standalone full-shape punctuation still uses a short-lived TSF
+  // composition.  Chromium/WebView2 context owners can re-enter the Windows
+  // text-input framework when a key-event sink calls InsertTextAtSelection
+  // directly, which has caused host hangs and process termination.  The same
+  // StartComposition -> SetText -> EndComposition path used for candidates is
+  // accepted by those hosts and leaves no visible unconfirmed state.
   if (!owner->EnsureComposition(context.Get(), cookie)) {
     owner->CompleteEditSession(action, generation, false);
     return E_FAIL;
@@ -1560,8 +1557,8 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
   if (IsChinesePunctuationKey(key)) {
     // Rime's punctuator commits a pending composition before emitting a
     // full-shape symbol.  Keep that behavior in the snapshot-based adapter;
-    // when there is no composition, insert the symbol directly at the host
-    // selection through the same TSF edit-session path.
+    // when there is no composition, create and immediately finalize a TSF
+    // composition instead of directly mutating the host selection.
     // Punctuation has no input request that could refresh the connection, so
     // re-check the service state before claiming the key.  This closes the
     // small window where the process went unavailable after the last letter.
@@ -1904,48 +1901,6 @@ bool TextService::SetCompositionText(TfEditCookie cookie, const std::wstring& te
 bool TextService::CommitComposition(TfEditCookie cookie, const std::wstring& text) {
   if (!SetCompositionText(cookie, text)) return false;
   return EndComposition(cookie);
-}
-bool TextService::InsertTextAtSelection(ITfContext* context, TfEditCookie cookie,
-                                        const std::wstring& text) {
-  if (!context) {
-    last_edit_error_ = E_POINTER;
-    return false;
-  }
-  ComPtr<ITfInsertAtSelection> inserter;
-  HRESULT hr = context->QueryInterface(IID_PPV_ARGS(&inserter));
-  if (FAILED(hr) || !inserter) {
-    last_edit_error_ = FAILED(hr) ? hr : E_NOINTERFACE;
-    return false;
-  }
-
-  ComPtr<ITfRange> inserted;
-  hr = inserter->InsertTextAtSelection(
-      cookie, TF_IAS_NOQUERY, text.c_str(), static_cast<LONG>(text.size()),
-      &inserted);
-  if (FAILED(hr)) {
-    last_edit_error_ = hr;
-    return false;
-  }
-
-  // Most context owners move the selection for us.  Explicitly collapse the
-  // returned range to its end as a compatibility measure for hosts that keep
-  // the selection at the beginning of an insertion.
-  if (inserted) {
-    ComPtr<ITfRange> caret;
-    if (SUCCEEDED(inserted->Clone(&caret)) && caret &&
-        SUCCEEDED(caret->Collapse(cookie, TF_ANCHOR_END))) {
-      TF_SELECTION selection{caret.Get(), {TF_AE_NONE, FALSE}};
-      hr = context->SetSelection(cookie, 1, &selection);
-      if (FAILED(hr)) {
-        // The insertion itself already succeeded.  A few legacy context
-        // owners reject an explicit selection update even though they leave
-        // their caret at the insertion end; report the text operation as
-        // successful and let the host retain its native caret behavior.
-        last_edit_error_ = hr;
-      }
-    }
-  }
-  return true;
 }
 bool TextService::EndComposition(TfEditCookie cookie) {
   if (!composition_) return true;

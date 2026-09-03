@@ -36,6 +36,7 @@
 | D030 | Windows TSF 按内置 Rime `ascii_composer` 实现中英模式：左 Shift 无修饰短按切换并提交原始组合串，右 Shift 和 Shift+Space 不切换；英文模式由宿主直接处理半角输入，中文模式使用全角标点 |
 | D031 | 最近一次成功激活的模型路径独立于预设持久化；服务启动后在后台尽力自动恢复，恢复期间报告 `reloading`，卸载模型清除记录，恢复失败不阻止 Rime/服务启动 |
 | D032 | Tauri 管理窗口只展示用户行动所需的状态与摘要；前台管理数据采用合并轮询和代际丢弃，保护编辑表单、历史详情及预设交互不被刷新打断 |
+| D033 | 中文模式的独立全角符号使用短生命周期 TSF composition 提交，不在按键回调中直接调用 `ITfInsertAtSelection`；所有 IME 提交共用已验证的 composition 生命周期，避免 Chromium/WebView2 文本上下文重入崩溃 |
 
 ## 后续可演进
 

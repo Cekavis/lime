@@ -31,6 +31,8 @@ cmake --build build/tsf --config Release
 
 TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使用 `TF_ES_READWRITE` 的 ASYNCDONTCARE 调度：宿主允许时同步执行，否则由 TSF 排队。`StartComposition` 即使返回 `S_OK` 也可能通过空的 `ppComposition` 表示宿主拒绝组合；适配层会检查这一点并显示明确错误。
 
+中文模式下的全角符号即使没有现有拼音组合串，也会建立并立即结束一个短生命周期 TSF composition；不在按键回调中直接调用 `ITfInsertAtSelection` 修改宿主 selection，避免 Chromium/WebView2 等文本上下文的重入崩溃。
+
 候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；异步取消完成前继续吞键，避免按键进入宿主文本。
 
 若构建环境暂时没有 `third_party/weasel-ui`，可用 `-DLIME_WITH_WEASEL_UI=OFF` 构建内置回退窗口；发布构建默认启用 WeaselUI。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。

@@ -51,10 +51,7 @@ class TextService final : public ITfTextInputProcessorEx,
   bool EnsureComposition(ITfContext* context, TfEditCookie cookie);
   bool SetCompositionText(TfEditCookie cookie, const std::wstring& text);
   bool CommitComposition(TfEditCookie cookie, const std::wstring& text);
-  bool InsertTextAtSelection(ITfContext* context, TfEditCookie cookie,
-                             const std::wstring& text);
   bool EndComposition(TfEditCookie cookie);
-  bool HasComposition() const { return composition_ != nullptr; }
   bool IsEditCurrent(uint64_t generation) const { return generation == edit_generation_; }
   void CompleteEditSession(Action action, uint64_t generation, bool succeeded);
   uint32_t ContextLimit() const { return context_limit_; }
