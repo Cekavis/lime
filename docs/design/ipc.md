@@ -64,7 +64,7 @@ Tauri 使用同一 IPC 通道调用配置、模型、词库和输入诊断操作
 模型预设命令按名称寻址：`save_model_preset` 使用 `{ name, path }`，`delete_model_preset`
 和 `select_model_preset` 使用 `{ name }`。`ModelPreset` 不定义独立的 `id` 或 `key` 字段。
 
-服务在同一份 `model-presets.json` 中额外保存最近一次成功激活的 `active_model_path`。直接加载模型和切换预设成功后更新该路径，卸载模型时清除；服务启动时先尝试恢复该路径，模型文件缺失或运行时不可用不会阻止服务启动。旧版只保存 `loaded` 标记的文件仍可读取并作为一次性恢复提示。
+服务在同一份 `model-presets.json` 中额外保存最近一次成功激活的 `active_model_path`。直接加载模型和切换预设成功后更新该路径，卸载模型时清除；服务启动后在后台 best-effort 恢复该路径，不阻塞 Named Pipe/Unix socket 监听和 Rime-only 路径。恢复期间 `get_status.state` 为 `reloading`；模型文件缺失或运行时不可用不会阻止服务启动。旧版只保存 `loaded` 标记的文件仍可读取并作为一次性恢复提示。
 
 `get_input_history` 返回服务本次启动后收到的全部输入请求，按 `timestamp_ms` 从新到旧排序，包含上文、拼音、Rime 原始候选、LLM 排序、诊断行和最终候选顺序；历史只保存在服务内存中，用户可在管理窗口清空。新 UI 使用 `get_input_history_page { page, page_size }`，页码从 1 开始，服务将单页大小限制为 100，并返回 `items`、`total`、`page` 和 `page_size`。`request_id` 仅为旧客户端兼容字段，不作为 UI 排序或关联依据。
 - Windows TSF 默认连接 `\\.\pipe\lime-core-v1`，可由 `LIME_PIPE` 覆盖；若设置 `LIME_SERVICE_PATH`，TSF 首次连接失败时按需启动本地服务并重试。TSF 在首次握手后读取 `get_status.config.revision`，所有输入请求携带该 revision。

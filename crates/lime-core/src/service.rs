@@ -95,6 +95,7 @@ pub struct CoreService {
     /// Path of the last model that loaded successfully.  This is separate from
     /// `ModelPreset::loaded`, which is a runtime-only status bit exposed to clients.
     active_model_path: Arc<Mutex<Option<String>>>,
+    model_loading: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for CoreService {
@@ -208,12 +209,19 @@ impl CoreService {
             history_clock: Arc::new(AtomicU64::new(now_unix_ms())),
             model_presets: Arc::new(Mutex::new(model_presets)),
             active_model_path: Arc::new(Mutex::new(active_model_path.clone())),
+            model_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         // Restoring the last model is best-effort.  A missing model, unavailable
         // native runtime, or an incompatible GGUF must leave the service alive in
         // Rime-only mode rather than aborting construction.
         if let Some(path) = active_model_path {
-            service.restore_model_at_startup(Path::new(&path));
+            let loading = Arc::clone(&service.model_loading);
+            loading.store(true, Ordering::Release);
+            let restore_service = service.clone();
+            std::thread::spawn(move || {
+                restore_service.restore_model_at_startup(Path::new(&path));
+                loading.store(false, Ordering::Release);
+            });
         }
         service
     }
@@ -739,7 +747,11 @@ impl CoreService {
             config.config.rime_schema = schema;
         }
         ServiceStatus {
-            state: service_state(rime_available, model.is_some()),
+            state: service_state(
+                rime_available,
+                model.is_some(),
+                self.model_loading.load(Ordering::Acquire),
+            ),
             config,
             model: model
                 .as_ref()
@@ -765,7 +777,11 @@ impl CoreService {
             .expect("engine mutex poisoned")
             .is_available();
         let model_loaded = self.model.lock().expect("model mutex poisoned").is_some();
-        service_state(rime_available, model_loaded)
+        service_state(
+            rime_available,
+            model_loaded,
+            self.model_loading.load(Ordering::Acquire),
+        )
     }
 
     fn history_snapshot(&self) -> Vec<InputHistoryEntry> {
@@ -965,9 +981,11 @@ fn normalize_path_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn service_state(rime_available: bool, model_loaded: bool) -> ServiceState {
+fn service_state(rime_available: bool, model_loaded: bool, model_loading: bool) -> ServiceState {
     if !rime_available {
         ServiceState::Unavailable
+    } else if model_loading {
+        ServiceState::Reloading
     } else if model_loaded {
         ServiceState::Ready
     } else {
@@ -1271,6 +1289,12 @@ mod tests {
                 .unwrap();
         assert_eq!(persisted["active_model_path"], missing_path);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn service_reports_reloading_while_startup_model_is_loading() {
+        assert_eq!(service_state(true, false, true), ServiceState::Reloading);
+        assert_eq!(service_state(false, false, true), ServiceState::Unavailable);
     }
 
     #[test]
