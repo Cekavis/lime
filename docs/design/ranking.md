@@ -61,5 +61,5 @@ final = llm_top_k(complete_pool) + rime_candidates_without(llm_top_k)
 
 - 模型输入为用户导入的单个 GGUF 文件；不要求额外 manifest。
 - 当前开发模型：`tools/pinyin-eval/native/llama/models/qwen3.5-4b-base-q4_k_m/qwen3.5-4b-base-q4_k_m.gguf`。
-- 模型切换通过服务受控重载；同一时间只激活一个模型。多个命名预设由服务持久化到 `model-presets.json`，可列出、保存、删除和切换；切换失败不会替换当前模型。
+- 模型切换通过服务受控重载；同一时间只激活一个模型。多个命名预设由服务持久化到 `model-presets.json`，可列出、保存、删除和切换；服务同时记录最近一次成功激活的模型路径并在下次启动时自动恢复，切换失败不会替换当前模型。
 - Windows 首期默认 CUDA，并随安装包提供 CPU 回退；未安装可用模型时仍保持 Rime-only。

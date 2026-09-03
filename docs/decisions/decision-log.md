@@ -34,6 +34,7 @@
 | D028 | Windows NSIS 安装包使用 ZLIB 压缩，优先降低 CUDA runtime 大型 DLL 的安装解压时间 |
 | D029 | LLM 只接收前 `llm_rerank_count` 个 Rime 候选中、经 librime 候选预览确认已消费完整输入的候选；`llm_effective_count` 限制从该池置顶的数量，未完整候选保留 Rime 原顺序 |
 | D030 | Windows TSF 按内置 Rime `ascii_composer` 实现中英模式：左 Shift 无修饰短按切换并提交原始组合串，右 Shift 和 Shift+Space 不切换；英文模式由宿主直接处理半角输入，中文模式使用全角标点 |
+| D031 | 最近一次成功激活的模型路径独立于预设持久化；服务启动时尽力自动恢复，卸载模型清除记录，恢复失败不阻止 Rime/服务启动 |
 
 ## 后续可演进
 

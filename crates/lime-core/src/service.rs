@@ -23,7 +23,10 @@ use std::{
 };
 
 const CONFIG_FILE_VERSION: u32 = 1;
-const MODEL_PRESETS_FILE_VERSION: u32 = 1;
+/// Version two adds `active_model_path`, which records the last successfully activated model.
+/// Version one remains readable so existing installations keep their saved presets.
+const MODEL_PRESETS_FILE_VERSION: u32 = 2;
+const LEGACY_MODEL_PRESETS_FILE_VERSION: u32 = 1;
 
 fn backend_preference_for(value: &str) -> BackendPreference {
     match value {
@@ -57,6 +60,8 @@ enum PersistedModelPresets {
     Versioned {
         version: u32,
         presets: Vec<ModelPreset>,
+        #[serde(default)]
+        active_model_path: Option<String>,
     },
     Legacy(Vec<ModelPreset>),
 }
@@ -65,6 +70,14 @@ enum PersistedModelPresets {
 struct VersionedModelPresets<'a> {
     version: u32,
     presets: &'a [ModelPreset],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_model_path: Option<&'a str>,
+}
+
+#[derive(Default)]
+struct LoadedModelPresets {
+    presets: Vec<ModelPreset>,
+    active_model_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -79,6 +92,9 @@ pub struct CoreService {
     history: Arc<Mutex<Vec<InputHistoryEntry>>>,
     history_clock: Arc<AtomicU64>,
     model_presets: Arc<Mutex<BTreeMap<String, ModelPreset>>>,
+    /// Path of the last model that loaded successfully.  This is separate from
+    /// `ModelPreset::loaded`, which is a runtime-only status bit exposed to clients.
+    active_model_path: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for CoreService {
@@ -166,10 +182,13 @@ impl CoreService {
                 RimeEngine::new()
             }
         };
-        let model_presets = data_dir
+        let loaded_model_presets = data_dir
             .as_deref()
-            .and_then(load_model_presets)
-            .unwrap_or_default()
+            .and_then(load_model_state)
+            .unwrap_or_default();
+        let active_model_path = loaded_model_presets.active_model_path.clone();
+        let model_presets = loaded_model_presets
+            .presets
             .into_iter()
             .map(|mut preset| {
                 // `loaded` is a runtime status bit and must never survive a service restart.
@@ -177,7 +196,7 @@ impl CoreService {
                 (preset.name.clone(), preset)
             })
             .collect::<BTreeMap<_, _>>();
-        Self {
+        let service = Self {
             config: Arc::new(Mutex::new(config)),
             engine: Arc::new(Mutex::new(engine)),
             model: Arc::new(Mutex::new(None)),
@@ -188,7 +207,15 @@ impl CoreService {
             history: Arc::new(Mutex::new(Vec::new())),
             history_clock: Arc::new(AtomicU64::new(now_unix_ms())),
             model_presets: Arc::new(Mutex::new(model_presets)),
+            active_model_path: Arc::new(Mutex::new(active_model_path.clone())),
+        };
+        // Restoring the last model is best-effort.  A missing model, unavailable
+        // native runtime, or an incompatible GGUF must leave the service alive in
+        // Rime-only mode rather than aborting construction.
+        if let Some(path) = active_model_path {
+            service.restore_model_at_startup(Path::new(&path));
         }
+        service
     }
 
     pub fn config_snapshot(&self) -> ConfigSnapshot {
@@ -284,12 +311,7 @@ impl CoreService {
             }
             Request::GetStatus => Response::Status(self.status()),
             Request::LoadModel { path } => self.load_model(Path::new(&path)),
-            Request::UnloadModel => {
-                let _load_guard = self.model_load.lock().expect("model load mutex poisoned");
-                *self.model.lock().expect("model mutex poisoned") = None;
-                self.mark_loaded_preset(None);
-                Response::Accepted
-            }
+            Request::UnloadModel => self.unload_model(),
             Request::ListModelPresets => Response::ModelPresets(self.model_presets()),
             Request::SaveModelPreset { name, path } => {
                 self.save_model_preset(&name, Path::new(&path))
@@ -432,6 +454,32 @@ impl CoreService {
         // the Windows DLL search path. Serialize the whole load/replace
         // operation while leaving inference protected by the model mutex.
         let _load_guard = self.model_load.lock().expect("model load mutex poisoned");
+        match self.load_runtime(path) {
+            Ok(model) => {
+                let loaded_path = model.path.clone();
+                *self.model.lock().expect("model mutex poisoned") = Some(model);
+                self.mark_loaded_preset(Some(&loaded_path));
+                self.set_active_model_path(Some(&loaded_path));
+                self.persist_model_state_best_effort("model_state_persist_failed");
+                Response::Accepted
+            }
+            Err(code) => {
+                self.logger.event("model_load_failed", Some(code));
+                Response::Error { code }
+            }
+        }
+    }
+
+    fn unload_model(&self) -> Response {
+        let _load_guard = self.model_load.lock().expect("model load mutex poisoned");
+        *self.model.lock().expect("model mutex poisoned") = None;
+        self.mark_loaded_preset(None);
+        self.set_active_model_path(None);
+        self.persist_model_state_best_effort("model_state_persist_failed");
+        Response::Accepted
+    }
+
+    fn load_runtime(&self, path: &Path) -> Result<LlamaRuntime, ErrorCode> {
         let (context_tokens, backend_preference) = self
             .config
             .lock()
@@ -446,35 +494,69 @@ impl CoreService {
                 crate::llama::DEFAULT_CONTEXT_TOKENS,
                 BackendPreference::Cuda,
             ));
-        match LlamaRuntime::load_with_backend_preference(
+        LlamaRuntime::load_with_backend_preference(
             path.to_path_buf(),
             context_tokens,
             backend_preference,
-        ) {
+        )
+        .map_err(|_| {
+            if path.exists() {
+                ErrorCode::ModelLoadFailed
+            } else {
+                ErrorCode::ModelNotFound
+            }
+        })
+    }
+
+    fn restore_model_at_startup(&self, path: &Path) {
+        // Startup restoration is deliberately best-effort.  Keep this operation
+        // serialized with explicit model requests, but never let a failed load
+        // prevent the service (and its Rime path) from coming up.
+        let _load_guard = self.model_load.lock().expect("model load mutex poisoned");
+        if !path.is_file() {
+            self.logger
+                .event("model_autoload_failed", Some(ErrorCode::ModelNotFound));
+            return;
+        }
+        match self.load_runtime(path) {
             Ok(model) => {
                 let loaded_path = model.path.clone();
                 *self.model.lock().expect("model mutex poisoned") = Some(model);
                 self.mark_loaded_preset(Some(&loaded_path));
-                Response::Accepted
+                self.set_active_model_path(Some(&loaded_path));
             }
-            Err(_) => {
-                self.logger.event(
-                    "model_load_failed",
-                    Some(if path.exists() {
-                        ErrorCode::ModelLoadFailed
-                    } else {
-                        ErrorCode::ModelNotFound
-                    }),
+            Err(code) => {
+                self.logger.event("model_autoload_failed", Some(code));
+                eprintln!(
+                    "Lime model auto-load failed for {}: {}",
+                    path.display(),
+                    code
                 );
-                Response::Error {
-                    code: if path.exists() {
-                        ErrorCode::ModelLoadFailed
-                    } else {
-                        ErrorCode::ModelNotFound
-                    },
-                }
             }
         }
+    }
+
+    fn set_active_model_path(&self, path: Option<&Path>) {
+        let value = path.map(normalize_path_string);
+        *self
+            .active_model_path
+            .lock()
+            .expect("active model mutex poisoned") = value;
+    }
+
+    fn persist_model_state_best_effort(&self, event: &'static str) {
+        if let Err(error) = self.persist_model_state() {
+            self.logger.event(event, Some(ErrorCode::Internal));
+            eprintln!("Lime model state persistence failed: {error}");
+        }
+    }
+
+    fn persist_model_state(&self) -> Result<(), std::io::Error> {
+        let presets = self
+            .model_presets
+            .lock()
+            .map_err(|_| std::io::Error::other("model presets mutex poisoned"))?;
+        self.persist_model_presets_locked(&presets)
     }
 
     fn model_presets(&self) -> Vec<ModelPreset> {
@@ -609,29 +691,13 @@ impl CoreService {
                 code: ErrorCode::ModelNotFound,
             };
         };
-        let (context_tokens, backend_preference) = self
-            .config
-            .lock()
-            .map(|config| {
-                let snapshot = config.snapshot();
-                (
-                    snapshot.config.llm_context_token_limit as usize,
-                    backend_preference_for(&snapshot.config.llm_backend),
-                )
-            })
-            .unwrap_or((
-                crate::llama::DEFAULT_CONTEXT_TOKENS,
-                BackendPreference::Cuda,
-            ));
-        match LlamaRuntime::load_with_backend_preference(
-            PathBuf::from(&preset.path),
-            context_tokens,
-            backend_preference,
-        ) {
+        match self.load_runtime(Path::new(&preset.path)) {
             Ok(model) => {
                 let loaded_path = model.path.clone();
                 *self.model.lock().expect("model mutex poisoned") = Some(model);
                 self.mark_loaded_preset(Some(&loaded_path));
+                self.set_active_model_path(Some(&loaded_path));
+                self.persist_model_state_best_effort("model_state_persist_failed");
                 Response::ModelPreset(
                     self.model_presets()
                         .into_iter()
@@ -639,12 +705,7 @@ impl CoreService {
                         .unwrap_or(preset),
                 )
             }
-            Err(_) => {
-                let code = if Path::new(&preset.path).exists() {
-                    ErrorCode::ModelLoadFailed
-                } else {
-                    ErrorCode::ModelNotFound
-                };
+            Err(code) => {
                 self.logger.event("model_preset_select_failed", Some(code));
                 Response::Error { code }
             }
@@ -790,9 +851,15 @@ impl CoreService {
         let target = dir.join("model-presets.json");
         let temp = dir.join("model-presets.json.tmp");
         let values = presets.values().cloned().collect::<Vec<_>>();
+        let active_model_path = self
+            .active_model_path
+            .lock()
+            .map_err(|_| std::io::Error::other("active model mutex poisoned"))?
+            .clone();
         let bytes = serde_json::to_vec_pretty(&VersionedModelPresets {
             version: MODEL_PRESETS_FILE_VERSION,
             presets: &values,
+            active_model_path: active_model_path.as_deref(),
         })
         .map_err(std::io::Error::other)?;
         fs::write(&temp, bytes)?;
@@ -852,17 +919,39 @@ fn migrate_persisted_config(mut config: lime_protocol::Config) -> lime_protocol:
     config
 }
 
-fn load_model_presets(path: &Path) -> Option<Vec<ModelPreset>> {
+fn load_model_state(path: &Path) -> Option<LoadedModelPresets> {
     let bytes = fs::read(path.join("model-presets.json")).ok()?;
     match serde_json::from_slice::<PersistedModelPresets>(&bytes).ok()? {
-        PersistedModelPresets::Versioned { version, presets }
-            if version == MODEL_PRESETS_FILE_VERSION =>
+        PersistedModelPresets::Versioned {
+            version,
+            presets,
+            active_model_path,
+        } if version == MODEL_PRESETS_FILE_VERSION
+            || version == LEGACY_MODEL_PRESETS_FILE_VERSION =>
         {
-            Some(presets)
+            Some(LoadedModelPresets {
+                active_model_path: active_model_path
+                    .filter(|path| !path.is_empty())
+                    .or_else(|| infer_active_model_path(&presets)),
+                presets,
+            })
         }
         PersistedModelPresets::Versioned { .. } => None,
-        PersistedModelPresets::Legacy(presets) => Some(presets),
+        PersistedModelPresets::Legacy(presets) => Some(LoadedModelPresets {
+            active_model_path: infer_active_model_path(&presets),
+            presets,
+        }),
     }
+}
+
+/// Older files only persisted the runtime `loaded` bit.  Use it as a one-time
+/// migration hint when no explicit active path exists, then clear it while the
+/// service is being constructed so it never masquerades as live state.
+fn infer_active_model_path(presets: &[ModelPreset]) -> Option<String> {
+    presets
+        .iter()
+        .find(|preset| preset.loaded && !preset.path.is_empty())
+        .map(|preset| preset.path.clone())
 }
 
 fn now_unix_ms() -> u64 {
@@ -1063,6 +1152,165 @@ mod tests {
         match restarted.handle(Request::ListModelPresets) {
             Response::ModelPresets(presets) => assert!(presets.is_empty()),
             other => panic!("unexpected restarted preset response: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn model_preset_state_persists_active_path_and_reads_legacy_formats() {
+        let directory = std::env::temp_dir().join(format!(
+            "lime-core-model-state-test-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let model_path = directory.join("demo.gguf");
+        let preset = ModelPreset {
+            name: "demo".into(),
+            path: normalize_path_string(&model_path),
+            size_bytes: Some(42),
+            sha256: Some("deadbeef".into()),
+            loaded: false,
+        };
+
+        // A new-format file carries the active model independently of the
+        // runtime-only `loaded` bit.
+        let new_format = VersionedModelPresets {
+            version: MODEL_PRESETS_FILE_VERSION,
+            presets: std::slice::from_ref(&preset),
+            active_model_path: Some(preset.path.as_str()),
+        };
+        fs::write(
+            directory.join("model-presets.json"),
+            serde_json::to_vec(&new_format).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_model_state(&directory).expect("new model state should load");
+        assert_eq!(
+            loaded.active_model_path.as_deref(),
+            Some(preset.path.as_str())
+        );
+        assert_eq!(loaded.presets, vec![preset.clone()]);
+
+        // Version one had no active path.  A persisted `loaded` bit is used as
+        // a migration hint so an upgrade can still restore the previous model.
+        let mut legacy_preset = preset.clone();
+        legacy_preset.loaded = true;
+        let legacy_format = serde_json::json!({
+            "version": LEGACY_MODEL_PRESETS_FILE_VERSION,
+            "presets": [legacy_preset],
+        });
+        fs::write(
+            directory.join("model-presets.json"),
+            serde_json::to_vec(&legacy_format).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_model_state(&directory).expect("legacy model state should load");
+        assert_eq!(
+            loaded.active_model_path.as_deref(),
+            Some(preset.path.as_str())
+        );
+        assert!(loaded.presets[0].loaded);
+
+        // The original unversioned array remains readable as well.
+        fs::write(
+            directory.join("model-presets.json"),
+            serde_json::to_vec(&vec![legacy_preset]).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_model_state(&directory).expect("unversioned state should load");
+        assert_eq!(
+            loaded.active_model_path.as_deref(),
+            Some(preset.path.as_str())
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn startup_model_restore_failure_keeps_service_alive_in_rime_only_fallback() {
+        let directory = std::env::temp_dir().join(format!(
+            "lime-core-model-autoload-failure-test-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let missing_path = directory.join("missing.gguf");
+        let missing_path = normalize_path_string(&missing_path);
+        fs::write(
+            directory.join("model-presets.json"),
+            serde_json::to_vec(&VersionedModelPresets {
+                version: MODEL_PRESETS_FILE_VERSION,
+                presets: &[] as &[ModelPreset],
+                active_model_path: Some(missing_path.as_str()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // No native runtime/model is present in this test environment.  The
+        // failed best-effort restore must not panic or leave a phantom model.
+        let service = CoreService::new(Some(directory.clone()));
+        match service.handle(Request::GetStatus) {
+            Response::Status(status) => {
+                assert!(!status.model.loaded);
+                assert!(status.model.path.is_none());
+                assert_ne!(status.state, ServiceState::Ready);
+            }
+            other => panic!("unexpected status response: {other:?}"),
+        }
+        match service.handle(Request::ListModelPresets) {
+            Response::ModelPresets(presets) => assert!(presets.is_empty()),
+            other => panic!("unexpected preset response: {other:?}"),
+        }
+        // Keep the marker so a temporarily unavailable runtime/model can be
+        // retried on the next service start.
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("model-presets.json")).unwrap())
+                .unwrap();
+        assert_eq!(persisted["active_model_path"], missing_path);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn loaded_model_path_is_persisted_and_restored_when_native_runtime_is_configured() {
+        let Some(model_path) = std::env::var_os("LIME_LLAMA_TEST_MODEL").map(PathBuf::from) else {
+            return;
+        };
+        if std::env::var_os("LIME_LLAMA_RUNTIME_DIR").is_none()
+            && std::env::var_os("LIME_LLAMA_DLL_PATH").is_none()
+        {
+            return;
+        }
+        if !model_path.is_file() {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "lime-core-model-autoload-success-test-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let service = CoreService::new(Some(directory.clone()));
+        let path = normalize_path_string(&model_path);
+        assert_eq!(
+            service.handle(Request::LoadModel { path: path.clone() }),
+            Response::Accepted
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("model-presets.json")).unwrap())
+                .unwrap();
+        assert_eq!(persisted["active_model_path"], path);
+
+        let restarted = CoreService::new(Some(directory.clone()));
+        match restarted.handle(Request::GetStatus) {
+            Response::Status(status) => {
+                assert!(status.model.loaded);
+                assert_eq!(status.model.path.as_deref(), Some(path.as_str()));
+            }
+            other => panic!("unexpected status response: {other:?}"),
         }
         let _ = fs::remove_dir_all(directory);
     }
