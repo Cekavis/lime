@@ -33,6 +33,7 @@
 | D027 | librime `RimeStartMaintenance(false)` 返回 false 表示没有待处理部署任务时，仍继续创建会话；只有会话/方案初始化失败才报告 Rime 初始化错误 |
 | D028 | Windows NSIS 安装包使用 ZLIB 压缩，优先降低 CUDA runtime 大型 DLL 的安装解压时间 |
 | D029 | LLM 只接收前 `llm_rerank_count` 个 Rime 候选中、经 librime 候选预览确认已消费完整输入的候选；`llm_effective_count` 限制从该池置顶的数量，未完整候选保留 Rime 原顺序 |
+| D030 | Windows TSF 按内置 Rime `ascii_composer` 实现中英模式：左 Shift 无修饰短按切换并提交原始组合串，右 Shift 和 Shift+Space 不切换；英文模式由宿主直接处理半角输入，中文模式使用全角标点 |
 
 ## 后续可演进
 

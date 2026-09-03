@@ -89,6 +89,130 @@ bool HasNonTextModifier() {
          (GetKeyState(VK_RWIN) & 0x8000) != 0;
 }
 
+constexpr uint8_t kLeftShiftBit = 0x01;
+constexpr uint8_t kRightShiftBit = 0x02;
+constexpr ULONGLONG kShiftTapTimeoutMs = 500;
+
+bool IsShiftKey(WPARAM key) {
+  return key == VK_SHIFT || key == VK_LSHIFT || key == VK_RSHIFT;
+}
+
+uint8_t ShiftKeyBit(WPARAM key, LPARAM lparam = 0) {
+  if (key == VK_LSHIFT) return kLeftShiftBit;
+  if (key == VK_RSHIFT) return kRightShiftBit;
+  if (key != VK_SHIFT) return 0;
+  // TSF normally forwards the same key-data LPARAM as WM_KEYDOWN.  The right
+  // Shift key has scan code 0x36; generic/unknown data conservatively maps to
+  // the left side so synthetic test events remain deterministic.
+  const UINT scan = (static_cast<UINT_PTR>(lparam) >> 16) & 0xffu;
+  return scan == 0x36u ? kRightShiftBit : kLeftShiftBit;
+}
+
+bool IsKeyRepeat(LPARAM lparam) {
+  // Bit 30 is the previous-key-state flag in WM_KEYDOWN/TSF key data.
+  return (static_cast<UINT_PTR>(lparam) & (static_cast<UINT_PTR>(1) << 30)) != 0;
+}
+
+// Convert a virtual key to the character that a standard Windows keyboard
+// layout would produce.  Keeping this as a side-effect-free function makes
+// the mode logic testable without a TSF context; the caller supplies the
+// modifier state captured by GetKeyState().
+constexpr wchar_t AsciiCharForVirtualKey(WPARAM key, bool shift, bool caps_lock,
+                                         bool num_lock = true) {
+  if (key >= 'A' && key <= 'Z') {
+    const bool upper = shift != caps_lock;
+    const wchar_t letter = static_cast<wchar_t>(key);
+    return upper ? letter : static_cast<wchar_t>(letter + (L'a' - L'A'));
+  }
+  if (key >= 'a' && key <= 'z') {
+    const wchar_t upper = static_cast<wchar_t>(key - (L'a' - L'A'));
+    return (shift != caps_lock) ? upper : static_cast<wchar_t>(key);
+  }
+  if (key >= '0' && key <= '9') {
+    constexpr wchar_t shifted[] = L")!@#$%^&*(";
+    return shift ? shifted[key - '0'] : static_cast<wchar_t>(key);
+  }
+  if (key >= VK_NUMPAD0 && key <= VK_NUMPAD9) {
+    return num_lock ? static_cast<wchar_t>(L'0' + (key - VK_NUMPAD0)) : 0;
+  }
+
+  switch (key) {
+    case VK_SPACE: return L' ';
+    case VK_DECIMAL: return num_lock ? L'.' : 0;
+    case VK_SEPARATOR: return L',';
+    case VK_ADD: return L'+';
+    case VK_SUBTRACT: return L'-';
+    case VK_MULTIPLY: return L'*';
+    case VK_DIVIDE: return L'/';
+    case VK_OEM_1: return shift ? L':' : L';';
+    case VK_OEM_PLUS: return shift ? L'+' : L'=';
+    case VK_OEM_COMMA: return shift ? L'<' : L',';
+    case VK_OEM_MINUS: return shift ? L'_' : L'-';
+    case VK_OEM_PERIOD: return shift ? L'>' : L'.';
+    case VK_OEM_2: return shift ? L'?' : L'/';
+    case VK_OEM_3: return shift ? L'~' : L'`';
+    case VK_OEM_4: return shift ? L'{' : L'[';
+    case VK_OEM_5: return shift ? L'|' : L'\\';
+    case VK_OEM_6: return shift ? L'}' : L']';
+    case VK_OEM_7: return shift ? L'"' : L'\'';
+    case VK_OEM_102: return shift ? L'>' : L'<';
+    default: return 0;
+  }
+}
+
+constexpr std::wstring_view FullShapeForAscii(wchar_t value) {
+  // These are the first/default choices from the bundled Rime punctuator
+  // table.  Letters and digits intentionally return an empty view: Chinese mode must
+  // still let those keys follow the normal preedit/host paths.
+  switch (value) {
+    case L' ': return L"　";
+    case L',': return L"，";
+    case L'.': return L"。";
+    case L'<': return L"《";
+    case L'>': return L"》";
+    case L'/': return L"／";
+    case L'?': return L"？";
+    case L';': return L"；";
+    case L':': return L"：";
+    case L'\\': return L"、";
+    case L'|': return L"·";
+    case L'`': return L"｀";
+    case L'~': return L"～";
+    case L'!': return L"！";
+    case L'@': return L"＠";
+    case L'#': return L"＃";
+    case L'%': return L"％";
+    case L'$': return L"￥";
+    case L'^': return L"……";
+    case L'&': return L"＆";
+    case L'*': return L"＊";
+    case L'(': return L"（";
+    case L')': return L"）";
+    case L'-': return L"－";
+    case L'_': return L"——";
+    case L'+': return L"＋";
+    case L'=': return L"＝";
+    case L'[': return L"「";
+    case L']': return L"」";
+    case L'{': return L"『";
+    case L'}': return L"』";
+    default: return {};
+  }
+}
+
+bool IsPunctuationCharacter(wchar_t value) {
+  return value == L' ' || (value >= L'!' && value <= L'/') ||
+         (value >= L':' && value <= L'@') ||
+         (value >= L'[' && value <= L'`') ||
+         (value >= L'{' && value <= L'~');
+}
+
+static_assert(AsciiCharForVirtualKey('A', false, false) == L'a');
+static_assert(AsciiCharForVirtualKey('A', true, false) == L'A');
+static_assert(AsciiCharForVirtualKey('1', true, false) == L'!');
+static_assert(FullShapeForAscii(L',') == std::wstring_view(L"，"));
+static_assert(FullShapeForAscii(L'^') == std::wstring_view(L"……"));
+
 // Rime's stock Windows key bindings use PageUp/PageDown as well as the
 // unshifted -/= keys.  Keep those aliases in the TSF sink so a key that the
 // candidate window (or the user) uses for paging is not passed to the host
@@ -712,6 +836,15 @@ HRESULT CompositionSession::DoEditSession(TfEditCookie cookie) {
     owner->CompleteEditSession(action, generation, succeeded);
     return succeeded ? S_OK : E_FAIL;
   }
+  // A Commit request can represent either the end of a live composition or a
+  // standalone direct insertion (ASCII mode/full-shape punctuation).  Avoid
+  // creating a transient TSF composition for the latter; InsertTextAtSelection
+  // follows the host's normal insertion path and keeps ASCII mode invisible.
+  if (action == TextService::Action::Commit && !owner->HasComposition()) {
+    succeeded = owner->InsertTextAtSelection(context.Get(), cookie, text);
+    owner->CompleteEditSession(action, generation, succeeded);
+    return succeeded ? S_OK : E_FAIL;
+  }
   if (!owner->EnsureComposition(context.Get(), cookie)) {
     owner->CompleteEditSession(action, generation, false);
     return E_FAIL;
@@ -776,11 +909,26 @@ HRESULT TextService::Deactivate() {
   page_size_ = 9;
   schema_reset_pending_ = false;
   passthrough_notified_ = false;
+  shift_down_mask_ = 0;
+  shift_pending_mask_ = 0;
+  left_shift_down_tick_ = 0;
+  right_shift_down_tick_ = 0;
+  ascii_mode_ = false;
+  single_quote_open_ = false;
+  double_quote_open_ = false;
   if (keystroke_manager_ && client_id_ != TF_CLIENTID_NULL) keystroke_manager_->UnadviseKeyEventSink(client_id_);
   keystroke_manager_.Reset(); thread_manager_.Reset(); client_id_ = TF_CLIENTID_NULL; activation_flags_ = 0; return S_OK;
 }
 HRESULT TextService::OnSetFocus(BOOL foreground) {
   if (foreground) return S_OK;
+  shift_down_mask_ = 0;
+  shift_pending_mask_ = 0;
+  left_shift_down_tick_ = 0;
+  right_shift_down_tick_ = 0;
+  // Punctuation pairing belongs to the focused document.  Do not carry an
+  // opening quote from one application/window into the next one.
+  single_quote_open_ = false;
+  double_quote_open_ = false;
   if (!composition_) {
     // An Update/Commit session may already be queued even though StartComposition
     // has not run yet.  Focus loss invalidates that callback before local state
@@ -865,17 +1013,70 @@ wchar_t TextService::PreeditChar(WPARAM key) const {
   return 0;
 }
 bool TextService::IsPrintable(WPARAM key) const {
-  return PreeditChar(key) != 0;
+  return IsPreeditKey(key);
+}
+bool TextService::IsPreeditKey(WPARAM key) const {
+  if (HasNonTextModifier()) return false;
+  if (key == VK_OEM_3 || key == VK_OEM_7) {
+    // The unshifted OEM keys are Rime preedit delimiters.  Shifted variants
+    // produce `~`/`\"` and must continue through the Chinese punctuator path.
+    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) return false;
+    return !preedit_.empty();
+  }
+  return (key >= 'A' && key <= 'Z') || (key >= 'a' && key <= 'z');
+}
+std::wstring TextService::AsciiText(WPARAM key) const {
+  if (HasNonTextModifier()) return {};
+  const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+  const bool caps_lock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+  const bool num_lock = (GetKeyState(VK_NUMLOCK) & 0x0001) != 0;
+  const wchar_t value = AsciiCharForVirtualKey(key, shift, caps_lock, num_lock);
+  return value ? std::wstring(1, value) : std::wstring();
+}
+bool TextService::IsChinesePunctuationKey(WPARAM key) const {
+  if (HasNonTextModifier()) return false;
+  const std::wstring text = AsciiText(key);
+  return text.size() == 1 && IsPunctuationCharacter(text.front());
+}
+std::wstring TextService::ChinesePunctuationText(WPARAM key) {
+  const std::wstring ascii = AsciiText(key);
+  if (ascii.size() != 1 || !IsPunctuationCharacter(ascii.front())) return {};
+  const wchar_t value = ascii.front();
+  if (value == L'\'') {
+    const wchar_t quote = single_quote_open_ ? L'’' : L'‘';
+    single_quote_open_ = !single_quote_open_;
+    return std::wstring(1, quote);
+  }
+  if (value == L'"') {
+    const wchar_t quote = double_quote_open_ ? L'”' : L'“';
+    double_quote_open_ = !double_quote_open_;
+    return std::wstring(1, quote);
+  }
+  const std::wstring_view mapped = FullShapeForAscii(value);
+  return mapped.empty() ? std::wstring() : std::wstring(mapped);
 }
 bool TextService::IsImeKey(WPARAM key) const {
-  return IsPrintable(key) || key == VK_BACK || key == VK_RETURN ||
+  return IsPreeditKey(key) || key == VK_BACK || key == VK_RETURN ||
          (key >= '1' && key <= '9') || key == VK_SPACE || key == VK_ESCAPE ||
          IsPreviousPageKey(key) || IsNextPageKey(key) || key == VK_UP ||
          key == VK_DOWN;
 }
-HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* eaten) {
+HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
+                                   BOOL* eaten) {
   if (!eaten) return E_POINTER;
   try {
+    // A non-Shift key turns a possible bare-Shift tap into a chord.  This is
+    // deliberately done in the probe so OnKeyDown sees the same state even
+    // when the host invokes both callbacks under different TSF locks.
+    if (!IsShiftKey(key)) shift_pending_mask_ = 0;
+    if (IsShiftKey(key) && ShiftKeyBit(key, lparam) == kRightShiftBit) {
+      // Shift_R is configured as a no-op by the bundled Rime schema.  It is
+      // still a chord if pressed while Shift_L is pending, so cancel the
+      // pending left-toggle before letting the host receive the key.
+      shift_pending_mask_ = 0;
+      *eaten = FALSE;
+      return S_OK;
+    }
     if (cancel_pending_) {
       if (!ResolvePendingCancellation()) {
         if (!passthrough_notified_) {
@@ -895,12 +1096,34 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL
       *eaten = TRUE;
       return S_OK;
     }
+    if (IsShiftKey(key)) {
+      const uint8_t bit = ShiftKeyBit(key, lparam);
+      // Shift is a switch key only when no Ctrl/Alt/Win modifier participates
+      // in the chord.  The key itself is consumed so the host cannot treat a
+      // bare Shift as an ordinary accelerator.
+      *eaten = HasNonTextModifier() ? FALSE : TRUE;
+      return S_OK;
+    }
     if (context) active_context_ = context;
     // OnTestKeyDown is only a probe.  Do not open a read edit session or call
     // the service here: some hosts keep the probe inside their own TSF lock,
     // which makes the real write session in OnKeyDown return TF_E_LOCKED.
     // Candidate fetching and context reads happen exactly once in OnKeyDown.
-    if (IsPrintable(key)) {
+    // In ASCII mode librime rejects ordinary text keys when no composition is
+    // active, letting the host insert them with its own keyboard layout.  Do
+    // the same here instead of synthesizing a second TSF edit session.
+    if (ascii_mode_ &&
+        !(key == VK_ESCAPE &&
+          (composition_ || !preedit_.empty() || terminal_edit_pending_))) {
+      *eaten = FALSE;
+      return S_OK;
+    }
+    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && key == VK_SPACE) {
+      // Shift+Space is explicitly not an ascii-composer switch gesture.
+      *eaten = FALSE;
+      return S_OK;
+    }
+    if (IsPreeditKey(key) || IsChinesePunctuationKey(key)) {
       if (!connected_) RefreshConfigRevision();
       if (!connected_) {
         if (!passthrough_notified_) {
@@ -918,7 +1141,15 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL
       passthrough_notified_ = true;
     }
   }
-  if (IsPrintable(key)) {
+  if (ascii_mode_) {
+    // No composition is kept in persistent ASCII mode; reject the key so the
+    // host commits letters, digits and half-width punctuation directly.
+    *eaten = FALSE;
+  } else if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && key == VK_SPACE) {
+    *eaten = FALSE;
+  } else if (IsPreeditKey(key)) {
+    *eaten = connected_ ? TRUE : FALSE;
+  } else if (IsChinesePunctuationKey(key)) {
     *eaten = connected_ ? TRUE : FALSE;
   } else if (key == VK_ESCAPE &&
              (composition_ || !preedit_.empty() || terminal_edit_pending_)) {
@@ -937,10 +1168,70 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL
   }
   return S_OK;
 }
-HRESULT TextService::OnTestKeyUp(ITfContext*, WPARAM, LPARAM, BOOL* eaten) { if (!eaten) return E_POINTER; *eaten = FALSE; return S_OK; }
-HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* eaten) {
+HRESULT TextService::OnTestKeyUp(ITfContext*, WPARAM key, LPARAM lparam, BOOL* eaten) {
+  if (!eaten) return E_POINTER;
+  if (!IsShiftKey(key)) {
+    *eaten = FALSE;
+    return S_OK;
+  }
+  const uint8_t bit = ShiftKeyBit(key, lparam);
+  if (bit == kRightShiftBit) {
+    *eaten = FALSE;
+    return S_OK;
+  }
+  *eaten = (bit != 0 && (shift_pending_mask_ & bit) != 0) ? TRUE : FALSE;
+  return S_OK;
+}
+HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
+                               BOOL* eaten) {
   if (!eaten) return E_POINTER;
   try {
+    if (IsShiftKey(key)) {
+      const uint8_t bit = ShiftKeyBit(key, lparam);
+      if (bit == kRightShiftBit) {
+        shift_pending_mask_ = 0;
+        *eaten = FALSE;
+        return S_OK;
+      }
+      const bool first_press = bit != 0 && (shift_down_mask_ & bit) == 0;
+      if (bit != 0) {
+        if (first_press) {
+          const bool first_shift = shift_down_mask_ == 0;
+          shift_down_mask_ |= bit;
+          const ULONGLONG now = GetTickCount64();
+          if (bit == kLeftShiftBit) {
+            left_shift_down_tick_ = now;
+          } else {
+            right_shift_down_tick_ = now;
+          }
+          // Do not make Ctrl/Alt/Win chords look like a bare switch.  A
+          // second Shift held alongside the first also shares the original
+          // tap, preventing a double toggle when both keys are released.
+          if (first_shift && !HasNonTextModifier() && !cancel_pending_ &&
+              !terminal_edit_pending_ && !IsKeyRepeat(lparam)) {
+            shift_pending_mask_ |= bit;
+          } else {
+            // A second Shift key is a chord, not a second tap.  Clear the
+            // original pending bit as well so releasing either key cannot
+            // toggle the mode after both keys were held together.
+            shift_pending_mask_ = 0;
+          }
+        }
+      }
+      if (cancel_pending_ && !ResolvePendingCancellation()) {
+        *eaten = TRUE;
+        return S_OK;
+      }
+      if (terminal_edit_pending_) {
+        *eaten = TRUE;
+        return S_OK;
+      }
+      *eaten = HasNonTextModifier() ? FALSE : TRUE;
+      return S_OK;
+    }
+    // Any non-Shift key cancels a pending bare-Shift tap, including Ctrl/Alt/
+    // Win themselves.  This preserves host shortcut handling.
+    shift_pending_mask_ = 0;
     if (cancel_pending_ && !ResolvePendingCancellation()) {
       *eaten = TRUE;
       return S_OK;
@@ -956,10 +1247,95 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
   }
   return S_OK;
 }
-HRESULT TextService::OnKeyUp(ITfContext*, WPARAM, LPARAM, BOOL* eaten) { if (!eaten) return E_POINTER; *eaten = FALSE; return S_OK; }
+HRESULT TextService::OnKeyUp(ITfContext* context, WPARAM key, LPARAM lparam,
+                             BOOL* eaten) {
+  if (!eaten) return E_POINTER;
+  try {
+    if (!IsShiftKey(key)) {
+      *eaten = FALSE;
+      return S_OK;
+    }
+    const uint8_t bit = ShiftKeyBit(key, lparam);
+    if (bit == kRightShiftBit) {
+      *eaten = FALSE;
+      return S_OK;
+    }
+    const bool pending = bit != 0 && (shift_pending_mask_ & bit) != 0;
+    const ULONGLONG down_tick = bit == kRightShiftBit ? right_shift_down_tick_
+                                                      : left_shift_down_tick_;
+    const ULONGLONG now = GetTickCount64();
+    const bool short_tap = pending && down_tick != 0 &&
+                           now >= down_tick && now - down_tick <= kShiftTapTimeoutMs;
+    if (bit != 0) {
+      shift_down_mask_ &= static_cast<uint8_t>(~bit);
+      shift_pending_mask_ &= static_cast<uint8_t>(~bit);
+    }
+    if (short_tap && !HasNonTextModifier()) {
+      if (context) active_context_ = context;
+      if (cancel_pending_ && !ResolvePendingCancellation()) {
+        *eaten = TRUE;
+        return S_OK;
+      }
+      // ToggleAsciiMode reports edit failures through the native status popup;
+      // either way Shift itself remains consumed and must not reach the host.
+      ToggleAsciiMode(context);
+      *eaten = TRUE;
+      return S_OK;
+    }
+    // A long hold or a Shift chord has no mode-switch side effect.  The keydown
+    // was consumed for an eligible bare Shift, so consume its keyup as well.
+    *eaten = pending ? TRUE : FALSE;
+    return S_OK;
+  } catch (...) {
+    *eaten = FALSE;
+    return S_OK;
+  }
+}
 HRESULT TextService::OnPreservedKey(ITfContext*, REFGUID, BOOL* eaten) { if (!eaten) return E_POINTER; *eaten = FALSE; return S_OK; }
 
+bool TextService::ToggleAsciiMode(ITfContext* context) {
+  const bool target_ascii = !ascii_mode_;
+  if (!preedit_.empty() || composition_) {
+    // The bundled Weasel/Rime configuration uses Shift_L: commit_code, so a
+    // pending composition is committed exactly as the user typed it.
+    ITfContext* composition_owner = composition_context_ ? composition_context_.Get()
+                                                         : context;
+    // Mode switching is a user-visible state transition.  Require the edit to
+    // complete synchronously so a queued terminal edit cannot swallow the
+    // next ASCII key before the mode has actually changed.
+    if (!RequestEdit(composition_owner, Action::Commit, preedit_, true)) {
+      const std::wstring reason = last_edit_error_ == S_OK
+                                      ? L"切换模式时无法提交组合串"
+                                      : EditErrorText(last_edit_error_);
+      g_candidates.ShowStatus(context, std::wstring(L"Lime：") + reason);
+      return false;
+    }
+    if (terminal_edit_pending_) {
+      HideCandidates();
+    } else {
+      ClearCompositionState();
+    }
+  }
+  ascii_mode_ = target_ascii;
+  // Quote pairing is scoped to Chinese punctuation mode.  Resetting it at a
+  // mode boundary mirrors a fresh Rime punctuation processor and avoids a
+  // stale opening quote after a long ASCII session.
+  single_quote_open_ = false;
+  double_quote_open_ = false;
+  g_candidates.ShowStatus(context, ascii_mode_ ? L"Lime：英文模式" : L"Lime：中文模式");
+  return true;
+}
+
 bool TextService::HandleKey(ITfContext* context, WPARAM key) {
+  // Persistent ASCII mode deliberately leaves ordinary keys to the host, as
+  // Weasel does when its ascii_composer has no active composition.  This
+  // preserves the user's Windows keyboard layout and all half-width symbols.
+  if (ascii_mode_ &&
+      !(key == VK_ESCAPE &&
+        (composition_ || !preedit_.empty() || terminal_edit_pending_))) {
+    return false;
+  }
+
   // Esc must remain a local cancellation even while a schema reset is waiting
   // on a rejected edit lock; otherwise the host could receive it with a live
   // composition still attached.
@@ -967,7 +1343,13 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       !ResetCompositionForSchemaChange(context)) {
     return false;
   }
-  if (IsPrintable(key)) {
+  if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && key == VK_SPACE) {
+    // Match ascii_composer's explicit Shift+Space no-op.  In particular, do
+    // not accidentally turn it into a persistent mode switch or a full-width
+    // space while the user is holding Shift for another host gesture.
+    return false;
+  }
+  if (IsPreeditKey(key)) {
     wchar_t value[2] = {PreeditChar(key), 0};
     preedit_ += value;
     if (!UpdateCandidates(context)) {
@@ -1167,6 +1549,48 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
                       page_size_, {}, preceding_preview_);
     return true;
   }
+  if (IsChinesePunctuationKey(key)) {
+    // Rime's punctuator commits a pending composition before emitting a
+    // full-shape symbol.  Keep that behavior in the snapshot-based adapter;
+    // when there is no composition, insert the symbol directly at the host
+    // selection through the same TSF edit-session path.
+    // Punctuation has no input request that could refresh the connection, so
+    // re-check the service state before claiming the key.  This closes the
+    // small window where the process went unavailable after the last letter.
+    RefreshConfigRevision(context);
+    if (!connected_) return false;
+    const bool previous_single_quote = single_quote_open_;
+    const bool previous_double_quote = double_quote_open_;
+    const std::wstring punctuation = ChinesePunctuationText(key);
+    if (punctuation.empty()) return false;
+
+    std::wstring pinyin;
+    std::wstring commit = punctuation;
+    if (!preedit_.empty() || composition_) {
+      pinyin = preedit_;
+      if (!candidates_.empty()) {
+        const size_t index = std::min(selected_candidate_, candidates_.size() - 1);
+        commit = candidates_[index].commit + punctuation;
+      } else if (!preedit_.empty()) {
+        commit = preedit_ + punctuation;
+      }
+    }
+    if (!RequestEdit(context, Action::Commit, commit)) {
+      single_quote_open_ = previous_single_quote;
+      double_quote_open_ = previous_double_quote;
+      g_candidates.ShowStatus(context, L"Lime：符号输入失败");
+      return true;
+    }
+    if (!pinyin.empty() && !candidates_.empty()) {
+      LearnCandidate(pinyin, commit.substr(0, commit.size() - punctuation.size()));
+    }
+    if (terminal_edit_pending_) {
+      HideCandidates();
+    } else {
+      ClearCompositionState();
+    }
+    return true;
+  }
   return false;
 }
 
@@ -1194,9 +1618,15 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
   HRESULT result = E_FAIL, request = context->RequestEditSession(client_id_, &session, TF_ES_READ | TF_ES_SYNC, &result);
   if (FAILED(request) || FAILED(result)) { preceding.clear(); context_available = false; }
   std::string body; const std::string json = "{\"kind\":\"input\",\"payload\":{\"request_id\":" + std::to_string(++request_id_) + ",\"preedit\":\"" + JsonEscape(preedit) + "\",\"preceding_text\":\"" + JsonEscape(preceding) + "\",\"context_available\":" + (context_available ? "true" : "false") + ",\"config_revision\":" + std::to_string(config_revision_) + "}}";
-  if (!g_pipe.Request(json, body)) { connected_ = false; return false; }
-  if (body.find("\"kind\":\"error\"") != std::string::npos) { RefreshConfigRevision(context); return false; }
-   connected_ = true; passthrough_notified_ = false; const std::string candidates_needle = "\"candidates\":["; const size_t array = body.find(candidates_needle); if (array == std::string::npos) return false;
+   if (!g_pipe.Request(json, body)) { connected_ = false; return false; }
+   if (body.find("\"kind\":\"error\"") != std::string::npos) { RefreshConfigRevision(context); return false; }
+    std::string service_state;
+    if (!JsonField(body, "service_state", service_state) ||
+        (service_state != "ready" && service_state != "rime_only")) {
+      connected_ = false;
+      return false;
+    }
+    connected_ = true; passthrough_notified_ = false; const std::string candidates_needle = "\"candidates\":["; const size_t array = body.find(candidates_needle); if (array == std::string::npos) return false;
    const size_t array_end = JsonArrayEnd(body, array + candidates_needle.size() - 1); if (array_end == std::string::npos) return false;
    size_t pos = array + candidates_needle.size();
    while (pos < array_end) {
@@ -1231,6 +1661,17 @@ bool TextService::UpdateCandidates(ITfContext* context) {
 void TextService::RefreshConfigRevision(ITfContext* context) {
   std::string body;
   if (!g_pipe.Request(R"({"kind":"get_status"})", body)) { connected_ = false; return; }
+  std::string kind;
+  std::string state;
+  if (!JsonField(body, "kind", kind) || kind != "status" ||
+      !JsonField(body, "state", state) ||
+      (state != "ready" && state != "rime_only")) {
+    // Reloading/unavailable states intentionally fall back to the host.  The
+    // TSF adapter must not eat letters or punctuation while the service cannot
+    // produce a reliable Rime snapshot.
+    connected_ = false;
+    return;
+  }
   connected_ = true;
   std::string schema;
   if (JsonField(body, "rime_schema", schema) && !schema.empty()) {
@@ -1306,7 +1747,8 @@ bool TextService::ResolvePendingCancellation() {
   return true;
 }
 
-bool TextService::RequestEdit(ITfContext* context, Action action, const std::wstring& text) {
+bool TextService::RequestEdit(ITfContext* context, Action action, const std::wstring& text,
+                              bool synchronous) {
   last_edit_pending_ = false;
   if (terminal_edit_pending_ && action == Action::Update) {
     // Do not enqueue a new composition update behind a pending commit/cancel;
@@ -1342,12 +1784,11 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
   }
   last_edit_error_ = S_OK;
   HRESULT result = E_FAIL;
-  // TF_ES_READWRITE leaves the scheduling mode as ASYNCDONTCARE: TSF runs the
-  // edit synchronously when the host permits it, otherwise queues it without
-  // making the caller guess whether an explicit SYNC request is legal for the
-  // current key-event callback.  The actual edit result is still returned in
-  // `result` (phrSession); the outer HRESULT only reports request errors.
-  HRESULT request = context->RequestEditSession(client_id_, session, TF_ES_READWRITE, &result);
+  // Ordinary composition updates use ASYNCDONTCARE so TSF can queue them when
+  // the host is locked.  Mode switches opt into TF_ES_SYNC and therefore fail
+  // rather than queueing: the next key must observe the new mode immediately.
+  const DWORD edit_flags = TF_ES_READWRITE | (synchronous ? TF_ES_SYNC : 0);
+  HRESULT request = context->RequestEditSession(client_id_, session, edit_flags, &result);
   session->Release();
   if (FAILED(request)) {
     last_edit_error_ = request;
@@ -1359,6 +1800,17 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
   // TF_S_ASYNC means the session was accepted and will invoke DoEditSession
   // later; it is a successful request even though there is no edit result yet.
   if (request == TF_S_ASYNC || result == TF_S_ASYNC) {
+    if (synchronous) {
+      // A synchronous mode switch must never leave a terminal edit queued: it
+      // would make the following host key appear to disappear. Invalidate any
+      // accepted callback and let the user retry after the editor releases its
+      // lock.
+      ++edit_generation_;
+      last_edit_error_ = TF_E_SYNCHRONOUS;
+      terminal_edit_pending_ = false;
+      terminal_edit_generation_ = 0;
+      return false;
+    }
     last_edit_pending_ = true;
     if (action == Action::Cancel) cancel_pending_ = true;
     return true;
@@ -1444,6 +1896,48 @@ bool TextService::SetCompositionText(TfEditCookie cookie, const std::wstring& te
 bool TextService::CommitComposition(TfEditCookie cookie, const std::wstring& text) {
   if (!SetCompositionText(cookie, text)) return false;
   return EndComposition(cookie);
+}
+bool TextService::InsertTextAtSelection(ITfContext* context, TfEditCookie cookie,
+                                        const std::wstring& text) {
+  if (!context) {
+    last_edit_error_ = E_POINTER;
+    return false;
+  }
+  ComPtr<ITfInsertAtSelection> inserter;
+  HRESULT hr = context->QueryInterface(IID_PPV_ARGS(&inserter));
+  if (FAILED(hr) || !inserter) {
+    last_edit_error_ = FAILED(hr) ? hr : E_NOINTERFACE;
+    return false;
+  }
+
+  ComPtr<ITfRange> inserted;
+  hr = inserter->InsertTextAtSelection(
+      cookie, TF_IAS_NOQUERY, text.c_str(), static_cast<LONG>(text.size()),
+      &inserted);
+  if (FAILED(hr)) {
+    last_edit_error_ = hr;
+    return false;
+  }
+
+  // Most context owners move the selection for us.  Explicitly collapse the
+  // returned range to its end as a compatibility measure for hosts that keep
+  // the selection at the beginning of an insertion.
+  if (inserted) {
+    ComPtr<ITfRange> caret;
+    if (SUCCEEDED(inserted->Clone(&caret)) && caret &&
+        SUCCEEDED(caret->Collapse(cookie, TF_ANCHOR_END))) {
+      TF_SELECTION selection{caret.Get(), {TF_AE_NONE, FALSE}};
+      hr = context->SetSelection(cookie, 1, &selection);
+      if (FAILED(hr)) {
+        // The insertion itself already succeeded.  A few legacy context
+        // owners reject an explicit selection update even though they leave
+        // their caret at the insertion end; report the text operation as
+        // successful and let the host retain its native caret behavior.
+        last_edit_error_ = hr;
+      }
+    }
+  }
+  return true;
 }
 bool TextService::EndComposition(TfEditCookie cookie) {
   if (!composition_) return true;

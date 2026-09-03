@@ -14,6 +14,7 @@
 - 增加 4 字节 little-endian 长度前缀 + UTF-8 JSON Named Pipe 客户端，连接后执行 protocol v1 握手；支持 `LIME_PIPE` 覆盖管道名。
 - 首次连接失败时可通过 `LIME_SERVICE_PATH` 启动本地 `lime-service`，随后自动重试；连接/握手/解析失败立即清除候选并让按键透传。
 - 增加原生 Win32 popup 候选窗，显示 1-9 编号、当前选中项和分页结果；宿主光标矩形从客户区坐标转为屏幕坐标后定位 popup；PageUp/PageDown、Rime 默认 `-`/`=` 及 Weasel 滚轮翻页，候选窗不依赖 Tauri。候选窗只显示前文 auxiliary 行和候选，不重复显示宿主中的拼音。
+- 按内置 `resources/rime/default.yaml` 的 `ascii_composer` 约定实现中英切换：左 Shift 无修饰短按切换模式并在切换前提交原始组合串，右 Shift 保持 no-op，Shift+Space 不触发切换；英文模式把字母、数字和半角符号交给宿主直接输入，中文模式保留拼音候选并通过 TSF edit session 插入全角标点。
 - 连接成功后读取 `get_status` 的配置 revision；输入请求携带最新 revision，服务配置更新导致的过期响应不会覆盖当前候选。
 - 保留敏感控件不做特殊处理的首期决策；不记录原始前文、preedit 或候选分数。
 

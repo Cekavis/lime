@@ -51,15 +51,23 @@ class TextService final : public ITfTextInputProcessorEx,
   bool EnsureComposition(ITfContext* context, TfEditCookie cookie);
   bool SetCompositionText(TfEditCookie cookie, const std::wstring& text);
   bool CommitComposition(TfEditCookie cookie, const std::wstring& text);
+  bool InsertTextAtSelection(ITfContext* context, TfEditCookie cookie,
+                             const std::wstring& text);
   bool EndComposition(TfEditCookie cookie);
+  bool HasComposition() const { return composition_ != nullptr; }
   bool IsEditCurrent(uint64_t generation) const { return generation == edit_generation_; }
   void CompleteEditSession(Action action, uint64_t generation, bool succeeded);
   uint32_t ContextLimit() const { return context_limit_; }
 
  private:
   bool HandleKey(ITfContext* context, WPARAM key);
+  bool ToggleAsciiMode(ITfContext* context);
   bool IsImeKey(WPARAM key) const;
   bool IsPrintable(WPARAM key) const;
+  bool IsPreeditKey(WPARAM key) const;
+  bool IsChinesePunctuationKey(WPARAM key) const;
+  std::wstring AsciiText(WPARAM key) const;
+  std::wstring ChinesePunctuationText(WPARAM key);
   wchar_t PreeditChar(WPARAM key) const;
   bool FetchCandidates(ITfContext* context, const std::wstring& preedit,
                        std::vector<Candidate>& candidates, std::wstring& preceding,
@@ -69,7 +77,8 @@ class TextService final : public ITfTextInputProcessorEx,
   bool ResetCompositionForSchemaChange(ITfContext* context);
   void LearnCandidate(std::wstring_view pinyin, std::wstring_view text);
   bool ResolvePendingCancellation();
-  bool RequestEdit(ITfContext* context, Action action, const std::wstring& text);
+  bool RequestEdit(ITfContext* context, Action action, const std::wstring& text,
+                   bool synchronous = false);
   bool CancelComposition(ITfContext* context);
   bool SetSelectionToCompositionEnd(TfEditCookie cookie);
   void ClearCompositionState();
@@ -110,6 +119,18 @@ class TextService final : public ITfTextInputProcessorEx,
   HRESULT last_edit_error_ = S_OK;
   bool passthrough_notified_ = false;
   Microsoft::WRL::ComPtr<ITfContext> active_context_;
+  // Mirrors the bundled Rime ascii_composer configuration: left Shift uses
+  // commit_code semantics, while right Shift is a no-op.  A left Shift key
+  // toggles on a short, unmodified press/release; pressing any other key
+  // clears the pending toggle.  The mode itself survives focus changes while
+  // this TSF instance remains active.
+  uint8_t shift_down_mask_ = 0;
+  uint8_t shift_pending_mask_ = 0;
+  ULONGLONG left_shift_down_tick_ = 0;
+  ULONGLONG right_shift_down_tick_ = 0;
+  bool ascii_mode_ = false;
+  bool single_quote_open_ = false;
+  bool double_quote_open_ = false;
 };
 
 HRESULT RegisterComServer();
