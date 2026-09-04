@@ -613,7 +613,7 @@ impl LlamaRuntime {
             .iter()
             .map(|score| score.token_logprobs.len())
             .sum::<usize>();
-        let mismatch_count = plans.iter().filter(|plan| plan.mismatch).count();
+        let mismatch_count = plans.iter().filter(|plan| !plan.exact_boundary).count();
         let scored_count = scores.len().min(u32::MAX as usize) as u32;
         Ok(ScoredCandidates {
             scores,
