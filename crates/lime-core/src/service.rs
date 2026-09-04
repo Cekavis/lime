@@ -445,15 +445,16 @@ impl CoreService {
                 return Err(ErrorCode::ModelLoadFailed);
             }
         };
-        let candidates = ranking.candidates;
-        let diagnostics = ranking.diagnostics;
+        let llm_performance = ranking.llm_performance.clone();
+        let candidates = ranking.result.candidates;
+        let diagnostics = ranking.result.diagnostics;
         self.record_input_history(
             &request,
             rime_candidates,
             candidates.clone(),
             diagnostics.clone(),
             service_state,
-            ranking.llm_performance.clone(),
+            llm_performance,
         );
         if !self.generation.is_current(generation) {
             return Err(ErrorCode::RequestCancelled);

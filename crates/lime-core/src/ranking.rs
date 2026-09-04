@@ -10,6 +10,11 @@ pub use crate::llama::{CandidateScore, LlamaRuntime, ModelMetadata, TokenInfo};
 pub struct RerankResult {
     pub candidates: Vec<Candidate>,
     pub diagnostics: Vec<CandidateDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RankingOutcome {
+    pub result: RerankResult,
     pub llm_performance: Option<LlmPerformance>,
 }
 
@@ -148,7 +153,7 @@ pub(crate) fn try_rerank_selected_candidates_with_preedit(
     runtime: Option<&LlamaRuntime>,
     rerank_count: usize,
     effective_count: usize,
-) -> Result<RerankResult, String> {
+) -> Result<RankingOutcome, String> {
     try_rerank_selected_candidates_with_scorer_and_preedit(
         candidates,
         candidate_indices,
@@ -177,6 +182,7 @@ fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
         rerank_count,
         effective_count,
     )
+    .map(|outcome| outcome.result)
 }
 
 fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?Sized>(
@@ -187,7 +193,7 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
     runtime: Option<&S>,
     rerank_count: usize,
     effective_count: usize,
-) -> Result<RerankResult, String> {
+) -> Result<RankingOutcome, String> {
     let pool_indices = selected_pool_indices(candidate_indices, candidates.len(), rerank_count);
     let pool_indices = match preedit {
         Some(preedit) => pool_indices
@@ -238,9 +244,10 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
         (Vec::new(), None)
     };
 
-    let mut result = build_rerank_result(candidates, model_active, score_rows, effective_count);
-    result.llm_performance = llm_performance;
-    Ok(result)
+    Ok(RankingOutcome {
+        result: build_rerank_result(candidates, model_active, score_rows, effective_count),
+        llm_performance,
+    })
 }
 
 fn candidate_allowed_for_llm(candidate: &Candidate, preedit: &str) -> bool {
@@ -330,7 +337,6 @@ fn build_rerank_result(
     RerankResult {
         candidates: final_order,
         diagnostics,
-        llm_performance: None,
     }
 }
 
@@ -503,6 +509,7 @@ mod tests {
         assert_eq!(scorer.seen.into_inner(), vec!["你好", "nihao", "3D打印"]);
         assert_eq!(
             result
+                .result
                 .diagnostics
                 .iter()
                 .filter_map(|row| row.llm_candidate.as_ref())
@@ -511,10 +518,12 @@ mod tests {
             vec!["你好", "nihao", "3D打印"]
         );
         assert!(result
+            .result
             .candidates
             .iter()
             .any(|candidate| candidate.commit_text == "hello"));
         assert!(result
+            .result
             .candidates
             .iter()
             .any(|candidate| candidate.commit_text == "ni-hao"));
@@ -562,9 +571,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(scorer.calls.get(), 0);
-        assert_eq!(result.candidates, candidates);
+        assert_eq!(result.result.candidates, candidates);
         assert!(result.llm_performance.is_none());
         assert!(result
+            .result
             .diagnostics
             .iter()
             .all(|row| row.llm_candidate.is_none() && row.logprobs.is_empty()));
