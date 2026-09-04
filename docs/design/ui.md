@@ -8,9 +8,9 @@
 
 候选项只显示必要信息：候选文本、平台生成的编号和可选的紧凑前文预览。不显示排序分数、延迟、模型名称或内部状态。PageUp/PageDown 以及 Rime 默认的未移位 `-`/`=` 可翻页，滚轮由 WeaselUI 转发到同一状态机。
 
-中文/英文模式遵循内置 Rime `ascii_composer`：左 Shift 无修饰短按切换，切换前提交未确认组合串；右 Shift 为 no-op，Shift+Space 不切换。英文模式不建立 TSF composition，字母、数字和半角符号由宿主键盘布局直接提交；中文模式继续显示候选，并使用内置 Rime 全角标点的首选映射（成对引号按焦点和模式边界重置）。
+中文/英文模式遵循内置 Rime `ascii_composer`：左 Shift 无修饰短按切换，切换前提交未确认组合串；右 Shift 为 no-op，Shift+Space 不切换。英文模式不建立 TSF composition，字母、数字和半角符号由宿主键盘布局直接提交；中文模式继续显示候选，除空格外使用内置 Rime 全角标点的首选映射，空格始终提交半角 U+0020（成对引号按焦点和模式边界重置）。
 
-无拼音组合串时的全角符号仍通过一个立即结束的 TSF composition 提交，与候选提交共用同一写入生命周期；按键回调不直接修改宿主 selection，避免 Chromium/WebView2 文本上下文在 `ITfInsertAtSelection` 中重入 Windows 文本输入框架。
+无拼音组合串时的独立标点（空格除外）仍通过一个立即结束的 TSF composition 提交；独立空格也复用同一生命周期但写入半角 U+0020，有候选时 Space 仍提交选中候选，Shift+Space 继续透传。按键回调不直接修改宿主 selection，避免 Chromium/WebView2 文本上下文在 `ITfInsertAtSelection` 中重入 Windows 文本输入框架。
 
 候选窗口使用独立的 Win32 UI 线程和消息循环，不依赖宿主程序（包括记事本、QQ）的 TSF 回调线程绘制。窗口采用 Weasel 的每监视器 DPI、圆角、选中态高亮、编号列和状态提示；服务不可用或没有候选时，状态提示明确显示“英文透传”，而不是留下不可见的组合状态。
 

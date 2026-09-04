@@ -165,7 +165,9 @@ constexpr std::wstring_view FullShapeForAscii(wchar_t value) {
   // table.  Letters and digits intentionally return an empty view: Chinese mode must
   // still let those keys follow the normal preedit/host paths.
   switch (value) {
-    case L' ': return L"　";
+    // Space is intentionally kept half-width even in Chinese mode.  Other
+    // punctuation continues to use the bundled Rime full-shape mapping.
+    case L' ': return L" ";
     case L',': return L"，";
     case L'.': return L"。";
     case L'<': return L"《";
@@ -210,6 +212,7 @@ bool IsPunctuationCharacter(wchar_t value) {
 static_assert(AsciiCharForVirtualKey('A', false, false) == L'a');
 static_assert(AsciiCharForVirtualKey('A', true, false) == L'A');
 static_assert(AsciiCharForVirtualKey('1', true, false) == L'!');
+static_assert(FullShapeForAscii(L' ') == std::wstring_view(L" "));
 static_assert(FullShapeForAscii(L',') == std::wstring_view(L"，"));
 static_assert(FullShapeForAscii(L'^') == std::wstring_view(L"……"));
 
@@ -869,7 +872,7 @@ HRESULT CompositionSession::DoEditSession(TfEditCookie cookie) {
     owner->CompleteEditSession(action, generation, succeeded);
     return succeeded ? S_OK : E_FAIL;
   }
-  // Standalone full-shape punctuation still uses a short-lived TSF
+  // Standalone punctuation still uses a short-lived TSF
   // composition.  Chromium/WebView2 context owners can re-enter the Windows
   // text-input framework when a key-event sink calls InsertTextAtSelection
   // directly, which has caused host hangs and process termination.  The same
@@ -1383,7 +1386,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
   }
   if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && key == VK_SPACE) {
     // Match ascii_composer's explicit Shift+Space no-op.  In particular, do
-    // not accidentally turn it into a persistent mode switch or a full-width
+    // not accidentally turn it into a persistent mode switch or an IME-managed
     // space while the user is holding Shift for another host gesture.
     return false;
   }
@@ -1589,7 +1592,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
   }
   if (IsChinesePunctuationKey(key)) {
     // Rime's punctuator commits a pending composition before emitting a
-    // full-shape symbol.  Keep that behavior in the snapshot-based adapter;
+    // punctuation symbol.  Keep that behavior in the snapshot-based adapter;
     // when there is no composition, create and immediately finalize a TSF
     // composition instead of directly mutating the host selection.
     // Punctuation has no input request that could refresh the connection, so

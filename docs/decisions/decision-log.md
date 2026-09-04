@@ -33,16 +33,17 @@
 | D027 | librime `RimeStartMaintenance(false)` 返回 false 表示没有待处理部署任务时，仍继续创建会话；只有会话/方案初始化失败才报告 Rime 初始化错误 |
 | D028 | Windows NSIS 安装包使用 ZLIB 压缩，优先降低 CUDA runtime 大型 DLL 的安装解压时间 |
 | D029 | LLM 只接收前 `llm_rerank_count` 个 Rime 候选中、经 librime 候选预览确认已消费完整输入的候选；`llm_effective_count` 限制从该池置顶的数量，未完整候选保留 Rime 原顺序 |
-| D030 | Windows TSF 按内置 Rime `ascii_composer` 实现中英模式：左 Shift 无修饰短按切换并提交原始组合串，右 Shift 和 Shift+Space 不切换；英文模式由宿主直接处理半角输入，中文模式使用全角标点 |
+| D030 | Windows TSF 按内置 Rime `ascii_composer` 实现中英模式：左 Shift 无修饰短按切换并提交原始组合串，右 Shift 和 Shift+Space 不切换；英文模式由宿主直接处理半角输入，中文模式使用全角标点（空格除外） |
 | D031 | 最近一次成功激活的模型路径独立于预设持久化；服务启动后在后台尽力自动恢复，恢复期间报告 `reloading`，卸载模型清除记录，恢复失败不阻止 Rime/服务启动 |
 | D032 | Tauri 管理窗口只展示用户行动所需的状态与摘要；前台管理数据采用合并轮询和代际丢弃，保护编辑表单、历史详情及预设交互不被刷新打断 |
-| D033 | 中文模式的独立全角符号使用短生命周期 TSF composition 提交，不在按键回调中直接调用 `ITfInsertAtSelection`；所有 IME 提交共用已验证的 composition 生命周期，避免 Chromium/WebView2 文本上下文重入崩溃 |
+| D033 | 中文模式的独立标点（空格除外）使用短生命周期 TSF composition 提交，不在按键回调中直接调用 `ITfInsertAtSelection`；所有 IME 提交共用已验证的 composition 生命周期，避免 Chromium/WebView2 文本上下文重入崩溃 |
 | D034 | Tauri 管理窗口的操作反馈统一使用可关闭、4 秒后自动消失的右下角 toast；服务不可用只通过页头 indicator 展示，不重复弹出连接错误 |
 | D035 | 历史更新使用服务端 revision 长轮询通知；管理窗口不依赖可见性受限的 WebView 定时器，新增或清空记录后立即刷新，后台窗口同样接收通知 |
 | D036 | `preceding_text` 为空时跳过 LLM 候选重排并直接采用 Rime 原始顺序，即使模型运行时已加载 |
 | D037 | 候选窗位置使用 TSF `GetTextExt` 返回的组合串起点矩形，并沿用 WeaselPanel 输入位置下方 6px 间距；无法取得 layout 时回退到 GUI caret |
 | D038 | ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 严格相等时才进入 LLM；其他英文候选保留 Rime 顺序但不参与重排 |
 | D039 | 历史记录只在实际执行 LLM scorer 时记录可选性能快照；列表显示总耗时，详情显示 tokenization/decode/logits 分阶段耗时及工作量计数，未调用 LLM 时不显示为 0ms |
+| D040 | 中文模式空格始终提交半角 U+0020；其他标点继续使用全角首选映射；有候选时 Space 仍选择候选，Shift+Space 仍透传 |
 
 ## 后续可演进
 

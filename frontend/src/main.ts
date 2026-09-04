@@ -742,7 +742,7 @@ function renderHistoryDetail(entry: InputData) {
   detail.classList.remove("is-hidden");
   if (title) title.textContent = "记录详情";
   const timestamp = formatTimestamp(entry.timestampMs);
-  if (meta) meta.textContent = "上文：" + (entry.precedingText || "（空）") + "　拼音：" + (entry.preedit || "—") + "　时间：" + timestamp;
+  if (meta) meta.textContent = "上文：" + (entry.precedingText || "（空）") + " | 拼音：" + (entry.preedit || "—") + " | 时间：" + timestamp;
   content.innerHTML = llmPerformanceSummary(entry.llmPerformance) + diagnosticTable(entry);
   detail.scrollIntoView?.({ behavior: "smooth", block: "start" });
 }

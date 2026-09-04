@@ -6,7 +6,7 @@
 
 TSF 根据服务状态中的 `rime_schema` 处理输入；通用方案路径按 Shift/CapsLock 保留字母大小写，
 并传递反引号和单引号编码，
-候选通过数字键或空格提交，回车则提交当前输入的英文原文。不会在 TSF 中伪造 `t9` 的数字处理；上游 `t9.schema`
+候选通过数字键或空格提交，回车则提交当前输入的英文原文；中文模式下独立空格始终提交半角 U+0020，其他标点才使用全角首选映射。不会在 TSF 中伪造 `t9` 的数字处理；上游 `t9.schema`
 依赖特定运行时提供的 `t9_processor`，当前官方 Windows librime DLL 未导出该处理器，
 因此 Windows 首期不把 t9 列为可选方案，但发布包仍原样保留上游 t9 文件。
 
@@ -31,7 +31,7 @@ cmake --build build/tsf --config Release
 
 TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使用 `TF_ES_READWRITE` 的 ASYNCDONTCARE 调度：宿主允许时同步执行，否则由 TSF 排队。`StartComposition` 即使返回 `S_OK` 也可能通过空的 `ppComposition` 表示宿主拒绝组合；适配层会检查这一点并显示明确错误。
 
-中文模式下的全角符号即使没有现有拼音组合串，也会建立并立即结束一个短生命周期 TSF composition；不在按键回调中直接调用 `ITfInsertAtSelection` 修改宿主 selection，避免 Chromium/WebView2 等文本上下文的重入崩溃。
+中文模式下的独立标点（空格除外）即使没有现有拼音组合串，也会建立并立即结束一个短生命周期 TSF composition；独立空格同样复用该生命周期但写入半角 U+0020。不在按键回调中直接调用 `ITfInsertAtSelection` 修改宿主 selection，避免 Chromium/WebView2 等文本上下文的重入崩溃。
 
 候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；异步取消完成前继续吞键，避免按键进入宿主文本。
 
