@@ -6,8 +6,8 @@ use crate::{
 };
 use lime_protocol::{
     CandidateDiagnostic, ConfigSnapshot, ErrorCode, InputHistoryEntry, InputHistoryPage,
-    InputRequest, InputResponse, ModelInfo, ModelPreset, Request, Response, ServiceState,
-    ServiceStatus, INPUT_HISTORY_PAGE_SIZE,
+    InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelPreset, Request, Response,
+    ServiceState, ServiceStatus, INPUT_HISTORY_PAGE_SIZE,
 };
 use llama_cpp_v3::BackendPreference;
 use std::{
@@ -380,6 +380,7 @@ impl CoreService {
                 Vec::new(),
                 Vec::new(),
                 self.current_service_state(),
+                None,
             );
             return Err(ErrorCode::RequestCancelled);
         }
@@ -417,6 +418,7 @@ impl CoreService {
                     Vec::new(),
                     Vec::new(),
                     service_state,
+                    None,
                 );
                 return Err(code);
             }
@@ -451,6 +453,7 @@ impl CoreService {
             candidates.clone(),
             diagnostics.clone(),
             service_state,
+            ranking.llm_performance.clone(),
         );
         if !self.generation.is_current(generation) {
             return Err(ErrorCode::RequestCancelled);
@@ -848,6 +851,7 @@ impl CoreService {
         final_candidates: Vec<lime_protocol::Candidate>,
         diagnostics: Vec<CandidateDiagnostic>,
         service_state: ServiceState,
+        llm_performance: Option<LlmPerformance>,
     ) {
         let timestamp_ms = self.next_timestamp_ms();
         self.history
@@ -862,6 +866,7 @@ impl CoreService {
                 final_candidates,
                 service_state,
                 diagnostics,
+                llm_performance,
             });
         self.bump_history_revision();
     }

@@ -124,6 +124,9 @@ pub struct InputHistoryEntry {
     /// Detailed rows shared by the test page and history detail page.
     #[serde(default)]
     pub diagnostics: Vec<CandidateDiagnostic>,
+    /// Optional LLM timing and workload counters for this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_performance: Option<LlmPerformance>,
 }
 
 /// A row in the candidate diagnostics table.
@@ -155,6 +158,44 @@ pub struct CandidateDiagnostic {
     pub mismatch: bool,
     #[serde(default)]
     pub display_candidate: Option<Candidate>,
+}
+
+/// Performance counters collected only when a request actually enters the local LLM scorer.
+///
+/// The values are management-facing diagnostics. They are not used by the TSF candidate path,
+/// and an absent value means that no LLM inference was performed.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LlmPerformance {
+    /// Wall-clock time spent in the LLM scorer, in milliseconds.
+    #[serde(default)]
+    pub total_ms: u64,
+    /// Time spent tokenizing the context and candidate strings, in milliseconds.
+    #[serde(default)]
+    pub tokenize_ms: u64,
+    /// Time spent in native llama.cpp decode calls, in milliseconds.
+    #[serde(default)]
+    pub decode_ms: u64,
+    /// Time spent reading logits and deriving token log probabilities, in milliseconds.
+    #[serde(default)]
+    pub logits_ms: u64,
+    /// Number of candidates passed to the scorer after all filters.
+    #[serde(default)]
+    pub candidate_count: u32,
+    /// Number of candidates for which a score was returned.
+    #[serde(default)]
+    pub scored_count: u32,
+    /// Number of target tokens whose log probabilities were computed.
+    #[serde(default)]
+    pub target_token_count: u32,
+    /// Number of batch or fallback decode operations.
+    #[serde(default)]
+    pub batch_count: u32,
+    /// Number of candidates that used the tokenizer-boundary fallback path.
+    #[serde(default)]
+    pub mismatch_count: u32,
+    /// Number of tokens in the untruncated preceding-text prompt.
+    #[serde(default)]
+    pub context_token_count: u32,
 }
 
 /// A bounded, newest-first history page.
@@ -472,6 +513,40 @@ mod tests {
         let decoded: CandidateDiagnostic =
             serde_json::from_str(&json).expect("deserialize diagnostic");
         assert_eq!(decoded, row);
+    }
+
+    #[test]
+    fn llm_performance_round_trip_and_legacy_history_default() {
+        let performance = LlmPerformance {
+            total_ms: 17,
+            tokenize_ms: 2,
+            decode_ms: 11,
+            logits_ms: 3,
+            candidate_count: 4,
+            scored_count: 4,
+            target_token_count: 9,
+            batch_count: 2,
+            mismatch_count: 1,
+            context_token_count: 6,
+        };
+        let json = serde_json::to_string(&performance).expect("serialize performance");
+        let decoded: LlmPerformance = serde_json::from_str(&json).expect("deserialize performance");
+        assert_eq!(decoded, performance);
+
+        let legacy: InputHistoryEntry = serde_json::from_str(
+            r#"{
+                "request_id":1,
+                "timestamp_ms":2,
+                "preceding_text":"前文",
+                "preedit":"nihao",
+                "rime_candidates":[],
+                "final_candidates":[],
+                "service_state":"rime_only",
+                "diagnostics":[]
+            }"#,
+        )
+        .expect("legacy history should deserialize");
+        assert!(legacy.llm_performance.is_none());
     }
 
     #[test]

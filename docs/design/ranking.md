@@ -61,6 +61,10 @@ final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
 
 管理接口的 `CandidateDiagnostic` 同时保留 Rime 原始顺序、LLM 排序顺序、最终展示顺序、聚合/逐 token logprob 和边界 mismatch 标记。诊断只由测试页和历史详情页主动读取，不进入原生候选窗口。
 
+历史记录在实际执行 LLM scorer 时额外保存 `LlmPerformance`：`total_ms` 是 scorer 的总 wall time，
+并拆分 tokenization、native decode 和 logits 阶段，同时记录送入候选数、目标 token 数、解码批次、
+边界回退数和上下文 token 数。没有进入 scorer 的请求不写入该快照。
+
 ## 模型
 
 - 模型输入为用户导入的单个 GGUF 文件；不要求额外 manifest。

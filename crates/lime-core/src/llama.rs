@@ -4,7 +4,7 @@
 //! packaged llama.cpp runtime when a model is loaded, preferring CUDA and falling back to CPU while
 //! still making model-backed ranking use the real GGUF vocabulary and logits.
 
-use lime_protocol::Candidate;
+use lime_protocol::{Candidate, LlmPerformance};
 use llama_cpp_sys_v3::llama_token;
 pub use llama_cpp_v3::BackendPreference;
 use llama_cpp_v3::{LlamaBackend, LlamaBatch, LlamaContext, LlamaModel, LoadOptions};
@@ -14,6 +14,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
+    time::{Duration, Instant},
 };
 
 /// Maximum context exposed by Lime's validated configuration.
@@ -47,6 +48,40 @@ pub struct CandidateScore {
     pub token_logprobs: Vec<f64>,
     pub logprob: f64,
     pub mismatch: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ScoredCandidates {
+    pub scores: Vec<CandidateScore>,
+    pub performance: LlmPerformance,
+}
+
+#[derive(Default)]
+struct ScoringTimings {
+    tokenize: Duration,
+    decode: Duration,
+    logits: Duration,
+    batch_count: u32,
+    context_limit: usize,
+    vocab_size: usize,
+}
+
+impl ScoringTimings {
+    fn add_tokenize(&mut self, started: Instant) {
+        self.tokenize += started.elapsed();
+    }
+
+    fn add_decode(&mut self, started: Instant) {
+        self.decode += started.elapsed();
+    }
+
+    fn add_logits(&mut self, started: Instant) {
+        self.logits += started.elapsed();
+    }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 /// A loaded GGUF model and its runtime context.
@@ -385,22 +420,43 @@ impl LlamaRuntime {
         preceding_text: &str,
         candidates: &[Candidate],
     ) -> Result<Vec<CandidateScore>, String> {
+        self.score_candidates_with_performance(preceding_text, candidates)
+            .map(|result| result.scores)
+    }
+
+    /// Compute candidate scores and collect timing/workload counters for management diagnostics.
+    pub(crate) fn score_candidates_with_performance(
+        &self,
+        preceding_text: &str,
+        candidates: &[Candidate],
+    ) -> Result<ScoredCandidates, String> {
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ScoredCandidates {
+                scores: Vec::new(),
+                performance: LlmPerformance::default(),
+            });
         }
 
+        let total_started = Instant::now();
+        let mut timings = ScoringTimings::default();
+        let tokenize_started = Instant::now();
         let base = self.tokenize(preceding_text)?;
+        timings.add_tokenize(tokenize_started);
         let base_ids = base.iter().map(|token| token.id).collect::<Vec<_>>();
         let mut plans = Vec::with_capacity(candidates.len());
         for candidate in candidates {
+            let tokenize_started = Instant::now();
             let standalone = self.tokenize(&candidate.commit_text)?;
+            timings.add_tokenize(tokenize_started);
             if standalone.is_empty() {
                 return Err(format!(
                     "candidate {:?} tokenizes to an empty sequence",
                     candidate.commit_text
                 ));
             }
+            let tokenize_started = Instant::now();
             let combined = self.tokenize(&format!("{preceding_text}{}", candidate.commit_text))?;
+            timings.add_tokenize(tokenize_started);
             let combined_ids = combined.iter().map(|token| token.id).collect::<Vec<_>>();
             // A token crosses the boundary exactly when tokenizing the concatenated text changes
             // the tokenized prefix of the preceding text. Token IDs are authoritative here;
@@ -439,6 +495,8 @@ impl LlamaRuntime {
         // context.  This mirrors normal causal-LM truncation and leaves candidate tokenization
         // unchanged, so mismatch diagnostics still refer to the full user-visible context.
         let context_limit = self.runtime_context_tokens.min(self.context_tokens).max(4);
+        timings.context_limit = context_limit;
+        timings.vocab_size = self.vocab_size;
         let exact_indices = plans
             .iter()
             .enumerate()
@@ -490,14 +548,14 @@ impl LlamaRuntime {
                 .iter()
                 .map(|(_, plan)| plan.score_ids.clone())
                 .collect::<Vec<_>>();
+            timings.batch_count = timings.batch_count.saturating_add(1);
             let scores = score_batch(
                 &self.backend,
                 &self.model,
                 &mut context,
                 &decode_base,
                 &sequences,
-                context_limit,
-                self.vocab_size,
+                &mut timings,
             )?;
             for (chunk_index, (plan_index, _)) in chunk.iter().enumerate() {
                 output[*plan_index] = Some(scores[chunk_index].clone());
@@ -520,17 +578,19 @@ impl LlamaRuntime {
                     .iter()
                     .map(|token| token.piece.as_str())
                     .collect::<String>();
+                let tokenize_started = Instant::now();
                 let prompt = self.tokenize(&format!("{preceding_text}{consumed}"))?;
+                timings.add_tokenize(tokenize_started);
                 let prompt_ids = prompt.iter().map(|token| token.id).collect::<Vec<_>>();
                 let prompt_start = prompt_ids.len().saturating_sub(context_limit);
+                timings.batch_count = timings.batch_count.saturating_add(1);
                 let target = score_prompt_target(
                     &self.backend,
                     &self.model,
                     &mut context,
                     &prompt_ids[prompt_start..],
                     plan.score_ids[token_index],
-                    context_limit,
-                    self.vocab_size,
+                    &mut timings,
                 )?;
                 token_logprobs.push(target);
             }
@@ -542,13 +602,34 @@ impl LlamaRuntime {
             });
         }
 
-        output
+        let scores = output
             .into_iter()
             .enumerate()
             .map(|(index, score)| {
                 score.ok_or_else(|| format!("candidate {index} was not scored by llama.cpp"))
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        let target_token_count = scores
+            .iter()
+            .map(|score| score.token_logprobs.len())
+            .sum::<usize>();
+        let mismatch_count = plans.iter().filter(|plan| plan.mismatch).count();
+        let scored_count = scores.len().min(u32::MAX as usize) as u32;
+        Ok(ScoredCandidates {
+            scores,
+            performance: LlmPerformance {
+                total_ms: duration_ms(total_started.elapsed()),
+                tokenize_ms: duration_ms(timings.tokenize),
+                decode_ms: duration_ms(timings.decode),
+                logits_ms: duration_ms(timings.logits),
+                candidate_count: candidates.len().min(u32::MAX as usize) as u32,
+                scored_count,
+                target_token_count: target_token_count.min(u32::MAX as usize) as u32,
+                batch_count: timings.batch_count,
+                mismatch_count: mismatch_count.min(u32::MAX as usize) as u32,
+                context_token_count: base_ids.len().min(u32::MAX as usize) as u32,
+            },
+        })
     }
 
     /// Compatibility helper for callers that need one candidate's aggregate score.
@@ -577,8 +658,7 @@ fn score_batch(
     context: &mut MutexGuard<'_, LlamaContext>,
     base_tokens: &[llama_token],
     candidates: &[Vec<llama_token>],
-    context_limit: usize,
-    vocab_size: usize,
+    timings: &mut ScoringTimings,
 ) -> Result<Vec<CandidateScore>, String> {
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -588,17 +668,20 @@ fn score_batch(
     } else {
         base_tokens.to_vec()
     };
-    if decode_base.len() > context_limit {
+    if decode_base.len() > timings.context_limit {
         return Err(format!(
-            "base prompt has {} tokens, context limit is {context_limit}",
-            decode_base.len()
+            "base prompt has {} tokens, context limit is {}",
+            decode_base.len(),
+            timings.context_limit
         ));
     }
     if candidates.iter().any(|tokens| {
-        tokens.is_empty() || decode_base.len() + tokens.len().saturating_sub(1) > context_limit
+        tokens.is_empty()
+            || decode_base.len() + tokens.len().saturating_sub(1) > timings.context_limit
     }) {
         return Err(format!(
-            "candidate exceeds llama context limit of {context_limit} tokens"
+            "candidate exceeds llama context limit of {} tokens",
+            timings.context_limit
         ));
     }
     let total_tokens = decode_base.len()
@@ -606,9 +689,10 @@ fn score_batch(
             .iter()
             .map(|tokens| tokens.len().saturating_sub(1))
             .sum::<usize>();
-    if total_tokens > context_limit {
+    if total_tokens > timings.context_limit {
         return Err(format!(
-            "llama decode batch has {total_tokens} tokens, context limit is {context_limit}"
+            "llama decode batch has {total_tokens} tokens, context limit is {}",
+            timings.context_limit
         ));
     }
 
@@ -644,19 +728,22 @@ fn score_batch(
             output_targets.push((candidate_index, tokens[token_index + 1], batch_index));
         }
     }
+    let decode_started = Instant::now();
     context
         .decode(&batch)
         .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
+    timings.add_decode(decode_started);
 
     let mut token_logprobs = candidates
         .iter()
         .map(|tokens| Vec::with_capacity(tokens.len()))
         .collect::<Vec<_>>();
+    let logits_started = Instant::now();
     let base_logits = logits_for(
         backend,
         context,
         decode_base.len().saturating_sub(1),
-        vocab_size,
+        timings.vocab_size,
     )?;
     for (candidate_index, tokens) in candidates.iter().enumerate() {
         let value = logprob_for(&base_logits, tokens[0]);
@@ -669,7 +756,7 @@ fn score_batch(
         token_logprobs[candidate_index].push(value);
     }
     for (candidate_index, target_token, batch_index) in output_targets {
-        let logits = logits_for(backend, context, batch_index, vocab_size)?;
+        let logits = logits_for(backend, context, batch_index, timings.vocab_size)?;
         let value = logprob_for(&logits, target_token);
         if !value.is_finite() {
             return Err(format!(
@@ -678,6 +765,7 @@ fn score_batch(
         }
         token_logprobs[candidate_index].push(value);
     }
+    timings.add_logits(logits_started);
     Ok(token_logprobs
         .into_iter()
         .zip(candidates)
@@ -696,18 +784,18 @@ fn score_prompt_target(
     context: &mut MutexGuard<'_, LlamaContext>,
     prompt_tokens: &[llama_token],
     target: llama_token,
-    context_limit: usize,
-    vocab_size: usize,
+    timings: &mut ScoringTimings,
 ) -> Result<f64, String> {
     let prompt = if prompt_tokens.is_empty() {
         vec![model.get_vocab().bos()]
     } else {
         prompt_tokens.to_vec()
     };
-    if prompt.len() > context_limit {
+    if prompt.len() > timings.context_limit {
         return Err(format!(
-            "mismatch prompt has {} tokens, context limit is {context_limit}",
-            prompt.len()
+            "mismatch prompt has {} tokens, context limit is {}",
+            prompt.len(),
+            timings.context_limit
         ));
     }
     context.kv_cache_clear();
@@ -715,11 +803,20 @@ fn score_prompt_target(
     for (position, token) in prompt.iter().copied().enumerate() {
         batch.add(token, position as i32, &[0], position + 1 == prompt.len());
     }
+    let decode_started = Instant::now();
     context
         .decode(&batch)
         .map_err(|error| format!("llama.cpp mismatch decode failed: {error}"))?;
-    let logits = logits_for(backend, context, prompt.len().saturating_sub(1), vocab_size)?;
+    timings.add_decode(decode_started);
+    let logits_started = Instant::now();
+    let logits = logits_for(
+        backend,
+        context,
+        prompt.len().saturating_sub(1),
+        timings.vocab_size,
+    )?;
     let value = logprob_for(&logits, target);
+    timings.add_logits(logits_started);
     if value.is_finite() {
         Ok(value)
     } else {

@@ -42,6 +42,7 @@
 | D036 | `preceding_text` 为空时跳过 LLM 候选重排并直接采用 Rime 原始顺序，即使模型运行时已加载 |
 | D037 | 候选窗位置使用 TSF `GetTextExt` 返回的组合串起点矩形，并沿用 WeaselPanel 输入位置下方 6px 间距；无法取得 layout 时回退到 GUI caret |
 | D038 | ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 严格相等时才进入 LLM；其他英文候选保留 Rime 顺序但不参与重排 |
+| D039 | 历史记录只在实际执行 LLM scorer 时记录可选性能快照；列表显示总耗时，详情显示 tokenization/decode/logits 分阶段耗时及工作量计数，未调用 LLM 时不显示为 0ms |
 
 ## 后续可演进
 

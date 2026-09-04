@@ -56,6 +56,23 @@
         "display_candidate": { "anyOf": [{ "$ref": "#/$defs/candidate" }, { "type": "null" }] }
       }
     },
+    "llm_performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_ms", "tokenize_ms", "decode_ms", "logits_ms", "candidate_count", "scored_count", "target_token_count", "batch_count", "mismatch_count", "context_token_count"],
+      "properties": {
+        "total_ms": { "type": "integer", "minimum": 0 },
+        "tokenize_ms": { "type": "integer", "minimum": 0 },
+        "decode_ms": { "type": "integer", "minimum": 0 },
+        "logits_ms": { "type": "integer", "minimum": 0 },
+        "candidate_count": { "type": "integer", "minimum": 0 },
+        "scored_count": { "type": "integer", "minimum": 0 },
+        "target_token_count": { "type": "integer", "minimum": 0 },
+        "batch_count": { "type": "integer", "minimum": 0 },
+        "mismatch_count": { "type": "integer", "minimum": 0 },
+        "context_token_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "input_history_entry": {
       "type": "object",
       "additionalProperties": false,
@@ -68,7 +85,8 @@
         "rime_candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
         "final_candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
         "service_state": { "enum": ["ready", "rime_only", "reloading", "unavailable"] },
-        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/candidate_diagnostic" } }
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/candidate_diagnostic" } },
+        "llm_performance": { "anyOf": [{ "$ref": "#/$defs/llm_performance" }, { "type": "null" }] }
       }
     },
     "input_history_page": {

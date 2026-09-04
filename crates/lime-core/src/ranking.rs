@@ -1,6 +1,7 @@
-use lime_protocol::{Candidate, CandidateDiagnostic};
+use lime_protocol::{Candidate, CandidateDiagnostic, LlmPerformance};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 pub use crate::llama::{CandidateScore, LlamaRuntime, ModelMetadata, TokenInfo};
 
@@ -9,6 +10,13 @@ pub use crate::llama::{CandidateScore, LlamaRuntime, ModelMetadata, TokenInfo};
 pub struct RerankResult {
     pub candidates: Vec<Candidate>,
     pub diagnostics: Vec<CandidateDiagnostic>,
+    pub llm_performance: Option<LlmPerformance>,
+}
+
+#[derive(Clone, Debug)]
+struct ScoringOutput {
+    scores: Vec<CandidateScore>,
+    performance: LlmPerformance,
 }
 
 trait CandidateScorer {
@@ -17,6 +25,29 @@ trait CandidateScorer {
         preceding_text: &str,
         candidates: &[Candidate],
     ) -> Result<Vec<CandidateScore>, String>;
+
+    fn score_candidates_with_performance(
+        &self,
+        preceding_text: &str,
+        candidates: &[Candidate],
+    ) -> Result<ScoringOutput, String> {
+        let started = Instant::now();
+        let scores = self.score_candidates(preceding_text, candidates)?;
+        let target_token_count = scores
+            .iter()
+            .map(|score| score.token_logprobs.len())
+            .sum::<usize>();
+        Ok(ScoringOutput {
+            performance: LlmPerformance {
+                total_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                candidate_count: candidates.len().min(u32::MAX as usize) as u32,
+                scored_count: scores.len().min(u32::MAX as usize) as u32,
+                target_token_count: target_token_count.min(u32::MAX as usize) as u32,
+                ..LlmPerformance::default()
+            },
+            scores,
+        })
+    }
 }
 
 impl CandidateScorer for LlamaRuntime {
@@ -26,6 +57,19 @@ impl CandidateScorer for LlamaRuntime {
         candidates: &[Candidate],
     ) -> Result<Vec<CandidateScore>, String> {
         LlamaRuntime::score_candidates(self, preceding_text, candidates)
+    }
+
+    fn score_candidates_with_performance(
+        &self,
+        preceding_text: &str,
+        candidates: &[Candidate],
+    ) -> Result<ScoringOutput, String> {
+        let result =
+            LlamaRuntime::score_candidates_with_performance(self, preceding_text, candidates)?;
+        Ok(ScoringOutput {
+            scores: result.scores,
+            performance: result.performance,
+        })
     }
 }
 
@@ -163,13 +207,13 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
         runtime
     };
     let model_active = active_runtime.is_some() && !pool_candidates.is_empty();
-    let score_rows = if model_active {
+    let (score_rows, llm_performance) = if model_active {
         let runtime = active_runtime.expect("active runtime must exist when scoring");
-        let scores = runtime.score_candidates(preceding_text, &pool_candidates)?;
-        if scores.len() != pool_candidates.len() {
+        let scored = runtime.score_candidates_with_performance(preceding_text, &pool_candidates)?;
+        if scored.scores.len() != pool_candidates.len() {
             return Err(format!(
                 "llama.cpp returned {} scores for {} candidates",
-                scores.len(),
+                scored.scores.len(),
                 pool_candidates.len(),
             ));
         }
@@ -178,7 +222,7 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
             .iter()
             .copied()
             .zip(pool_candidates)
-            .zip(scores)
+            .zip(scored.scores)
             .map(|((index, candidate), score)| (index, candidate, score))
             .collect::<Vec<_>>();
         // Larger log probabilities are better. Keep original Rime order as a stable tie breaker.
@@ -189,17 +233,14 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
                 .then_with(|| left_index.cmp(right_index))
         });
 
-        ranked
+        (ranked, Some(scored.performance))
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
 
-    Ok(build_rerank_result(
-        candidates,
-        model_active,
-        score_rows,
-        effective_count,
-    ))
+    let mut result = build_rerank_result(candidates, model_active, score_rows, effective_count);
+    result.llm_performance = llm_performance;
+    Ok(result)
 }
 
 fn candidate_allowed_for_llm(candidate: &Candidate, preedit: &str) -> bool {
@@ -289,6 +330,7 @@ fn build_rerank_result(
     RerankResult {
         candidates: final_order,
         diagnostics,
+        llm_performance: None,
     }
 }
 
@@ -476,6 +518,13 @@ mod tests {
             .candidates
             .iter()
             .any(|candidate| candidate.commit_text == "ni-hao"));
+        let performance = result
+            .llm_performance
+            .as_ref()
+            .expect("scored candidates should have performance");
+        assert_eq!(performance.candidate_count, 3);
+        assert_eq!(performance.scored_count, 3);
+        assert_eq!(performance.target_token_count, 3);
     }
 
     #[test]
@@ -514,6 +563,7 @@ mod tests {
 
         assert_eq!(scorer.calls.get(), 0);
         assert_eq!(result.candidates, candidates);
+        assert!(result.llm_performance.is_none());
         assert!(result
             .diagnostics
             .iter()

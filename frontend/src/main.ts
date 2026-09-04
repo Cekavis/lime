@@ -53,6 +53,19 @@ interface CandidateDiagnostic {
   hasDisplayCandidate: boolean;
 }
 
+interface LlmPerformance {
+  totalMs: number;
+  tokenizeMs: number;
+  decodeMs: number;
+  logitsMs: number;
+  candidateCount: number;
+  scoredCount: number;
+  targetTokenCount: number;
+  batchCount: number;
+  mismatchCount: number;
+  contextTokenCount: number;
+}
+
 interface InputData {
   requestId?: number;
   timestampMs: number | null;
@@ -61,6 +74,7 @@ interface InputData {
   rimeCandidates: Candidate[];
   finalCandidates: Candidate[];
   diagnostics: CandidateDiagnostic[];
+  llmPerformance: LlmPerformance | null;
   contextUsed: boolean | null;
   serviceState: ServiceState;
 }
@@ -178,7 +192,7 @@ app.innerHTML = [
   "    </section>",
   '    <section class="panel is-hidden" data-panel="history">',
   '      <div class="panel-heading"><div><h2>历史</h2><p class="muted">按时间从新到旧显示输入记录，每页 100 条。点击记录查看详情。</p></div><div class="actions-inline"><span class="meta-badge" data-history-count>0 条</span><button class="button button-danger" data-clear-history type="button">清空历史</button></div></div>',
-  '      <div class="table-wrap"><table class="history-table"><thead><tr><th>上文</th><th>拼音</th><th>Rime 候选（前 3）</th><th>LLM 排序（前 3）</th></tr></thead><tbody data-history-table><tr><td colspan="4" class="muted">暂无输入记录</td></tr></tbody></table></div>',
+  '      <div class="table-wrap"><table class="history-table"><thead><tr><th>上文</th><th>拼音</th><th>Rime 候选（前 3）</th><th>LLM 排序（前 3）</th><th>LLM 总耗时</th></tr></thead><tbody data-history-table><tr><td colspan="5" class="muted">暂无输入记录</td></tr></tbody></table></div>',
   '      <div class="pagination" data-history-pagination><button class="button" data-history-prev type="button">上一页</button><span data-history-page-label>第 1 页</span><button class="button" data-history-next type="button">下一页</button></div>',
   '      <section class="history-detail is-hidden" data-history-detail aria-live="polite"><div class="panel-heading compact-heading"><div><h3 data-history-detail-title>记录详情</h3><p class="muted" data-history-detail-meta>—</p></div><button class="button" data-history-detail-close type="button">返回列表</button></div><div data-history-detail-table><p class="muted">选择一条记录查看详情。</p></div></section>',
   "    </section>",
@@ -309,6 +323,26 @@ function normalizeLogprobs(value: unknown): number[] {
   return value.map(asNumber).filter((item): item is number => item !== null);
 }
 
+function normalizeLlmPerformance(value: unknown): LlmPerformance | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const totalMs = asNumber(firstValue(record, ["total_ms", "totalMs", "total_duration_ms", "totalDurationMs"]));
+  if (totalMs == null) return null;
+  const count = (keys: string[]) => Math.max(0, Math.trunc(asNumber(firstValue(record, keys)) ?? 0));
+  return {
+    totalMs: Math.max(0, totalMs),
+    tokenizeMs: Math.max(0, asNumber(firstValue(record, ["tokenize_ms", "tokenizeMs"])) ?? 0),
+    decodeMs: Math.max(0, asNumber(firstValue(record, ["decode_ms", "decodeMs"])) ?? 0),
+    logitsMs: Math.max(0, asNumber(firstValue(record, ["logits_ms", "logitsMs"])) ?? 0),
+    candidateCount: count(["candidate_count", "candidateCount"]),
+    scoredCount: count(["scored_count", "scoredCount"]),
+    targetTokenCount: count(["target_token_count", "targetTokenCount"]),
+    batchCount: count(["batch_count", "batchCount"]),
+    mismatchCount: count(["mismatch_count", "mismatchCount"]),
+    contextTokenCount: count(["context_token_count", "contextTokenCount"]),
+  };
+}
+
 function normalizeDiagnostic(value: unknown, index: number, rime: Candidate[], final: Candidate[]): CandidateDiagnostic {
   const record = asRecord(value);
   const rimeField = fieldValue(record, ["rime_candidate", "rimeCandidate", "rime", "raw_candidate"]);
@@ -364,6 +398,7 @@ function normalizeInputData(value: unknown, fallback: Partial<InputData> = {}): 
   const rime = Array.isArray(rawRime) ? normalizeCandidates(rawRime) : fallback.rimeCandidates || [];
   const final = Array.isArray(rawFinal) ? normalizeCandidates(rawFinal) : fallback.finalCandidates || [];
   const diagnosticsRaw = firstValue(record, ["diagnostics", "candidate_diagnostics", "candidateDiagnostics"]);
+  const performanceRaw = firstValue(record, ["llm_performance", "llmPerformance", "performance"]);
   const precedingText = asString(firstValue(record, ["preceding_text", "precedingText", "context"]), fallback.precedingText || "");
   const preedit = asString(firstValue(record, ["preedit", "input_preedit", "inputPreedit"]), fallback.preedit || "");
   const timestamp = asNumber(firstValue(record, ["timestamp_ms", "timestampMs", "created_at_ms", "createdAtMs", "timestamp"]));
@@ -375,6 +410,7 @@ function normalizeInputData(value: unknown, fallback: Partial<InputData> = {}): 
     rimeCandidates: rime,
     finalCandidates: final,
     diagnostics: diagnosticsFrom(diagnosticsRaw, rime, final),
+    llmPerformance: normalizeLlmPerformance(performanceRaw) ?? fallback.llmPerformance ?? null,
     contextUsed: asBoolean(firstValue(record, ["context_used", "contextUsed"])) ?? fallback.contextUsed ?? null,
     serviceState: normalizeState(firstValue(record, ["service_state", "serviceState", "state"]) ?? fallback.serviceState),
   };
@@ -587,7 +623,7 @@ function historyRowContent(entry: InputData): string {
   const rime = entry.rimeCandidates.length ? entry.rimeCandidates : entry.diagnostics.map((item) => item.rimeCandidate).filter((item): item is Candidate => item !== null);
   const diagnosticLlm = entry.diagnostics.map((item) => item.llmCandidate).filter((item): item is Candidate => item !== null);
   const llm = diagnosticLlm.length ? diagnosticLlm : entry.finalCandidates;
-  return '<td>' + escapeHtml(entry.precedingText || "（空）") + '</td><td class="mono">' + escapeHtml(entry.preedit || "—") + "</td><td>" + escapeHtml(candidateText(rime)) + "</td><td>" + escapeHtml(candidateText(llm)) + "</td>";
+  return '<td>' + escapeHtml(entry.precedingText || "（空）") + '</td><td class="mono">' + escapeHtml(entry.preedit || "—") + "</td><td>" + escapeHtml(candidateText(rime)) + "</td><td>" + escapeHtml(candidateText(llm)) + "</td><td class=\"mono numeric\">" + escapeHtml(formatMilliseconds(entry.llmPerformance?.totalMs)) + "</td>";
 }
 
 function renderHistoryTable(table: HTMLTableSectionElement, page: HistoryPage) {
@@ -609,7 +645,7 @@ function renderHistoryTable(table: HTMLTableSectionElement, page: HistoryPage) {
     rows.push(row);
   });
   if (!rows.length) {
-    table.innerHTML = '<tr><td colspan="4" class="muted">暂无输入记录</td></tr>';
+    table.innerHTML = '<tr><td colspan="5" class="muted">暂无输入记录</td></tr>';
     return;
   }
   // Moving existing rows instead of replacing the whole table preserves the
@@ -640,6 +676,23 @@ function diagnosticRows(data: InputData): string {
 
 function diagnosticTable(data: InputData): string {
   return '<div class="table-wrap diagnostic-table-wrap"><table class="diagnostic-table"><thead><tr><th>#</th><th>Rime 原始候选</th><th>LLM 候选</th><th>Logprob</th><th>Logprobs</th><th>Mismatch</th><th>展示候选</th></tr></thead><tbody>' + diagnosticRows(data) + "</tbody></table></div>";
+}
+
+function llmPerformanceSummary(performance: LlmPerformance | null): string {
+  if (!performance) return '<p class="muted">本次未调用 LLM。</p>';
+  const row = (label: string, value: string) => '<dt>' + label + '</dt><dd class="mono">' + escapeHtml(value) + '</dd>';
+  return '<dl class="status-list history-performance">' +
+    row("总耗时", formatMilliseconds(performance.totalMs)) +
+    row("Token 化", formatMilliseconds(performance.tokenizeMs)) +
+    row("推理解码", formatMilliseconds(performance.decodeMs)) +
+    row("Logits 计算", formatMilliseconds(performance.logitsMs)) +
+    row("送入候选", String(performance.candidateCount) + " 个") +
+    row("返回得分", String(performance.scoredCount) + " 个") +
+    row("目标 Token", String(performance.targetTokenCount)) +
+    row("解码批次", String(performance.batchCount)) +
+    row("边界回退", String(performance.mismatchCount) + " 个") +
+    row("上下文 Token", String(performance.contextTokenCount)) +
+    '</dl>';
 }
 
 function candidateCell(candidate: Candidate | null): string {
@@ -690,7 +743,7 @@ function renderHistoryDetail(entry: InputData) {
   if (title) title.textContent = "记录详情";
   const timestamp = formatTimestamp(entry.timestampMs);
   if (meta) meta.textContent = "上文：" + (entry.precedingText || "（空）") + "　拼音：" + (entry.preedit || "—") + "　时间：" + timestamp;
-  content.innerHTML = diagnosticTable(entry);
+  content.innerHTML = llmPerformanceSummary(entry.llmPerformance) + diagnosticTable(entry);
   detail.scrollIntoView?.({ behavior: "smooth", block: "start" });
 }
 
@@ -1234,6 +1287,11 @@ function formatBytes(bytes: number): string {
 
 function formatDecimal(value: number): string {
   return Number.isFinite(value) ? value.toFixed(2) : "—";
+}
+
+function formatMilliseconds(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return (Number.isInteger(value) ? String(value) : value.toFixed(2)) + " ms";
 }
 
 function formatLogprobs(values: number[], aggregate: number | null): string {

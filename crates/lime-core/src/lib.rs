@@ -12,7 +12,8 @@ pub use config::{validate, validate_with, ConfigStore, ConfigValidationError, Li
 pub use engine::{CandidateEngine, RimeEngine, RimeKeyResult};
 pub use error::CoreError;
 pub use lime_protocol::{
-    CandidateDiagnostic, Config, ConfigSnapshot, InputHistoryEntry, InputHistoryPage, ModelPreset,
+    CandidateDiagnostic, Config, ConfigSnapshot, InputHistoryEntry, InputHistoryPage,
+    LlmPerformance, ModelPreset,
 };
 pub use llama::BackendPreference;
 pub use logging::PrivacyLogger;
