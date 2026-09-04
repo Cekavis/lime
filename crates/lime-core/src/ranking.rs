@@ -92,6 +92,30 @@ pub(crate) fn try_rerank_selected_candidates_with_diagnostics(
     )
 }
 
+/// Production entry point that also applies the input-aware English-candidate policy.
+///
+/// English candidates are useful only when Rime returns the exact pinyin text the user typed.
+/// Other English words remain available in the final Rime order, but are not sent to the model.
+pub(crate) fn try_rerank_selected_candidates_with_preedit(
+    candidates: &[Candidate],
+    candidate_indices: &[usize],
+    preedit: &str,
+    preceding_text: &str,
+    runtime: Option<&LlamaRuntime>,
+    rerank_count: usize,
+    effective_count: usize,
+) -> Result<RerankResult, String> {
+    try_rerank_selected_candidates_with_scorer_and_preedit(
+        candidates,
+        candidate_indices,
+        Some(preedit),
+        preceding_text,
+        runtime,
+        rerank_count,
+        effective_count,
+    )
+}
+
 fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
     candidates: &[Candidate],
     candidate_indices: &[usize],
@@ -100,7 +124,34 @@ fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
     rerank_count: usize,
     effective_count: usize,
 ) -> Result<RerankResult, String> {
+    try_rerank_selected_candidates_with_scorer_and_preedit(
+        candidates,
+        candidate_indices,
+        None,
+        preceding_text,
+        runtime,
+        rerank_count,
+        effective_count,
+    )
+}
+
+fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?Sized>(
+    candidates: &[Candidate],
+    candidate_indices: &[usize],
+    preedit: Option<&str>,
+    preceding_text: &str,
+    runtime: Option<&S>,
+    rerank_count: usize,
+    effective_count: usize,
+) -> Result<RerankResult, String> {
     let pool_indices = selected_pool_indices(candidate_indices, candidates.len(), rerank_count);
+    let pool_indices = match preedit {
+        Some(preedit) => pool_indices
+            .into_iter()
+            .filter(|index| candidate_allowed_for_llm(&candidates[*index], preedit))
+            .collect::<Vec<_>>(),
+        None => pool_indices,
+    };
     let pool_candidates = pool_indices
         .iter()
         .map(|index| candidates[*index].clone())
@@ -111,7 +162,9 @@ fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
     } else {
         runtime
     };
-    let score_rows = if let Some(runtime) = active_runtime {
+    let model_active = active_runtime.is_some() && !pool_candidates.is_empty();
+    let score_rows = if model_active {
+        let runtime = active_runtime.expect("active runtime must exist when scoring");
         let scores = runtime.score_candidates(preceding_text, &pool_candidates)?;
         if scores.len() != pool_candidates.len() {
             return Err(format!(
@@ -143,10 +196,19 @@ fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
 
     Ok(build_rerank_result(
         candidates,
-        active_runtime.is_some(),
+        model_active,
         score_rows,
         effective_count,
     ))
+}
+
+fn candidate_allowed_for_llm(candidate: &Candidate, preedit: &str) -> bool {
+    !is_english_candidate(candidate) || candidate.commit_text == preedit
+}
+
+fn is_english_candidate(candidate: &Candidate) -> bool {
+    let text = candidate.commit_text.as_str();
+    !text.is_empty() && text.is_ascii() && text.bytes().any(|byte| byte.is_ascii_alphabetic())
 }
 
 fn selected_pool_indices(
@@ -343,6 +405,115 @@ mod tests {
                 .unwrap();
 
         assert_eq!(result.candidates, input);
+        assert!(result
+            .diagnostics
+            .iter()
+            .all(|row| row.llm_candidate.is_none() && row.logprobs.is_empty()));
+    }
+
+    #[test]
+    fn english_candidates_are_scored_only_when_they_equal_the_preedit() {
+        use std::cell::RefCell;
+
+        struct RecordingScorer {
+            seen: RefCell<Vec<String>>,
+        }
+
+        impl CandidateScorer for RecordingScorer {
+            fn score_candidates(
+                &self,
+                _: &str,
+                candidates: &[Candidate],
+            ) -> Result<Vec<CandidateScore>, String> {
+                self.seen.borrow_mut().extend(
+                    candidates
+                        .iter()
+                        .map(|candidate| candidate.commit_text.clone()),
+                );
+                Ok(candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| CandidateScore {
+                        token_ids: Vec::new(),
+                        token_logprobs: vec![-(index as f64)],
+                        logprob: -(index as f64),
+                        mismatch: false,
+                    })
+                    .collect())
+            }
+        }
+
+        let candidates = vec![c("你好"), c("hello"), c("nihao"), c("3D打印"), c("ni-hao")];
+        let scorer = RecordingScorer {
+            seen: RefCell::new(Vec::new()),
+        };
+        let result = try_rerank_selected_candidates_with_scorer_and_preedit(
+            &candidates,
+            &[0, 1, 2, 3, 4],
+            Some("nihao"),
+            "前文",
+            Some(&scorer),
+            5,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(scorer.seen.into_inner(), vec!["你好", "nihao", "3D打印"]);
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter_map(|row| row.llm_candidate.as_ref())
+                .map(|candidate| candidate.commit_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["你好", "nihao", "3D打印"]
+        );
+        assert!(result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.commit_text == "hello"));
+        assert!(result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.commit_text == "ni-hao"));
+    }
+
+    #[test]
+    fn all_excluded_english_candidates_do_not_call_the_scorer() {
+        use std::cell::Cell;
+
+        struct CountingScorer {
+            calls: Cell<u32>,
+        }
+
+        impl CandidateScorer for CountingScorer {
+            fn score_candidates(
+                &self,
+                _: &str,
+                _: &[Candidate],
+            ) -> Result<Vec<CandidateScore>, String> {
+                self.calls.set(self.calls.get() + 1);
+                Ok(Vec::new())
+            }
+        }
+
+        let candidates = vec![c("hello"), c("world")];
+        let scorer = CountingScorer {
+            calls: Cell::new(0),
+        };
+        let result = try_rerank_selected_candidates_with_scorer_and_preedit(
+            &candidates,
+            &[0, 1],
+            Some("nihao"),
+            "前文",
+            Some(&scorer),
+            2,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(scorer.calls.get(), 0);
+        assert_eq!(result.candidates, candidates);
         assert!(result
             .diagnostics
             .iter()

@@ -41,6 +41,7 @@
 | D035 | 历史更新使用服务端 revision 长轮询通知；管理窗口不依赖可见性受限的 WebView 定时器，新增或清空记录后立即刷新，后台窗口同样接收通知 |
 | D036 | `preceding_text` 为空时跳过 LLM 候选重排并直接采用 Rime 原始顺序，即使模型运行时已加载 |
 | D037 | 候选窗位置使用 TSF `GetTextExt` 返回的组合串起点矩形，并沿用 WeaselPanel 输入位置下方 6px 间距；无法取得 layout 时回退到 GUI caret |
+| D038 | ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 严格相等时才进入 LLM；其他英文候选保留 Rime 顺序但不参与重排 |
 
 ## 后续可演进
 

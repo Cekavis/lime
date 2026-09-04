@@ -6,11 +6,12 @@
 
 1. Rime/雾凇拼音根据 `preedit` 召回候选。
 2. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
-3. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
-4. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
-5. 使用 llama.cpp 完整 vocabulary logits 计算候选 token 的链式 logprob；运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
-6. 边界不匹配候选沿用现有逐 token 评分路径。
-7. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
+3. ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 完全相等时才进入 LLM；其他英文候选保留在 Rime 原始顺序中，但不参与评分。
+4. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
+5. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
+6. 使用 llama.cpp 完整 vocabulary logits 计算候选 token 的链式 logprob；运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
+7. 边界不匹配候选沿用现有逐 token 评分路径。
+8. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
 
 拼音用于 Rime 召回，不直接写入 LLM prompt。
 
@@ -26,10 +27,11 @@
 
 ```text
 complete_pool = candidates_whose_preview_consumes_all_input(first_N_rime_candidates)
-final = llm_top_k(complete_pool) + rime_candidates_without(llm_top_k)
+llm_pool = complete_pool - english_candidates_unless_commit_equals_preedit
+final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
 ```
 
-未完整消费输入的候选不会被 LLM 提升，但仍保留在最终候选列表中。其余候选严格保持 Rime 原始顺序。重复、越界或无法解析的索引丢弃；完整候选或有效结果少于 K 时不补造候选。
+未完整消费输入的候选以及被英文策略排除的候选不会被 LLM 提升，但仍保留在最终候选列表中。英文放行条件是原始字符串的严格相等比较，不忽略大小写、空格或连字符。其余候选严格保持 Rime 原始顺序。重复、越界或无法解析的索引丢弃；完整候选或有效结果少于 K 时不补造候选。
 
 ## 时序与降级
 

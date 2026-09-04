@@ -27,7 +27,8 @@ auto_start_service          = false
 
 `llm_rerank_count` 限制每次检查的 Rime 候选前缀长度；Rust 核心通过 librime
 候选预览判断其中哪些候选消费了全部输入，仍有剩余拼音的候选不送入模型，也不由
-该前缀之后的候选补位。
+该前缀之后的候选补位。ASCII 英文候选还必须与原始 `preedit` 完全相等，否则只保留在
+Rime 顺序中，不送入模型。
 `llm_effective_count` 表示从这些完整候选的模型排序中实际置顶的数量，且不得大于
 `llm_rerank_count`。默认分别为 32 和 3。
 

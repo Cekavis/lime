@@ -2,7 +2,7 @@ use crate::{
     config::ConfigStore,
     engine::{CandidateEngine, RimeEngine},
     logging::PrivacyLogger,
-    ranking::{try_rerank_selected_candidates_with_diagnostics, GenerationTracker, LlamaRuntime},
+    ranking::{try_rerank_selected_candidates_with_preedit, GenerationTracker, LlamaRuntime},
 };
 use lime_protocol::{
     CandidateDiagnostic, ConfigSnapshot, ErrorCode, InputHistoryEntry, InputHistoryPage,
@@ -426,9 +426,10 @@ impl CoreService {
             &request.preceding_text,
             config.preceding_text_char_limit as usize,
         );
-        let ranking = match try_rerank_selected_candidates_with_diagnostics(
+        let ranking = match try_rerank_selected_candidates_with_preedit(
             &rime_candidates,
             &rime_batch.complete_candidate_indices,
+            &request.preedit,
             &preceding_text,
             runtime,
             config.llm_rerank_count as usize,
