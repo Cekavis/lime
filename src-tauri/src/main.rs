@@ -3,8 +3,9 @@
 mod ipc;
 
 use lime_protocol::{
-    Config, ConfigSnapshot, DictionaryEntry, InputHistoryEntry, InputHistoryPage, InputRequest,
-    ModelInfo, ModelPreset, Request, Response, ServiceStatus, INPUT_HISTORY_PAGE_SIZE,
+    Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, InputHistoryEntry, InputHistoryPage,
+    InputRequest, ModelInfo, ModelPreset, Request, Response, ServiceStatus,
+    DICTIONARY_PAGE_SIZE, INPUT_HISTORY_PAGE_SIZE,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -97,6 +98,17 @@ fn export_dictionary() -> Result<Vec<DictionaryEntry>, String> {
 }
 
 #[tauri::command]
+fn get_dictionary_page(page: u32, page_size: Option<u32>) -> Result<DictionaryPage, String> {
+    match ipc::call(Request::GetDictionaryPage {
+        page,
+        page_size: page_size.unwrap_or(DICTIONARY_PAGE_SIZE),
+    })? {
+        Response::DictionaryPage(value) => Ok(value),
+        _ => Err("unexpected get_dictionary_page response".to_owned()),
+    }
+}
+
+#[tauri::command]
 fn import_dictionary(entries: Vec<DictionaryEntry>) -> Result<(), String> {
     match ipc::call(Request::ImportDictionary { entries })? {
         Response::Accepted => Ok(()),
@@ -182,6 +194,7 @@ fn main() {
             delete_model_preset,
             select_model_preset,
             export_dictionary,
+            get_dictionary_page,
             import_dictionary,
             clear_dictionary,
             test_input,

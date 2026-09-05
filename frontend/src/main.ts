@@ -98,10 +98,18 @@ interface DictionaryEntry {
   weight: number;
 }
 
+interface DictionaryPage {
+  items: DictionaryEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 type RefreshReason = "initial" | "manual" | "poll" | "tab" | "visibility" | "mutation";
 
 const REFRESH_INTERVAL_MS = 3000;
 const HISTORY_WATCH_RETRY_MS = 1000;
+const DICTIONARY_PAGE_SIZE = 100;
 
 const stateLabel: Record<ServiceState, string> = {
   ready: "可用",
@@ -478,6 +486,27 @@ function normalizeHistoryPage(value: unknown, page: number): HistoryPage {
   return { items, total, page: returnedPage, pageSize };
 }
 
+function normalizeDictionaryEntry(value: unknown): DictionaryEntry | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const pinyin = asString(firstValue(record, ["pinyin", "code"]));
+  const text = asString(firstValue(record, ["text", "word"]));
+  const weight = asNumber(firstValue(record, ["weight", "score"])) ?? 0;
+  return pinyin && text ? { pinyin, text, weight } : null;
+}
+
+function normalizeDictionaryPage(value: unknown, page: number): DictionaryPage {
+  const record = asRecord(value);
+  const values = Array.isArray(value) ? value : firstValue(record, ["items", "entries", "dictionary"]);
+  const items = Array.isArray(values)
+    ? values.map(normalizeDictionaryEntry).filter((entry): entry is DictionaryEntry => entry !== null)
+    : [];
+  const total = asNumber(firstValue(record, ["total", "total_count", "totalCount"])) ?? items.length;
+  const returnedPage = asNumber(firstValue(record, ["page", "page_number", "pageNumber"])) ?? page;
+  const pageSize = asNumber(firstValue(record, ["page_size", "pageSize"])) ?? DICTIONARY_PAGE_SIZE;
+  return { items, total, page: returnedPage, pageSize };
+}
+
 async function invokeVariants<T>(command: string, variants: Array<Record<string, unknown> | undefined>): Promise<T> {
   let firstError: unknown;
   let lastError: unknown = new Error("命令调用失败");
@@ -501,12 +530,30 @@ async function fetchHistoryPage(page: number): Promise<HistoryPage> {
       { page, page_size: HISTORY_PAGE_SIZE },
     ]);
     return sortHistory(normalizeHistoryPage(value, page));
-  } catch {
-    const value = await invoke<unknown>("get_input_history");
-    const full = sortHistory(normalizeHistoryPage(value, 1));
-    const start = Math.max(0, page - 1) * HISTORY_PAGE_SIZE;
-    return { items: full.items.slice(start, start + HISTORY_PAGE_SIZE), total: full.total, page, pageSize: HISTORY_PAGE_SIZE };
+  } catch (error) {
+    // Do not fall back to the legacy unbounded history response: a long-running
+    // service can exceed the local IPC frame limit before the UI can paginate it.
+    throw error;
   }
+}
+
+async function fetchDictionaryPage(page: number): Promise<DictionaryPage> {
+  const value = await invokeVariants<unknown>("get_dictionary_page", [
+    { page, pageSize: DICTIONARY_PAGE_SIZE },
+    { page, page_size: DICTIONARY_PAGE_SIZE },
+  ]);
+  return normalizeDictionaryPage(value, page);
+}
+
+async function fetchAllDictionaryEntries(): Promise<DictionaryEntry[]> {
+  const first = await fetchDictionaryPage(1);
+  const totalPages = Math.max(1, Math.ceil(first.total / DICTIONARY_PAGE_SIZE));
+  const entries = [...first.items];
+  for (let page = 2; page <= totalPages; page += 1) {
+    const next = await fetchDictionaryPage(page);
+    entries.push(...next.items);
+  }
+  return entries;
 }
 
 function sortHistory(page: HistoryPage): HistoryPage {
@@ -588,20 +635,20 @@ function readConfig(): Config {
   return result;
 }
 
-function renderDictionary(entries: DictionaryEntry[], options: { force?: boolean } = {}) {
-  const key = JSON.stringify(entries);
+function renderDictionary(entries: DictionaryEntry[], options: { force?: boolean } = {}, total = entries.length) {
+  const key = JSON.stringify([total, entries]);
   const table = query<HTMLTableSectionElement>("[data-dictionary-table]");
   if (!options.force && key === renderedDictionaryKey) {
     const count = query<HTMLElement>("[data-dictionary-count]");
-    if (count) count.textContent = entries.length + " 条";
+    if (count) count.textContent = total + " 条";
     const diagnostic = query<HTMLElement>("[data-diagnostic-dictionary]");
-    if (diagnostic) diagnostic.textContent = entries.length + " 条";
+    if (diagnostic) diagnostic.textContent = total + " 条";
     return;
   }
   const count = query<HTMLElement>("[data-dictionary-count]");
-  if (count) count.textContent = entries.length + " 条";
+  if (count) count.textContent = total + " 条";
   const diagnostic = query<HTMLElement>("[data-diagnostic-dictionary]");
-  if (diagnostic) diagnostic.textContent = entries.length + " 条";
+  if (diagnostic) diagnostic.textContent = total + " 条";
   if (!table) return;
   const rows = entries.slice(0, 50).map((entry) => "<tr><td>" + escapeHtml(entry.pinyin) + "</td><td>" + escapeHtml(entry.text) + "</td><td>" + entry.weight + "</td></tr>");
   table.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="3" class="muted">词库为空</td></tr>';
@@ -793,7 +840,7 @@ async function performRefresh(reason: RefreshReason, mutationAtStart: number) {
   const results = await Promise.allSettled([
     invoke<unknown>("get_config"),
     invoke<unknown>("get_status"),
-    invoke<unknown>("export_dictionary"),
+    fetchDictionaryPage(1),
     fetchHistoryPage(currentHistoryPage),
     fetchModelPresets(),
   ]);
@@ -844,7 +891,8 @@ async function performRefresh(reason: RefreshReason, mutationAtStart: number) {
   if (effectiveConfig) applyConfig(effectiveConfig);
 
   if (dictionaryResult.status === "fulfilled") {
-    renderDictionary(Array.isArray(dictionaryResult.value) ? dictionaryResult.value as DictionaryEntry[] : []);
+    const dictionary = dictionaryResult.value as DictionaryPage;
+    renderDictionary(dictionary.items, {}, dictionary.total);
   } else {
     errors.push(dictionaryResult.reason);
   }
@@ -1099,8 +1147,8 @@ query<HTMLInputElement>("[data-dictionary-file]")?.addEventListener("change", as
     const entries = parsed.map(validateEntry);
     markMutation();
     await invoke("import_dictionary", { entries });
-    const updated = await invoke<unknown>("export_dictionary");
-    renderDictionary(Array.isArray(updated) ? updated as DictionaryEntry[] : []);
+    const updated = await fetchDictionaryPage(1);
+    renderDictionary(updated.items, {}, updated.total);
     setNotice("已导入 " + entries.length + " 条词库记录", "success");
     recordOperation("词库已导入");
     void requestRefresh("mutation");
@@ -1115,8 +1163,7 @@ query<HTMLInputElement>("[data-dictionary-file]")?.addEventListener("change", as
 
 query<HTMLButtonElement>("[data-export-dictionary]")?.addEventListener("click", async () => {
   try {
-    const value = await invoke<unknown>("export_dictionary");
-    const entries = Array.isArray(value) ? value : [];
+    const entries = await fetchAllDictionaryEntries();
     const blob = new Blob([JSON.stringify(entries, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");

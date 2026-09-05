@@ -72,7 +72,7 @@ LlmPerformance {
 
 Tauri 使用同一 IPC 通道调用配置、模型、词库和输入诊断操作。除用户主动请求的历史接口外，管理响应不回传输入原文；详细信息写结构化日志。Phase 1 使用 4 字节 little-endian 长度前缀 + UTF-8 JSON 帧，单帧上限 16 MiB；Unix 使用用户私有 socket，Windows 使用本地 Named Pipe。
 
-管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`list_model_presets`、`save_model_preset`、`delete_model_preset`、`select_model_preset`、`learn`、`export_dictionary`、`import_dictionary`、`clear_dictionary`、`get_input_history`、`get_input_history_page`、`wait_for_input_history` 和 `clear_input_history`。`wait_for_input_history { revision }` 在历史 revision 变化前保持连接（最多 30 秒），响应 `input_history_revision`；管理窗口用它接收即时通知，不传输输入内容。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型；模型预设保存于服务数据目录的 `model-presets.json`，切换失败时保留当前模型。
+管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`list_model_presets`、`save_model_preset`、`delete_model_preset`、`select_model_preset`、`learn`、`export_dictionary`、`get_dictionary_page`、`import_dictionary`、`clear_dictionary`、`get_input_history`、`get_input_history_page`、`wait_for_input_history` 和 `clear_input_history`。`get_dictionary_page` 与 `get_input_history_page` 每次最多返回 100 条，管理窗口刷新和预览只使用分页接口；完整词库导出由管理窗口逐页读取后在本地拼接，避免单帧超过 16 MiB。旧版 `get_input_history` 仍保留，但服务端也限制其最多返回一页。`wait_for_input_history { revision }` 在历史 revision 变化前保持连接（最多 30 秒），响应 `input_history_revision`；管理窗口用它接收即时通知，不传输输入内容。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型；模型预设保存于服务数据目录的 `model-presets.json`，切换失败时保留当前模型。
 
 模型预设命令按名称寻址：`save_model_preset` 使用 `{ name, path }`，`delete_model_preset`
 和 `select_model_preset` 使用 `{ name }`。`ModelPreset` 不定义独立的 `id` 或 `key` 字段。

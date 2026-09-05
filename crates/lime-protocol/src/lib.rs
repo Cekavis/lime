@@ -16,6 +16,9 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// retained for older clients, but new clients should use `GetInputHistoryPage`.
 pub const INPUT_HISTORY_PAGE_SIZE: u32 = 100;
 
+/// The management UI dictionary endpoint always returns at most this many entries per page.
+pub const DICTIONARY_PAGE_SIZE: u32 = 100;
+
 /// The default native llama.cpp backend.  CUDA is preferred on Windows builds; the service may
 /// fall back to the CPU runtime when the CUDA runtime or a compatible GPU is unavailable.
 pub const DEFAULT_LLM_BACKEND: &str = "cuda";
@@ -297,6 +300,16 @@ pub struct DictionaryEntry {
     pub weight: i64,
 }
 
+/// A bounded, newest-as-exported-order dictionary page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DictionaryPage {
+    pub items: Vec<DictionaryEntry>,
+    pub total: u64,
+    /// One-based page index. Values below one are normalized to one by the service.
+    pub page: u32,
+    pub page_size: u32,
+}
+
 /// Stable error categories shared by IPC clients and management UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -388,6 +401,10 @@ pub enum Request {
         text: String,
     },
     ExportDictionary,
+    GetDictionaryPage {
+        page: u32,
+        page_size: u32,
+    },
     ImportDictionary {
         entries: Vec<DictionaryEntry>,
     },
@@ -420,6 +437,7 @@ pub enum Response {
     ModelPresets(Vec<ModelPreset>),
     ModelPreset(ModelPreset),
     Dictionary(Vec<DictionaryEntry>),
+    DictionaryPage(DictionaryPage),
     InputHistory(Vec<InputHistoryEntry>),
     InputHistoryPage(InputHistoryPage),
     InputHistoryRevision(u64),
@@ -572,6 +590,23 @@ mod tests {
         let json = serde_json::to_string(&response).expect("serialize history revision response");
         let decoded: Response =
             serde_json::from_str(&json).expect("deserialize history revision response");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn dictionary_page_round_trip() {
+        let response = Response::DictionaryPage(DictionaryPage {
+            items: vec![DictionaryEntry {
+                pinyin: "nihao".into(),
+                text: "你好".into(),
+                weight: 1,
+            }],
+            total: 101,
+            page: 2,
+            page_size: DICTIONARY_PAGE_SIZE,
+        });
+        let json = serde_json::to_string(&response).expect("serialize dictionary page");
+        let decoded: Response = serde_json::from_str(&json).expect("deserialize dictionary page");
         assert_eq!(decoded, response);
     }
 }

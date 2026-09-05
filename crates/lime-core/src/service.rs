@@ -5,9 +5,9 @@ use crate::{
     ranking::{try_rerank_selected_candidates_with_preedit, GenerationTracker, LlamaRuntime},
 };
 use lime_protocol::{
-    CandidateDiagnostic, ConfigSnapshot, ErrorCode, InputHistoryEntry, InputHistoryPage,
-    InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelPreset, Request, Response,
-    ServiceState, ServiceStatus, INPUT_HISTORY_PAGE_SIZE,
+    CandidateDiagnostic, ConfigSnapshot, DictionaryPage, ErrorCode, InputHistoryEntry,
+    InputHistoryPage, InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelPreset, Request,
+    Response, ServiceState, ServiceStatus, DICTIONARY_PAGE_SIZE, INPUT_HISTORY_PAGE_SIZE,
 };
 use llama_cpp_v3::BackendPreference;
 use std::{
@@ -338,6 +338,12 @@ impl CoreService {
                 Ok(entries) => Response::Dictionary(entries),
                 Err(error) => Response::Error { code: error.code },
             },
+            Request::GetDictionaryPage { page, page_size } => {
+                match self.dictionary_page(page, page_size) {
+                    Ok(page) => Response::DictionaryPage(page),
+                    Err(error) => Response::Error { code: error.code },
+                }
+            }
             Request::ImportDictionary { entries } => match self
                 .engine
                 .lock()
@@ -356,7 +362,15 @@ impl CoreService {
                 Ok(()) => Response::Accepted,
                 Err(error) => Response::Error { code: error.code },
             },
-            Request::GetInputHistory => Response::InputHistory(self.history_snapshot()),
+            // Keep the legacy response bounded for older management clients. New clients should
+            // use GetInputHistoryPage, but an unbounded compatibility response can itself exceed
+            // the IPC frame limit after a long-running service accumulates history.
+            Request::GetInputHistory => Response::InputHistory(
+                self.history_snapshot()
+                    .into_iter()
+                    .take(INPUT_HISTORY_PAGE_SIZE as usize)
+                    .collect(),
+            ),
             Request::GetInputHistoryPage { page, page_size } => {
                 Response::InputHistoryPage(self.history_page(page, page_size))
             }
@@ -826,6 +840,37 @@ impl CoreService {
         }
     }
 
+    fn dictionary_page(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<DictionaryPage, crate::error::CoreError> {
+        let entries = self
+            .engine
+            .lock()
+            .expect("engine mutex poisoned")
+            .export_dictionary()?;
+        let total = entries.len() as u64;
+        let page = page.max(1);
+        let page_size = if page_size == 0 {
+            DICTIONARY_PAGE_SIZE
+        } else {
+            page_size.clamp(1, DICTIONARY_PAGE_SIZE)
+        };
+        let start = (u64::from(page - 1) * u64::from(page_size)) as usize;
+        let items = entries
+            .into_iter()
+            .skip(start)
+            .take(page_size as usize)
+            .collect();
+        Ok(DictionaryPage {
+            items,
+            total,
+            page,
+            page_size,
+        })
+    }
+
     /// Return the current history revision, waiting until it changes from the
     /// caller's last observed value.  The revision is separate from the
     /// entries so a client can wait without transferring input content.
@@ -1138,6 +1183,14 @@ mod tests {
         };
         assert_eq!(second.items.len(), 5);
         assert_eq!(second.items[0].request_id, 5);
+
+        match service.handle(Request::GetInputHistory) {
+            Response::InputHistory(history) => {
+                assert_eq!(history.len(), INPUT_HISTORY_PAGE_SIZE as usize);
+                assert_eq!(history[0].request_id, 105);
+            }
+            other => panic!("unexpected legacy history response: {other:?}"),
+        }
     }
 
     #[test]
