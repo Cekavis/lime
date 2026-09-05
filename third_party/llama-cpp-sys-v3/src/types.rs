@@ -6,6 +6,14 @@ pub type llama_pos = i32;
 pub type llama_token = i32;
 pub type llama_seq_id = i32;
 
+/// The public llama.cpp logging callback uses the ggml log level enum.  C enums
+/// have the platform `int` ABI, so keeping the level as `i32` avoids depending
+/// on a private enum definition while preserving the callback calling
+/// convention.
+pub type ggml_log_level = i32;
+pub type ggml_log_callback =
+    Option<unsafe extern "C" fn(ggml_log_level, *const std::ffi::c_char, *mut std::ffi::c_void)>;
+
 /// Opaque ggml backend registration/device handles.
 ///
 /// The handles are owned by ggml and are only used for read-only capability

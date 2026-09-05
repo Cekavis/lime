@@ -48,6 +48,9 @@
 | D042 | `llm_context_token_limit` 默认 1024；llama.cpp 的 `n_batch`、`n_ubatch` 和 output capacity 跟随该值配置，满足预算的请求尽量在一个 decode/micro-batch 完成 |
 | D043 | mismatch 标记只用于诊断；边界不匹配候选将 `tokenize(candidate)` 的 token 逐个追加到上文，并与其他候选共用批量路径计算 logprob |
 | D044 | llama.cpp 使用 zero-based candidate sequence ids，因此 `n_seq_max` 直接等于模型加载时的 `llm_rerank_count`，不额外保留 `+1` sequence slot |
+| D045 | Tauri 设置页合并前端设置、后端设置、模型状态和模型预设；模型后端/上下文 token/重排输入候选数变化且已有模型时由管理界面立即重载当前模型，旧的模型启用与服务自动连接开关仅保留兼容字段 |
+| D046 | llama.cpp 初始化显存明细通过其公开日志回调捕获 `model`、`KV`、`compute`、`output` 等 buffer size 行，并在加载完成后恢复原回调；不从 GGUF 文件大小或配置值推断显存占用 |
+| D047 | 输入历史新增可选 `model_name`（当前 GGUF 文件名）和可空的 `rime_duration_ms`；旧记录或未进入 Rime 的请求不伪造 0ms，Rime 耗时只包围候选批次生成，不改变实时输入响应结构 |
 
 ## 后续可演进
 

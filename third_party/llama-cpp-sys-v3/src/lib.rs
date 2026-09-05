@@ -138,6 +138,8 @@ macro_rules! resolve_symbols {
             device_name: None,
             device_backend_reg: None,
             backend_reg_name: None,
+            llama_log_set: None,
+            llama_log_get: None,
             $(
                 $name: {
                     let mut found = None;
@@ -280,6 +282,12 @@ impl LlamaLib {
         symbols.device_name = device_name;
         symbols.device_backend_reg = device_backend_reg;
         symbols.backend_reg_name = backend_reg_name;
+        symbols.llama_log_set = resolve_optional::<
+            unsafe extern "C" fn(ggml_log_callback, *mut std::ffi::c_void),
+        >(&libs, b"llama_log_set\0");
+        symbols.llama_log_get = resolve_optional::<
+            unsafe extern "C" fn(*mut ggml_log_callback, *mut *mut std::ffi::c_void),
+        >(&libs, b"llama_log_get\0");
 
         Ok(Self {
             _libs: libs,
@@ -362,6 +370,14 @@ pub struct LlamaSymbols {
     pub device_backend_reg:
         Option<unsafe extern "C" fn(*mut ggml_backend_device) -> *mut ggml_backend_reg>,
     pub backend_reg_name: Option<unsafe extern "C" fn(*mut ggml_backend_reg) -> *const c_char>,
+
+    /// Optional process-global logging hooks. They were added to the public
+    /// llama.cpp API after Lime's original dynamic wrapper was written. The
+    /// higher-level wrapper uses them opportunistically to capture the memory
+    /// figures emitted during model/context initialization.
+    pub llama_log_set: Option<unsafe extern "C" fn(ggml_log_callback, *mut std::ffi::c_void)>,
+    pub llama_log_get:
+        Option<unsafe extern "C" fn(*mut ggml_log_callback, *mut *mut std::ffi::c_void)>,
 
     pub llama_model_default_params: unsafe extern "C" fn() -> llama_model_params,
     pub llama_model_load_from_file:

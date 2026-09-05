@@ -76,12 +76,14 @@ Tauri 使用同一 IPC 通道调用配置、模型、词库和输入诊断操作
 
 管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`list_model_presets`、`save_model_preset`、`delete_model_preset`、`select_model_preset`、`learn`、`export_dictionary`、`get_dictionary_page`、`import_dictionary`、`clear_dictionary`、`get_input_history`、`get_input_history_page`、`wait_for_input_history` 和 `clear_input_history`。`get_dictionary_page` 与 `get_input_history_page` 每次最多返回 100 条，管理窗口刷新和预览只使用分页接口；完整词库导出由管理窗口逐页读取后在本地拼接，避免单帧超过 16 MiB。旧版 `get_input_history` 仍保留，但服务端也限制其最多返回一页。`wait_for_input_history { revision }` 在历史 revision 变化前保持连接（最多 30 秒），响应 `input_history_revision`；管理窗口用它接收即时通知，不传输输入内容。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型；模型预设保存于服务数据目录的 `model-presets.json`，切换失败时保留当前模型。
 
+`get_status.model` 返回当前模型的路径、文件大小、SHA-256 和加载状态。`initialization_memory` 是可选的 llama.cpp 初始化内存明细，包含 `model_bytes`、`context_bytes`、`compute_bytes`、`total_bytes`、`backend` 以及按设备/缓冲区分类的 `breakdown`（例如 `cuda0.model`、`cuda0.kv`、`cuda0.compute`、`cuda0.output`）；这些数值来自 llama.cpp 初始化日志，运行时无法提供日志回调时保持缺省/空值，客户端不得将空值解释为零，也不得从 GGUF 文件大小推断显存占用。
+
 模型预设命令按名称寻址：`save_model_preset` 使用 `{ name, path }`，`delete_model_preset`
 和 `select_model_preset` 使用 `{ name }`。`ModelPreset` 不定义独立的 `id` 或 `key` 字段。
 
 服务在同一份 `model-presets.json` 中额外保存最近一次成功激活的 `active_model_path`。直接加载模型和切换预设成功后更新该路径，卸载模型时清除；服务启动后在后台 best-effort 恢复该路径，不阻塞 Named Pipe/Unix socket 监听和 Rime-only 路径。恢复期间 `get_status.state` 为 `reloading`；模型文件缺失或运行时不可用不会阻止服务启动。旧版只保存 `loaded` 标记的文件仍可读取并作为一次性恢复提示。
 
-`get_input_history` 返回服务本次启动后收到的全部输入请求，按 `timestamp_ms` 从新到旧排序，包含上文、拼音、Rime 原始候选、LLM 排序、诊断行、最终候选顺序，以及实际调用 LLM 时的可选 `llm_performance`。该字段的 `total_ms` 是纯 LLM scorer wall time，其他字段拆分 tokenization、native decode、logits 计算及候选/token/batch 计数，并记录实际送入 decode 的 token 行数和读取的 logits 行数；未调用 LLM 时字段为空。历史只保存在服务内存中，用户可在管理窗口清空。新 UI 使用 `get_input_history_page { page, page_size }`，页码从 1 开始，服务将单页大小限制为 100，并返回 `items`、`total`、`page` 和 `page_size`。`request_id` 仅为旧客户端兼容字段，不作为 UI 排序或关联依据。
+`get_input_history` 返回服务本次启动后收到的全部输入请求，按 `timestamp_ms` 从新到旧排序，包含上文、拼音、可展示的 `model_name`（当前 GGUF 文件名；无模型时缺省）、Rime 原始候选、LLM 排序、诊断行、最终候选顺序，以及可选的 `rime_duration_ms` 和实际调用 LLM 时的可选 `llm_performance`。`rime_duration_ms` 只统计候选引擎获取 Rime 候选批次的墙钟耗时；`llm_performance.total_ms` 是纯 LLM scorer wall time，其他字段拆分 tokenization、native decode、logits 计算及候选/token/batch 计数，并记录实际送入 decode 的 token 行数和读取的 logits 行数；旧历史缺失 `model_name` 或 `rime_duration_ms` 时分别按缺省模型和“不可用”处理，未调用 LLM 时 `llm_performance` 为空。历史只保存在服务内存中，用户可在管理窗口清空。新 UI 使用 `get_input_history_page { page, page_size }`，页码从 1 开始，服务将单页大小限制为 100，并返回 `items`、`total`、`page` 和 `page_size`。`request_id` 仅为旧客户端兼容字段，不作为 UI 排序或关联依据。
 - Windows TSF 默认连接 `\\.\pipe\lime-core-v1`，可由 `LIME_PIPE` 覆盖；若设置 `LIME_SERVICE_PATH`，TSF 首次连接失败时按需启动本地服务并重试。TSF 在首次握手后读取 `get_status.config.revision`，所有输入请求携带该 revision。
 
 ## 过期请求

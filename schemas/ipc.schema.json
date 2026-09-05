@@ -87,6 +87,8 @@
         "rime_candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
         "final_candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
         "service_state": { "enum": ["ready", "rime_only", "reloading", "unavailable"] },
+        "model_name": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "rime_duration_ms": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
         "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/candidate_diagnostic" } },
         "llm_performance": { "anyOf": [{ "$ref": "#/$defs/llm_performance" }, { "type": "null" }] }
       }
@@ -133,6 +135,33 @@
         "size_bytes": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
         "sha256": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
         "loaded": { "type": "boolean" }
+      }
+    },
+    "model_memory_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model_bytes": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "context_bytes": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "compute_bytes": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "total_bytes": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "backend": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "breakdown": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "model_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size_bytes", "sha256", "loaded"],
+      "properties": {
+        "path": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "size_bytes": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "sha256": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "loaded": { "type": "boolean" },
+        "initialization_memory": { "anyOf": [{ "$ref": "#/$defs/model_memory_info" }, { "type": "null" }] }
       }
     },
     "management_request": {

@@ -10,6 +10,7 @@ pub use llama_cpp_v3::BackendPreference;
 use llama_cpp_v3::{LlamaBackend, LlamaBatch, LlamaContext, LlamaModel, LoadOptions};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::Read,
     path::{Path, PathBuf},
@@ -32,6 +33,14 @@ pub struct ModelMetadata {
     pub path: PathBuf,
     pub size_bytes: u64,
     pub sha256: String,
+}
+
+/// Buffer sizes emitted by llama.cpp while loading a model and creating its
+/// context. Values are bytes and the keys preserve native device qualifiers
+/// when llama.cpp reports them (for example, `cuda0.model`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InitializationMemory {
+    pub breakdown: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +112,7 @@ pub struct LlamaRuntime {
     sequence_count: usize,
     pub vocab_size: usize,
     pub backend_name: &'static str,
+    pub initialization_memory: Option<InitializationMemory>,
     // Field order is intentional: Rust drops fields in declaration order. The
     // native context and model must be released before LlamaBackend calls the
     // process-global llama_backend_free function.
@@ -123,6 +133,7 @@ impl std::fmt::Debug for LlamaRuntime {
             .field("runtime_context_tokens", &self.runtime_context_tokens)
             .field("vocab_size", &self.vocab_size)
             .field("backend_name", &self.backend_name)
+            .field("initialization_memory", &self.initialization_memory)
             .finish_non_exhaustive()
     }
 }
@@ -399,7 +410,10 @@ impl LlamaRuntime {
         // zero-layer behavior used by the original implementation.
         model_params.n_gpu_layers = if backend.uses_gpu() { -1 } else { 0 };
         let model_path_string = metadata.path.to_string_lossy();
-        let model = LlamaModel::load_from_file(&backend, &model_path_string, model_params)
+        let (model_result, model_logs) = backend.with_log_capture(|| {
+            LlamaModel::load_from_file(&backend, &model_path_string, model_params)
+        });
+        let model = model_result
             .map_err(|error| format!("load GGUF model {}: {error:?}", metadata.path.display()))?;
 
         let context_tokens = context_tokens.clamp(4, MAX_CONTEXT_TOKENS);
@@ -415,8 +429,10 @@ impl LlamaRuntime {
         context_params.n_outputs_max = context_tokens as u32;
         context_params.n_outputs_max_per_seq = context_tokens as u32;
         context_params.kv_unified = true;
-        let context = LlamaContext::new(&model, context_params)
-            .map_err(|error| format!("create llama.cpp context: {error}"))?;
+        let (context_result, context_logs) =
+            backend.with_log_capture(|| LlamaContext::new(&model, context_params));
+        let context =
+            context_result.map_err(|error| format!("create llama.cpp context: {error}"))?;
 
         let runtime_context_tokens =
             unsafe { (backend.lib.symbols.llama_n_ctx)(context.handle) as usize };
@@ -438,6 +454,10 @@ impl LlamaRuntime {
             sequence_count,
             vocab_size: vocab_size as usize,
             backend_name: backend.backend_name(),
+            initialization_memory: parse_initialization_memory(
+                &format!("{model_logs}{context_logs}"),
+                backend.backend_name(),
+            ),
             backend,
             model,
             context: Mutex::new(context),
@@ -872,6 +892,71 @@ fn logprob_for(logits_pointer: &[f32], token: llama_token) -> f64 {
         .unwrap_or(f64::NEG_INFINITY)
 }
 
+/// Parse the buffer-size lines emitted by llama.cpp during model/context
+/// initialization. The native log is intentionally treated as diagnostics:
+/// missing or unfamiliar lines leave the corresponding fields absent instead
+/// of turning a guessed value into a claimed allocation.
+fn parse_initialization_memory(logs: &str, fallback_backend: &str) -> Option<InitializationMemory> {
+    const MARKERS: [(&str, &str); 7] = [
+        ("model", "model buffer size ="),
+        ("compute", "compute buffer size ="),
+        ("kv", "kv buffer size ="),
+        ("output", "output buffer size ="),
+        ("rs", "rs buffer size ="),
+        ("lora", "lora buffer size ="),
+        ("state", "state buffer size ="),
+    ];
+    let mut breakdown = BTreeMap::new();
+    for line in logs.lines() {
+        let lower = line.to_ascii_lowercase();
+        for (kind, marker) in MARKERS {
+            let Some(index) = lower.find(marker) else {
+                continue;
+            };
+            let Some(bytes) = parse_mib_value(&lower[index + marker.len()..]) else {
+                continue;
+            };
+            let backend = if kind == "state" {
+                fallback_backend.to_ascii_lowercase()
+            } else {
+                native_memory_backend(line, index)
+                    .unwrap_or_else(|| fallback_backend.to_ascii_lowercase())
+            };
+            let key = format!("{backend}.{kind}");
+            let entry = breakdown.entry(key).or_insert(0_u64);
+            *entry = entry.saturating_add(bytes);
+        }
+    }
+    (!breakdown.is_empty()).then_some(InitializationMemory { breakdown })
+}
+
+fn parse_mib_value(value: &str) -> Option<u64> {
+    let value = value.trim_start();
+    let end = value
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(value.len());
+    if end == 0 || !value[end..].trim_start().starts_with("mib") {
+        return None;
+    }
+    let mib = value[..end].parse::<f64>().ok()?;
+    if !mib.is_finite() || mib < 0.0 {
+        return None;
+    }
+    let bytes = mib * 1024.0 * 1024.0;
+    (bytes <= u64::MAX as f64).then_some(bytes.round() as u64)
+}
+
+fn native_memory_backend(line: &str, marker_index: usize) -> Option<String> {
+    let prefix = line.get(..marker_index)?;
+    let token = prefix
+        .rsplit(':')
+        .next()
+        .and_then(|segment| segment.split_whitespace().last())?
+        .trim_matches(':');
+    let lower = token.to_ascii_lowercase();
+    (lower == "cpu" || lower.starts_with("cuda") || lower.starts_with("gpu")).then_some(lower)
+}
+
 fn backend_name(backend: llama_cpp_v3::Backend) -> &'static str {
     match backend {
         llama_cpp_v3::Backend::Cuda => "cuda",
@@ -1032,6 +1117,27 @@ mod tests {
         let logits = [0.0_f32, -1.0];
         let value = logprob_for(&logits, 0);
         assert!(value < 0.0 && value > -1.0);
+    }
+
+    #[test]
+    fn initialization_memory_parses_native_buffer_logs() {
+        let logs = concat!(
+            "llama_model_load:       CUDA0 model buffer size = 12.50 MiB\n",
+            "llama_context:           CUDA0 KV buffer size = 2.00 MiB\n",
+            "llama_context:           CUDA0 compute buffer size = 3.25 MiB\n",
+            "llama_context:           CUDA0 output buffer size = 0.25 MiB\n",
+        );
+        let memory = parse_initialization_memory(logs, "cuda").unwrap();
+        assert_eq!(
+            memory.breakdown["cuda0.model"],
+            12 * 1024 * 1024 + 512 * 1024
+        );
+        assert_eq!(memory.breakdown["cuda0.kv"], 2 * 1024 * 1024);
+        assert_eq!(
+            memory.breakdown["cuda0.compute"],
+            3 * 1024 * 1024 + 256 * 1024
+        );
+        assert_eq!(memory.breakdown["cuda0.output"], 256 * 1024);
     }
 
     #[test]

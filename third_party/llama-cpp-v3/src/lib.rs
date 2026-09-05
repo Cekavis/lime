@@ -1,8 +1,12 @@
 use llama_cpp_sys_v3::{LlamaLib, LoadError};
-use std::path::Path;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
+};
+use std::{
+    ffi::{c_char, c_void, CStr},
+    path::Path,
+    sync::Mutex,
 };
 
 pub mod backend;
@@ -43,6 +47,7 @@ pub struct LlamaBackend {
 }
 
 static BACKEND_USERS: AtomicUsize = AtomicUsize::new(0);
+static LOG_CAPTURE_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 
 impl Drop for LlamaBackend {
     fn drop(&mut self) {
@@ -159,6 +164,81 @@ impl LlamaBackend {
     pub const fn uses_gpu(&self) -> bool {
         matches!(self.selected_backend, Backend::Cuda)
     }
+
+    /// Run an initialization operation while collecting llama.cpp's native log
+    /// output. llama.cpp exposes the callback as process-global state, so the
+    /// previous callback and user data are restored before this method returns.
+    /// Older runtimes without the public logging hooks simply return an empty
+    /// log string and still run the operation normally.
+    pub fn with_log_capture<T>(&self, operation: impl FnOnce() -> T) -> (T, String) {
+        let (Some(set), Some(get)) = (
+            self.lib.symbols.llama_log_set,
+            self.lib.symbols.llama_log_get,
+        ) else {
+            return (operation(), String::new());
+        };
+
+        let _capture_lock = LOG_CAPTURE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("llama log capture mutex poisoned");
+
+        let mut previous_callback = None;
+        let mut previous_user_data = std::ptr::null_mut();
+        unsafe {
+            get(&mut previous_callback, &mut previous_user_data);
+        }
+
+        let logs = Arc::new(Mutex::new(String::new()));
+        let user_data = Arc::into_raw(Arc::clone(&logs)) as *mut c_void;
+        unsafe {
+            set(Some(capture_log), user_data);
+        }
+        let guard = LogCaptureGuard {
+            set,
+            previous_callback,
+            previous_user_data,
+            user_data,
+        };
+
+        let result = operation();
+        drop(guard);
+        let captured = logs.lock().map(|value| value.clone()).unwrap_or_default();
+        (result, captured)
+    }
+}
+
+struct LogCaptureGuard {
+    set: unsafe extern "C" fn(llama_cpp_sys_v3::ggml_log_callback, *mut c_void),
+    previous_callback: llama_cpp_sys_v3::ggml_log_callback,
+    previous_user_data: *mut c_void,
+    user_data: *mut c_void,
+}
+
+impl Drop for LogCaptureGuard {
+    fn drop(&mut self) {
+        unsafe {
+            (self.set)(self.previous_callback, self.previous_user_data);
+            // `user_data` owns one strong Arc reference created by into_raw.
+            drop(Arc::from_raw(self.user_data as *const Mutex<String>));
+        }
+    }
+}
+
+unsafe extern "C" fn capture_log(
+    _level: llama_cpp_sys_v3::ggml_log_level,
+    text: *const c_char,
+    user_data: *mut c_void,
+) {
+    if text.is_null() || user_data.is_null() {
+        return;
+    }
+    let logs = &*(user_data as *const Mutex<String>);
+    let Ok(mut logs) = logs.lock() else {
+        return;
+    };
+    let text = CStr::from_ptr(text).to_string_lossy();
+    logs.push_str(&text);
 }
 
 /// A loaded GGUF model
@@ -529,6 +609,30 @@ impl LlamaSampler {
         unsafe {
             (self.backend.symbols.llama_sampler_accept)(self.handle, token);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_callback_round_trip_with_packaged_runtime() {
+        let Ok(path) = std::env::var("LIME_LLAMA_DLL_PATH") else {
+            return;
+        };
+        let backend = LlamaBackend::load_with_preference(
+            LoadOptions {
+                explicit_path: Path::new(&path),
+            },
+            BackendPreference::Cpu,
+        )
+        .expect("packaged llama.cpp runtime should load");
+        assert!(backend.lib.symbols.llama_log_set.is_some());
+        assert!(backend.lib.symbols.llama_log_get.is_some());
+        let (value, logs) = backend.with_log_capture(|| 7_u8);
+        assert_eq!(value, 7);
+        assert!(logs.is_empty());
     }
 }
 

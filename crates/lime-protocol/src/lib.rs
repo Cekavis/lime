@@ -5,6 +5,7 @@
 //! later phase.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Wire protocol version used by all components in the same Lime release.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -124,6 +125,14 @@ pub struct InputHistoryEntry {
     pub rime_candidates: Vec<Candidate>,
     pub final_candidates: Vec<Candidate>,
     pub service_state: ServiceState,
+    /// Displayable identifier of the model active for this request, when one was loaded.
+    /// This is normally the GGUF file name rather than the full local path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    /// Wall-clock time spent obtaining the Rime candidate batch, in milliseconds.
+    /// Older payloads and requests rejected before entering Rime leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rime_duration_ms: Option<u64>,
     /// Detailed rows shared by the test page and history detail page.
     #[serde(default)]
     pub diagnostics: Vec<CandidateDiagnostic>,
@@ -234,7 +243,12 @@ pub struct Config {
     /// as `cuda`; the service accepts `cuda` and `cpu` only.
     #[serde(default = "default_llm_backend")]
     pub llm_backend: String,
+    /// Legacy compatibility field. The management UI no longer exposes this toggle;
+    /// missing values are treated as enabled so older config payloads keep using a loaded model.
+    #[serde(default = "default_llm_enabled")]
     pub llm_enabled: bool,
+    /// Legacy compatibility field retained for persisted-config decoding.
+    #[serde(default)]
     pub auto_start_service: bool,
 }
 
@@ -244,6 +258,10 @@ fn default_rime_schema() -> String {
 
 fn default_llm_backend() -> String {
     DEFAULT_LLM_BACKEND.to_owned()
+}
+
+fn default_llm_enabled() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -277,6 +295,38 @@ pub struct ModelInfo {
     pub size_bytes: Option<u64>,
     pub sha256: Option<String>,
     pub loaded: bool,
+    /// Memory figures reported by llama.cpp while initializing the active model.
+    ///
+    /// This is optional because runtimes may not expose their initialization log hooks. Clients
+    /// must treat `None` (or individual `None` fields) as "unavailable", not as zero bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initialization_memory: Option<ModelMemoryInfo>,
+}
+
+/// Native memory figures collected from llama.cpp initialization diagnostics, when the runtime
+/// exposes its public log callback hooks.
+///
+/// The values are deliberately optional: llama.cpp versions and backends differ in which
+/// buffers they report, and Lime must not infer GPU usage from the GGUF file size or context
+/// settings.  `total_bytes` is not necessarily the sum of the component fields when the native
+/// runtime reports shared buffers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelMemoryInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Per-buffer figures parsed from llama.cpp's initialization diagnostics.
+    /// Keys are stable buffer kinds, optionally qualified by a native device
+    /// name such as `cuda0.model` when the runtime reports one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub breakdown: BTreeMap<String, u64>,
 }
 
 /// A persisted local GGUF model preset.
@@ -494,6 +544,25 @@ mod tests {
     }
 
     #[test]
+    fn management_config_without_legacy_toggles_uses_compatibility_defaults() {
+        let value: Config = serde_json::from_str(
+            r#"{
+                "rime_schema":"rime_ice",
+                "preceding_text_char_limit":128,
+                "context_preview_char_limit":32,
+                "page_size":9,
+                "llm_rerank_count":32,
+                "llm_effective_count":3,
+                "llm_context_token_limit":1024,
+                "llm_backend":"cpu"
+            }"#,
+        )
+        .expect("current management config should deserialize");
+        assert!(value.llm_enabled);
+        assert!(!value.auto_start_service);
+    }
+
+    #[test]
     fn input_response_serializes_only_public_fields() {
         let response = InputResponse {
             request_id: 7,
@@ -517,6 +586,32 @@ mod tests {
         )
         .expect("deserialize legacy response");
         assert!(value.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn model_info_without_initialization_memory_remains_readable() {
+        let value: ModelInfo =
+            serde_json::from_str(r#"{"path":null,"size_bytes":null,"sha256":null,"loaded":false}"#)
+                .expect("deserialize legacy model status");
+        assert!(value.initialization_memory.is_none());
+
+        let value = ModelInfo {
+            path: Some("model.gguf".into()),
+            size_bytes: Some(42),
+            sha256: None,
+            loaded: true,
+            initialization_memory: Some(ModelMemoryInfo {
+                model_bytes: Some(1),
+                context_bytes: Some(2),
+                compute_bytes: None,
+                total_bytes: Some(3),
+                backend: Some("cuda".into()),
+                breakdown: BTreeMap::from([(String::from("cuda0.model"), 4)]),
+            }),
+        };
+        let json = serde_json::to_string(&value).expect("serialize model status");
+        let decoded: ModelInfo = serde_json::from_str(&json).expect("deserialize model status");
+        assert_eq!(decoded, value);
     }
 
     #[test]
@@ -573,6 +668,31 @@ mod tests {
         )
         .expect("legacy history should deserialize");
         assert!(legacy.llm_performance.is_none());
+        assert!(legacy.model_name.is_none());
+        assert!(legacy.rime_duration_ms.is_none());
+    }
+
+    #[test]
+    fn history_model_and_rime_timing_round_trip() {
+        let entry = InputHistoryEntry {
+            request_id: 7,
+            timestamp_ms: 8,
+            preceding_text: "上文".into(),
+            preedit: "nihao".into(),
+            rime_candidates: Vec::new(),
+            final_candidates: Vec::new(),
+            service_state: ServiceState::Ready,
+            model_name: Some("demo.gguf".into()),
+            rime_duration_ms: Some(13),
+            diagnostics: Vec::new(),
+            llm_performance: None,
+        };
+        let json = serde_json::to_string(&entry).expect("serialize history entry");
+        assert!(json.contains(r#""model_name":"demo.gguf""#));
+        assert!(json.contains(r#""rime_duration_ms":13"#));
+        let decoded: InputHistoryEntry =
+            serde_json::from_str(&json).expect("deserialize history entry");
+        assert_eq!(decoded, entry);
     }
 
     #[test]

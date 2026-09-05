@@ -12,8 +12,6 @@ interface Config {
   llm_effective_count: number;
   llm_context_token_limit: number;
   llm_backend: "cuda" | "cpu";
-  llm_enabled: boolean;
-  auto_start_service: boolean;
 }
 
 interface ConfigSnapshot {
@@ -26,6 +24,7 @@ interface ModelInfo {
   size_bytes: number | null;
   sha256: string | null;
   loaded: boolean;
+  memory: Record<string, number>;
 }
 
 interface ModelPreset {
@@ -58,6 +57,7 @@ interface LlmPerformance {
   tokenizeMs: number;
   decodeMs: number;
   logitsMs: number;
+  rimeMs: number | null;
   candidateCount: number;
   scoredCount: number;
   targetTokenCount: number;
@@ -77,6 +77,8 @@ interface InputData {
   finalCandidates: Candidate[];
   diagnostics: CandidateDiagnostic[];
   llmPerformance: LlmPerformance | null;
+  rimeMs: number | null;
+  model: string | null;
   contextUsed: boolean | null;
   serviceState: ServiceState;
 }
@@ -117,7 +119,7 @@ const stateLabel: Record<ServiceState, string> = {
   ready: "可用",
   rime_only: "基础模式",
   reloading: "重载中",
-  unavailable: "服务不可用",
+  unavailable: "不可用",
 };
 
 const defaultConfig: Config = {
@@ -129,9 +131,10 @@ const defaultConfig: Config = {
   llm_effective_count: 3,
   llm_context_token_limit: 1024,
   llm_backend: "cuda",
-  llm_enabled: true,
-  auto_start_service: false,
 };
+
+type ThemeMode = "system" | "light" | "dark";
+const THEME_STORAGE_KEY = "lime.management.theme";
 
 const HISTORY_PAGE_SIZE = 100;
 const NOTICE_DURATION_MS = 4000;
@@ -141,8 +144,15 @@ if (!app) throw new Error("Lime UI mount point is missing");
 app.innerHTML = [
   '<div class="shell">',
   '  <header class="header">',
-  '    <div class="brand"><img class="brand-logo" src="/logo.svg" alt="" /><div><p class="eyebrow">LIME</p><h1>Lime</h1></div></div>',
-  '    <span class="badge" data-service-state="unavailable" aria-live="polite">服务不可用</span>',
+  '    <div class="brand" aria-label="Lime"><img class="brand-logo" src="/logo.svg" alt="Lime" /></div>',
+  '    <nav class="tabs" aria-label="Lime 功能">',
+  '      <button class="tab is-active" type="button" data-tab="input">设置</button>',
+  '      <button class="tab" type="button" data-tab="test">测试</button>',
+  '      <button class="tab" type="button" data-tab="dictionary">词库</button>',
+  '      <button class="tab" type="button" data-tab="history">历史</button>',
+  '      <button class="tab" type="button" data-tab="diagnostics">诊断</button>',
+  '    </nav>',
+  '    <span class="badge" data-service-state="unavailable" aria-live="polite">服务 不可用</span>',
   "  </header>",
   '  <div class="toast-region" data-notice-region aria-live="polite" aria-atomic="true">',
   '    <div class="notice is-hidden" data-notice role="status" aria-hidden="true">',
@@ -150,32 +160,38 @@ app.innerHTML = [
   '      <button class="toast-close" data-notice-close type="button" aria-label="关闭提示">×</button>',
   "    </div>",
   "  </div>",
-  '  <nav class="tabs" aria-label="Lime 功能">',
-  '    <button class="tab is-active" type="button" data-tab="input">设置</button>',
-  '    <button class="tab" type="button" data-tab="test">测试</button>',
-  '    <button class="tab" type="button" data-tab="model">模型</button>',
-  '    <button class="tab" type="button" data-tab="dictionary">词库</button>',
-  '    <button class="tab" type="button" data-tab="history">历史</button>',
-  '    <button class="tab" type="button" data-tab="diagnostics">诊断</button>',
-  "  </nav>",
   "  <main>",
   '    <section class="panel" data-panel="input">',
-  '      <div class="panel-heading"><div><h2>输入与候选</h2></div></div>',
+  '      <div class="panel-heading"><h2>设置</h2></div>',
   '      <form data-config-form>',
-  '        <div class="form-grid">',
-  '          <label class="field"><span>Rime 方案</span><select data-config="rime_schema"><option value="rime_ice">雾凇拼音（全拼）</option><option value="double_pinyin">自然码双拼</option><option value="double_pinyin_abc">智能 ABC 双拼</option><option value="double_pinyin_mspy">微软双拼</option><option value="double_pinyin_sogou">搜狗双拼</option><option value="double_pinyin_flypy">小鹤双拼</option><option value="double_pinyin_ziguang">紫光双拼</option><option value="double_pinyin_jiajia">拼音加加双拼</option></select></label>',
-  '          <label class="field"><span>前文窗口（字符）</span><input data-config="preceding_text_char_limit" type="number" min="1" max="4096" required /></label>',
-  '          <label class="field"><span>前文预览（字符）</span><input data-config="context_preview_char_limit" type="number" min="0" max="1024" required /></label>',
-  '          <label class="field"><span>候选页大小</span><input data-config="page_size" type="number" min="1" max="20" required /></label>',
-  '          <label class="field"><span>重排候选检查范围</span><input data-config="llm_rerank_count" type="number" min="1" max="128" required /></label>',
-  '          <label class="field"><span>LLM 置顶候选数</span><input data-config="llm_effective_count" type="number" min="1" max="32" required /></label>',
-          '          <label class="field"><span>模型上下文 token</span><input data-config="llm_context_token_limit" type="number" min="1" max="4096" required /></label>',
-          '          <label class="field"><span>LLM 后端</span><select data-config="llm_backend"><option value="cuda">CUDA（默认）</option><option value="cpu">CPU</option></select></label>',
-  "        </div>",
-  '        <label class="switch"><input data-config="llm_enabled" type="checkbox" /><span>启用本地模型重排</span></label>',
-  '        <label class="switch"><input data-config="auto_start_service" type="checkbox" /><span>启动时自动连接服务</span></label>',
-  '        <div class="actions"><button class="button button-primary" type="submit">保存设置</button></div>',
-  "      </form>",
+  '        <section class="settings-section settings-section-first">',
+  '          <div class="form-grid">',
+  '            <label class="field"><span>每页展示候选词数</span><input data-config="page_size" type="number" min="1" max="20" required /></label>',
+  '            <label class="field"><span>前文预览字符数</span><input data-config="context_preview_char_limit" type="number" min="0" max="1024" required /></label>',
+  '            <label class="field"><span>前文实际获取字符数</span><input data-config="preceding_text_char_limit" type="number" min="1" max="4096" required /></label>',
+  '            <label class="field"><span>管理界面深色模式</span><select data-theme-mode><option value="system">跟随系统</option><option value="light">固定浅色</option><option value="dark">固定深色</option></select></label>',
+  '          </div>',
+  '        </section>',
+  '        <section class="settings-section">',
+  '          <div class="form-grid">',
+  '            <label class="field"><span>Rime 方案</span><select data-config="rime_schema"><option value="rime_ice">雾凇拼音（全拼）</option><option value="double_pinyin">自然码双拼</option><option value="double_pinyin_abc">智能 ABC 双拼</option><option value="double_pinyin_mspy">微软双拼</option><option value="double_pinyin_sogou">搜狗双拼</option><option value="double_pinyin_flypy">小鹤双拼</option><option value="double_pinyin_ziguang">紫光双拼</option><option value="double_pinyin_jiajia">拼音加加双拼</option></select></label>',
+  '            <label class="field"><span>LLM 单次请求 token 数上限</span><input data-config="llm_context_token_limit" type="number" min="1" max="4096" required /></label>',
+  '            <label class="field"><span>LLM 重排输入候选词数</span><input data-config="llm_rerank_count" type="number" min="1" max="128" required /></label>',
+  '            <label class="field"><span>LLM 重排采纳候选词数</span><input data-config="llm_effective_count" type="number" min="1" max="32" required /></label>',
+  '            <label class="field"><span>LLM 后端</span><select data-config="llm_backend"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>',
+  '          </div>',
+  '        </section>',
+  '        <div class="actions settings-actions"><button class="button button-primary" type="submit">保存设置</button></div>',
+  '      </form>',
+  '      <section class="settings-section model-status-section"><div class="section-heading"><span class="status-dot" data-model-state>未加载</span></div>',
+  '        <div class="model-card"><dl class="status-list"><dt>路径</dt><dd class="model-path" data-model-path title="—">—</dd><dt>文件大小</dt><dd data-model-size>—</dd></dl><div class="model-memory" data-model-memory><p class="muted">未加载模型，暂无显存占用信息。</p></div></div>',
+  '      </section>',
+  '      <section class="settings-section preset-section"><div class="section-heading"><div class="section-heading-actions"><span class="meta-badge" data-preset-count>0 个</span><button class="button button-danger" data-unload-model type="button">卸载模型</button></div></div>',
+  '        <div class="actions model-add-actions"><button class="button" data-add-model type="button" aria-expanded="false">添加模型</button></div>',
+  '        <form class="preset-form is-hidden" data-preset-form><label class="field"><span>名称</span><input data-preset-name type="text" placeholder="例如 Qwen 7B" required /></label><label class="field field-wide"><span>GGUF 文件路径</span><input data-preset-path type="text" placeholder="C:\\Models\\lime.gguf" required /></label><div class="actions"><button class="button button-primary" type="submit">保存模型</button><button class="button" data-cancel-add-model type="button">取消</button></div></form>',
+  '        <div class="preset-list" data-model-presets><p class="muted">尚未读取模型预设。</p></div>',
+  '      </section>',
+  '      <form class="model-form is-hidden" data-model-form><input data-model-path-input type="text" aria-hidden="true" tabindex="-1" /></form>',
   "    </section>",
   '    <section class="panel is-hidden" data-panel="test">',
   '      <div class="panel-heading"><div><h2>输入测试</h2></div><span class="meta-badge" data-test-request>尚未请求</span></div>',
@@ -186,28 +202,19 @@ app.innerHTML = [
   "      </form>",
   '      <div class="test-result" data-test-result><p class="muted">输入上文和拼音后查看服务结果。</p></div>',
   "    </section>",
-  '    <section class="panel is-hidden" data-panel="model">',
-  '      <div class="panel-heading"><div><h2>模型</h2><p class="muted">可加载 GGUF，并保存多个本机模型预设。</p></div><span class="status-dot" data-model-state>未加载</span></div>',
-  '      <div class="model-card"><dl class="status-list"><dt>路径</dt><dd data-model-path>—</dd><dt>大小</dt><dd data-model-size>—</dd><dt>SHA-256</dt><dd class="mono" data-model-sha>—</dd></dl></div>',
-  '      <form class="model-form" data-model-form><label class="field field-wide"><span>GGUF 文件路径</span><input data-model-path-input type="text" placeholder="C:\\Models\\lime.gguf" required /></label><div class="actions"><button class="button button-primary" type="submit">加载模型</button><button class="button" data-unload-model type="button">卸载模型</button></div></form>',
-  '      <div class="preset-section"><div class="panel-heading compact-heading"><div><h3>模型预设</h3><p class="muted">点击预设即可切换模型。</p></div><span class="meta-badge" data-preset-count>0 个</span></div>',
-  '        <form class="preset-form" data-preset-form><label class="field"><span>名称</span><input data-preset-name type="text" placeholder="例如 Qwen 7B" required /></label><label class="field field-wide"><span>路径</span><input data-preset-path type="text" placeholder="C:\\Models\\lime.gguf" required /></label><button class="button" type="submit">保存预设</button></form>',
-  '        <div class="preset-list" data-model-presets><p class="muted">尚未读取预设。</p></div>',
-  "      </div>",
-  "    </section>",
   '    <section class="panel is-hidden" data-panel="dictionary">',
-  '      <div class="panel-heading"><div><h2>词库</h2><p class="muted">导入前校验 JSON；失败时不会覆盖现有词库。</p></div><span class="meta-badge" data-dictionary-count>— 条</span></div>',
+  '      <div class="panel-heading"><h2>词库</h2><span class="meta-badge" data-dictionary-count>— 条</span></div>',
   '      <div class="actions"><button class="button" data-import-dictionary type="button">导入 JSON</button><button class="button" data-export-dictionary type="button">导出 JSON</button><button class="button button-danger" data-clear-dictionary type="button">清空用户词库</button><input class="visually-hidden" data-dictionary-file type="file" accept="application/json,.json" /></div>',
   '      <div class="table-wrap"><table><thead><tr><th>拼音</th><th>文本</th><th>权重</th></tr></thead><tbody data-dictionary-table><tr><td colspan="3" class="muted">尚未读取词库</td></tr></tbody></table></div>',
   "    </section>",
   '    <section class="panel is-hidden" data-panel="history">',
-  '      <div class="panel-heading"><div><h2>历史</h2><p class="muted">按时间从新到旧显示输入记录，每页 100 条。点击记录查看详情。</p></div><div class="actions-inline"><span class="meta-badge" data-history-count>0 条</span><button class="button button-danger" data-clear-history type="button">清空历史</button></div></div>',
-  '      <div class="table-wrap"><table class="history-table"><thead><tr><th>上文</th><th>拼音</th><th>Rime 候选（前 3）</th><th>LLM 排序（前 3）</th><th>LLM 总耗时</th></tr></thead><tbody data-history-table><tr><td colspan="5" class="muted">暂无输入记录</td></tr></tbody></table></div>',
+  '      <div class="panel-heading"><h2>历史</h2><div class="actions-inline"><span class="meta-badge" data-history-count>0 条</span><button class="button button-danger" data-clear-history type="button">清空历史</button></div></div>',
+  '      <div class="table-wrap"><table class="history-table"><thead><tr><th>上文</th><th>拼音</th><th>Rime 候选（前 2）</th><th>LLM 排序（前 2）</th><th>LLM 总耗时</th><th>模型</th></tr></thead><tbody data-history-table><tr><td colspan="6" class="muted">暂无输入记录</td></tr></tbody></table></div>',
   '      <div class="pagination" data-history-pagination><button class="button" data-history-prev type="button">上一页</button><span data-history-page-label>第 1 页</span><button class="button" data-history-next type="button">下一页</button></div>',
-  '      <section class="history-detail is-hidden" data-history-detail aria-live="polite"><div class="panel-heading compact-heading"><div><h3 data-history-detail-title>记录详情</h3><p class="muted" data-history-detail-meta>—</p></div><button class="button" data-history-detail-close type="button">返回列表</button></div><div data-history-detail-table><p class="muted">选择一条记录查看详情。</p></div></section>',
+  '      <section class="history-detail is-hidden" data-history-detail aria-live="polite"><div class="panel-heading compact-heading"><p class="muted" data-history-detail-meta>—</p><button class="button" data-history-detail-close type="button">返回列表</button></div><div data-history-detail-table><p class="muted">选择一条记录查看详情。</p></div></section>',
   "    </section>",
   '    <section class="panel is-hidden" data-panel="diagnostics">',
-  '      <div class="panel-heading"><div><h2>诊断</h2><p class="muted">查看运行状态与最近操作。</p></div><button class="button" data-refresh type="button">刷新</button></div>',
+  '      <div class="panel-heading"><h2>诊断</h2><button class="button" data-refresh type="button">刷新</button></div>',
   '      <dl class="status-list diagnostics-list"><dt>服务状态</dt><dd data-diagnostic-state>—</dd><dt>模型</dt><dd data-diagnostic-model>—</dd><dt>词库条目</dt><dd data-diagnostic-dictionary>—</dd><dt>最近操作</dt><dd data-last-operation>—</dd></dl>',
   "    </section>",
   "  </main>",
@@ -238,6 +245,34 @@ let noticeTimer: number | null = null;
 
 const query = <T extends Element>(selector: string) => document.querySelector<T>(selector);
 const all = <T extends Element>(selector: string) => [...document.querySelectorAll<T>(selector)];
+
+function normalizeThemeMode(value: unknown): ThemeMode {
+  return value === "light" || value === "dark" || value === "system" ? value : "system";
+}
+
+function storedThemeMode(): ThemeMode {
+  try {
+    return normalizeThemeMode(window.localStorage.getItem(THEME_STORAGE_KEY));
+  } catch {
+    return "system";
+  }
+}
+
+function applyThemeMode(value: unknown, persist = false) {
+  const mode = normalizeThemeMode(value);
+  document.documentElement.dataset.theme = mode;
+  const select = query<HTMLSelectElement>("[data-theme-mode]");
+  if (select && select.value !== mode) select.value = mode;
+  if (persist) {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, mode);
+    } catch {
+      // The management UI still applies the theme for this session when storage is unavailable.
+    }
+  }
+}
+
+applyThemeMode(storedThemeMode());
 
 function isFocusedWithin(selector: string): boolean {
   const container = query<HTMLElement>(selector);
@@ -344,6 +379,10 @@ function normalizeLlmPerformance(value: unknown): LlmPerformance | null {
     tokenizeMs: Math.max(0, asNumber(firstValue(record, ["tokenize_ms", "tokenizeMs"])) ?? 0),
     decodeMs: Math.max(0, asNumber(firstValue(record, ["decode_ms", "decodeMs"])) ?? 0),
     logitsMs: Math.max(0, asNumber(firstValue(record, ["logits_ms", "logitsMs"])) ?? 0),
+    rimeMs: (() => {
+      const value = asNumber(firstValue(record, ["rime_duration_ms", "rimeDurationMs", "rime_ms", "rimeMs"]));
+      return value == null ? null : Math.max(0, value);
+    })(),
     candidateCount: count(["candidate_count", "candidateCount"]),
     scoredCount: count(["scored_count", "scoredCount"]),
     targetTokenCount: count(["target_token_count", "targetTokenCount"]),
@@ -411,6 +450,18 @@ function normalizeInputData(value: unknown, fallback: Partial<InputData> = {}): 
   const final = Array.isArray(rawFinal) ? normalizeCandidates(rawFinal) : fallback.finalCandidates || [];
   const diagnosticsRaw = firstValue(record, ["diagnostics", "candidate_diagnostics", "candidateDiagnostics"]);
   const performanceRaw = firstValue(record, ["llm_performance", "llmPerformance", "performance"]);
+  const performanceRecord = asRecord(performanceRaw);
+  const rimeDuration = asNumber(firstValue(record, [
+    "rime_duration_ms", "rimeDurationMs", "rime_ms", "rimeMs", "rime_elapsed_ms", "rimeElapsedMs",
+  ])) ?? asNumber(firstValue(performanceRecord, ["rime_duration_ms", "rimeDurationMs", "rime_ms", "rimeMs"]));
+  const modelValue = firstValue(record, ["model_name", "modelName", "model", "model_id", "modelId"]);
+  const modelRecord = asRecord(modelValue);
+  const model = asString(
+    modelRecord
+      ? firstValue(modelRecord, ["name", "model_name", "modelName", "path", "model_path", "modelPath"])
+      : modelValue,
+    "",
+  ) || null;
   const precedingText = asString(firstValue(record, ["preceding_text", "precedingText", "context"]), fallback.precedingText || "");
   const preedit = asString(firstValue(record, ["preedit", "input_preedit", "inputPreedit"]), fallback.preedit || "");
   const timestamp = asNumber(firstValue(record, ["timestamp_ms", "timestampMs", "created_at_ms", "createdAtMs", "timestamp"]));
@@ -423,6 +474,8 @@ function normalizeInputData(value: unknown, fallback: Partial<InputData> = {}): 
     finalCandidates: final,
     diagnostics: diagnosticsFrom(diagnosticsRaw, rime, final),
     llmPerformance: normalizeLlmPerformance(performanceRaw) ?? fallback.llmPerformance ?? null,
+    rimeMs: rimeDuration ?? fallback.rimeMs ?? (normalizeLlmPerformance(performanceRaw)?.rimeMs ?? null),
+    model: model ?? fallback.model ?? null,
     contextUsed: asBoolean(firstValue(record, ["context_used", "contextUsed"])) ?? fallback.contextUsed ?? null,
     serviceState: normalizeState(firstValue(record, ["service_state", "serviceState", "state"]) ?? fallback.serviceState),
   };
@@ -448,11 +501,45 @@ function normalizeConfigSnapshot(value: unknown): ConfigSnapshot {
 
 function normalizeModel(value: unknown): ModelInfo {
   const record = asRecord(value);
+  const memory: Record<string, number> = {};
+  const collectMemory = (candidate: unknown, prefix = "") => {
+    const nested = asRecord(candidate);
+    if (!nested) return;
+    for (const [key, nestedValue] of Object.entries(nested)) {
+      if (!prefix && key === "breakdown" && asRecord(nestedValue)) {
+        collectMemory(nestedValue);
+        continue;
+      }
+      const label = prefix ? prefix + "." + key : key;
+      const numeric = asNumber(nestedValue);
+      if (numeric != null && Number.isFinite(numeric) && numeric >= 0) memory[label] = numeric;
+      else if (asRecord(nestedValue)) collectMemory(nestedValue, label);
+    }
+  };
+  const memoryValue = firstValue(record, [
+    "memory", "memory_usage", "memoryUsage", "vram", "vram_usage", "vramUsage",
+    "gpu_memory", "gpuMemory", "gpu_mem", "gpuMem", "initialization_memory", "initializationMemory",
+    "init_memory", "initMemory",
+  ]);
+  const memoryRecord = asRecord(memoryValue);
+  if (memoryRecord?.breakdown && asRecord(memoryRecord.breakdown)) {
+    collectMemory(memoryRecord.breakdown);
+  } else {
+    collectMemory(memoryValue);
+  }
+  if (record) {
+    for (const [key, nestedValue] of Object.entries(record)) {
+      if (!/(memory|vram|gpu_mem|offload|buffer)/i.test(key)) continue;
+      const numeric = asNumber(nestedValue);
+      if (numeric != null && Number.isFinite(numeric) && numeric >= 0) memory[key] = numeric;
+    }
+  }
   return {
     path: (firstValue(record, ["path", "model_path", "modelPath"]) as string | null | undefined) ?? null,
     size_bytes: asNumber(firstValue(record, ["size_bytes", "sizeBytes"])),
     sha256: (firstValue(record, ["sha256", "sha_256"]) as string | null | undefined) ?? null,
     loaded: Boolean(firstValue(record, ["loaded", "is_loaded", "isLoaded"])),
+    memory,
   };
 }
 
@@ -594,15 +681,73 @@ function renderModel(model: ModelInfo | null) {
     state.dataset.loaded = String(loaded);
   }
   const path = query<HTMLElement>("[data-model-path]");
-  if (path) path.textContent = model?.path ?? "—";
+  if (path) {
+    const fullPath = model?.path ?? "—";
+    path.textContent = fullPath === "—" ? fullPath : truncatePath(fullPath);
+    path.title = fullPath;
+  }
   const size = query<HTMLElement>("[data-model-size]");
   if (size) size.textContent = model?.size_bytes == null ? "—" : formatBytes(model.size_bytes);
-  const sha = query<HTMLElement>("[data-model-sha]");
-  if (sha) sha.textContent = model?.sha256 ?? "—";
+  const memory = query<HTMLElement>("[data-model-memory]");
+  if (memory) {
+    const entries = loaded && model ? Object.entries(model.memory) : [];
+    if (!entries.length) {
+      memory.innerHTML = '<p class="muted">' + (loaded ? "llama.cpp 未返回初始化显存信息。" : "未加载模型，暂无显存占用信息。") + "</p>";
+    } else {
+      const row = ([key, value]: [string, number]) => "<dt>" + escapeHtml(memoryLabel(key)) + "</dt><dd>" + escapeHtml(formatBytes(value)) + "</dd>";
+      memory.innerHTML = '<dl class="status-list memory-list">' + entries.map(row).join("") + "</dl>";
+    }
+  }
   const diagnostic = query<HTMLElement>("[data-diagnostic-model]");
   if (diagnostic) diagnostic.textContent = loaded ? model?.path ?? "已加载" : "未加载（基础模式）";
   for (const preset of currentPresets) preset.loaded = Boolean(loaded && preset.path && model?.path && preset.path === model.path);
   renderModelPresets(currentPresets);
+}
+
+function truncatePath(value: string, maxLength = 64): string {
+  if (value.length <= maxLength) return value;
+  const side = Math.max(8, Math.floor((maxLength - 1) / 2));
+  return value.slice(0, side) + "…" + value.slice(-side);
+}
+
+function memoryLabel(value: string): string {
+  const qualified = value.match(/^([^\.]+)\.(.+)$/);
+  if (qualified) {
+    const device = qualified[1].toUpperCase();
+    const kind = memoryLabel(qualified[2]);
+    return device + " · " + kind;
+  }
+  const label = value
+    .replace(/[._-]+/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .trim();
+  const aliases: Record<string, string> = {
+    model: "模型",
+    model_bytes: "模型权重",
+    context: "上下文",
+    context_bytes: "上下文",
+    kv: "KV 缓存",
+    kv_bytes: "KV 缓存",
+    kvCache: "KV 缓存",
+    compute: "计算缓冲",
+    compute_bytes: "计算缓冲",
+    buffer: "缓冲区",
+    total: "总计",
+    total_bytes: "总计",
+    output: "输出缓冲",
+    output_bytes: "输出缓冲",
+    rs: "RS 缓冲",
+    rs_bytes: "RS 缓冲",
+    lora: "LoRA 缓冲",
+    lora_bytes: "LoRA 缓冲",
+    state: "状态缓冲",
+    state_bytes: "状态缓冲",
+    gpu: "GPU",
+    vram: "显存",
+    backend: "后端",
+  };
+  const alias = aliases[value] ?? aliases[label] ?? label;
+  return alias ? alias.charAt(0).toUpperCase() + alias.slice(1) : "显存";
 }
 
 function applyConfig(snapshot: ConfigSnapshot, options: { force?: boolean } = {}) {
@@ -659,7 +804,7 @@ function renderDictionary(entries: DictionaryEntry[], options: { force?: boolean
   renderedDictionaryKey = key;
 }
 
-function candidateText(candidates: Candidate[], limit = 3): string {
+function candidateText(candidates: Candidate[], limit = 2): string {
   const values = candidates.slice(0, limit).map((candidate) => candidate.displayText).filter(Boolean);
   return values.length ? values.join(" / ") : "—";
 }
@@ -674,7 +819,7 @@ function historyRowContent(entry: InputData): string {
   const rime = entry.rimeCandidates.length ? entry.rimeCandidates : entry.diagnostics.map((item) => item.rimeCandidate).filter((item): item is Candidate => item !== null);
   const diagnosticLlm = entry.diagnostics.map((item) => item.llmCandidate).filter((item): item is Candidate => item !== null);
   const llm = diagnosticLlm.length ? diagnosticLlm : entry.finalCandidates;
-  return '<td>' + escapeHtml(entry.precedingText || "（空）") + '</td><td class="mono">' + escapeHtml(entry.preedit || "—") + "</td><td>" + escapeHtml(candidateText(rime)) + "</td><td>" + escapeHtml(candidateText(llm)) + "</td><td class=\"mono numeric\">" + escapeHtml(formatMilliseconds(entry.llmPerformance?.totalMs)) + "</td>";
+  return '<td>' + escapeHtml(entry.precedingText || "（空）") + '</td><td class="mono">' + escapeHtml(entry.preedit || "—") + "</td><td>" + escapeHtml(candidateText(rime)) + "</td><td>" + escapeHtml(candidateText(llm)) + "</td><td class=\"mono numeric\">" + escapeHtml(formatMilliseconds(entry.llmPerformance?.totalMs)) + "</td><td>" + escapeHtml(entry.model || "—") + "</td>";
 }
 
 function renderHistoryTable(table: HTMLTableSectionElement, page: HistoryPage) {
@@ -696,7 +841,7 @@ function renderHistoryTable(table: HTMLTableSectionElement, page: HistoryPage) {
     rows.push(row);
   });
   if (!rows.length) {
-    table.innerHTML = '<tr><td colspan="5" class="muted">暂无输入记录</td></tr>';
+    table.innerHTML = '<tr><td colspan="6" class="muted">暂无输入记录</td></tr>';
     return;
   }
   // Moving existing rows instead of replacing the whole table preserves the
@@ -729,22 +874,24 @@ function diagnosticTable(data: InputData): string {
   return '<div class="table-wrap diagnostic-table-wrap"><table class="diagnostic-table"><thead><tr><th>#</th><th>Rime 原始候选</th><th>LLM 候选</th><th>Logprob</th><th>Logprobs</th><th>Mismatch</th><th>展示候选</th></tr></thead><tbody>' + diagnosticRows(data) + "</tbody></table></div>";
 }
 
-function llmPerformanceSummary(performance: LlmPerformance | null): string {
-  if (!performance) return '<p class="muted">本次未调用 LLM。</p>';
+function llmPerformanceSummary(performance: LlmPerformance | null, rimeMs: number | null): string {
+  if (!performance && rimeMs == null) return '<p class="muted">本次未调用 LLM。</p>';
   const row = (label: string, value: string) => '<dt>' + label + '</dt><dd class="mono">' + escapeHtml(value) + '</dd>';
+  const effectiveRimeMs = rimeMs ?? performance?.rimeMs ?? null;
   return '<dl class="status-list history-performance">' +
-    row("总耗时", formatMilliseconds(performance.totalMs)) +
-    row("Token 化", formatMilliseconds(performance.tokenizeMs)) +
-    row("推理解码", formatMilliseconds(performance.decodeMs)) +
-    row("Logits 计算", formatMilliseconds(performance.logitsMs)) +
-    row("送入候选", String(performance.candidateCount) + " 个") +
-    row("返回得分", String(performance.scoredCount) + " 个") +
-    row("目标 Token", String(performance.targetTokenCount)) +
-    row("解码批次", String(performance.batchCount)) +
-    row("边界不匹配", String(performance.mismatchCount) + " 个") +
-    row("上下文 Token", String(performance.contextTokenCount)) +
-    row("Decode 输入行", String(performance.decodeInputTokenCount)) +
-    row("Logits 输出行", String(performance.logitsOutputCount)) +
+    row("Rime 耗时", formatMilliseconds(effectiveRimeMs)) +
+    row("LLM 总耗时", formatMilliseconds(performance?.totalMs)) +
+    row("Token 化", formatMilliseconds(performance?.tokenizeMs)) +
+    row("推理解码", formatMilliseconds(performance?.decodeMs)) +
+    row("Logits 计算", formatMilliseconds(performance?.logitsMs)) +
+    row("送入候选", performance ? String(performance.candidateCount) + " 个" : "—") +
+    row("返回得分", performance ? String(performance.scoredCount) + " 个" : "—") +
+    row("目标 Token", performance ? String(performance.targetTokenCount) : "—") +
+    row("解码批次", performance ? String(performance.batchCount) : "—") +
+    row("边界不匹配", performance ? String(performance.mismatchCount) + " 个" : "—") +
+    row("上下文 Token", performance ? String(performance.contextTokenCount) : "—") +
+    row("Decode 输入行", performance ? String(performance.decodeInputTokenCount) : "—") +
+    row("Logits 输出行", performance ? String(performance.logitsOutputCount) : "—") +
     '</dl>';
 }
 
@@ -795,8 +942,8 @@ function renderHistoryDetail(entry: InputData) {
   detail.classList.remove("is-hidden");
   if (title) title.textContent = "记录详情";
   const timestamp = formatTimestamp(entry.timestampMs);
-  if (meta) meta.textContent = "上文：" + (entry.precedingText || "（空）") + " | 拼音：" + (entry.preedit || "—") + " | 时间：" + timestamp;
-  content.innerHTML = llmPerformanceSummary(entry.llmPerformance) + diagnosticTable(entry);
+  if (meta) meta.textContent = "上文：" + (entry.precedingText || "（空）") + " | 拼音：" + (entry.preedit || "—") + " | 时间：" + timestamp + " | 模型：" + (entry.model || "—");
+  content.innerHTML = llmPerformanceSummary(entry.llmPerformance, entry.rimeMs) + diagnosticTable(entry);
   detail.scrollIntoView?.({ behavior: "smooth", block: "start" });
 }
 
@@ -836,7 +983,8 @@ function renderModelPresets(presets: ModelPreset[], options: { force?: boolean }
   target.innerHTML = presets.map((preset) => {
     const key = escapeHtml(preset.id || preset.name);
     const loaded = preset.loaded ? " is-loaded" : "";
-    return '<article class="preset-item' + loaded + '"><div class="preset-info"><strong>' + escapeHtml(preset.name) + '</strong><span class="muted mono">' + escapeHtml(preset.path || "—") + '</span></div><div class="preset-actions"><button class="button button-primary" type="button" data-preset-action="select" data-preset-key="' + key + '">切换</button><button class="button button-danger" type="button" data-preset-action="delete" data-preset-key="' + key + '">删除</button></div></article>';
+    const fullPath = preset.path || "—";
+    return '<article class="preset-item' + loaded + '"><div class="preset-info"><strong>' + escapeHtml(preset.name) + '</strong><span class="muted mono" title="' + escapeHtml(fullPath) + '">' + escapeHtml(fullPath === "—" ? fullPath : truncatePath(fullPath, 56)) + '</span></div><div class="preset-actions"><button class="button button-primary" type="button" data-preset-action="select" data-preset-key="' + key + '">切换</button><button class="button button-danger" type="button" data-preset-action="delete" data-preset-key="' + key + '">删除</button></div></article>';
   }).join("");
   renderedPresetsKey = key;
 }
@@ -1023,18 +1171,45 @@ function flushDeferredRenders() {
 const configForm = query<HTMLFormElement>("[data-config-form]");
 configForm?.addEventListener("input", () => { configFormDirty = true; });
 configForm?.addEventListener("change", () => { configFormDirty = true; });
+query<HTMLSelectElement>("[data-theme-mode]")?.addEventListener("change", (event) => {
+  applyThemeMode((event.target as HTMLSelectElement).value);
+});
 
 configForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   markMutation();
+  const previousConfig = { ...currentConfig };
+  const nextConfig = readConfig();
+  const activeModelPath = currentStatus?.model.loaded ? currentStatus.model.path : null;
+  const reloadModel = Boolean(activeModelPath && (
+    previousConfig.llm_context_token_limit !== nextConfig.llm_context_token_limit
+    || previousConfig.llm_rerank_count !== nextConfig.llm_rerank_count
+    || previousConfig.llm_backend !== nextConfig.llm_backend
+  ));
   try {
-    const value = await invoke<unknown>("set_config", { config: readConfig() });
+    const value = await invoke<unknown>("set_config", { config: nextConfig });
     const snapshot = normalizeConfigSnapshot(value);
     applyConfig(snapshot, { force: true });
     if (currentStatus) currentStatus.config = snapshot;
     renderStatus(currentStatus);
-    setNotice("设置已保存", "success");
-    recordOperation("设置已保存");
+    applyThemeMode(query<HTMLSelectElement>("[data-theme-mode]")?.value, true);
+    if (reloadModel && activeModelPath) {
+      try {
+        const modelValue = await invokeVariants<unknown>("load_model", [{ path: activeModelPath }, { modelPath: activeModelPath }]);
+        const model = normalizeModel(modelValue);
+        renderModel(model);
+        if (currentStatus) currentStatus.model = model;
+        await loadModelPresets({ force: true });
+        setNotice("设置已保存，模型已重新加载", "success");
+        recordOperation("设置已保存，模型已重新加载");
+      } catch (error) {
+        setNotice("设置已保存，但模型重新加载失败：" + errorMessage(error), "error");
+        recordOperation("设置已保存，模型重新加载失败");
+      }
+    } else {
+      setNotice("设置已保存", "success");
+      recordOperation("设置已保存");
+    }
     void requestRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
@@ -1083,6 +1258,23 @@ query<HTMLButtonElement>("[data-unload-model]")?.addEventListener("click", async
   }
 });
 
+const presetForm = query<HTMLFormElement>("[data-preset-form]");
+const addModelButton = query<HTMLButtonElement>("[data-add-model]");
+const cancelAddModelButton = query<HTMLButtonElement>("[data-cancel-add-model]");
+function setPresetFormVisible(visible: boolean) {
+  presetForm?.classList.toggle("is-hidden", !visible);
+  if (addModelButton) {
+    addModelButton.setAttribute("aria-expanded", String(visible));
+    addModelButton.textContent = visible ? "收起" : "添加模型";
+  }
+  if (visible) query<HTMLInputElement>("[data-preset-name]")?.focus();
+}
+addModelButton?.addEventListener("click", () => setPresetFormVisible(Boolean(presetForm?.classList.contains("is-hidden"))));
+cancelAddModelButton?.addEventListener("click", () => {
+  presetForm?.reset();
+  setPresetFormVisible(false);
+});
+
 query<HTMLFormElement>("[data-preset-form]")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const nameInput = query<HTMLInputElement>("[data-preset-name]");
@@ -1094,6 +1286,8 @@ query<HTMLFormElement>("[data-preset-form]")?.addEventListener("submit", async (
   try {
     await invokeVariants<unknown>("save_model_preset", [{ name, path }, { preset: { name, path } }]);
     await loadModelPresets({ force: true });
+    presetForm?.reset();
+    setPresetFormVisible(false);
     setNotice("模型预设已保存", "success");
     recordOperation("模型预设已保存");
     void requestRefresh("mutation");

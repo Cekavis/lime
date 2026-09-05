@@ -6,8 +6,9 @@ use crate::{
 };
 use lime_protocol::{
     CandidateDiagnostic, ConfigSnapshot, DictionaryPage, ErrorCode, InputHistoryEntry,
-    InputHistoryPage, InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelPreset, Request,
-    Response, ServiceState, ServiceStatus, DICTIONARY_PAGE_SIZE, INPUT_HISTORY_PAGE_SIZE,
+    InputHistoryPage, InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelMemoryInfo,
+    ModelPreset, Request, Response, ServiceState, ServiceStatus, DICTIONARY_PAGE_SIZE,
+    INPUT_HISTORY_PAGE_SIZE,
 };
 use llama_cpp_v3::BackendPreference;
 use std::{
@@ -19,7 +20,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Condvar, Mutex,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const CONFIG_FILE_VERSION: u32 = 1;
@@ -395,34 +396,36 @@ impl CoreService {
                 Vec::new(),
                 self.current_service_state(),
                 None,
+                None,
+                None,
             );
             return Err(ErrorCode::RequestCancelled);
         }
         let generation = self.generation.next();
         let config = snapshot.config;
         let model = self.model.lock().map_err(|_| ErrorCode::Internal)?;
-        let runtime = if config.llm_enabled {
-            model.as_ref()
-        } else {
-            None
-        };
+        // The management UI no longer exposes an "enable local reranking" switch. Keep the
+        // legacy config field on the wire for older clients, but a loaded model is always active.
+        let runtime = model.as_ref();
         let service_state = if model.is_some() {
             ServiceState::Ready
         } else {
             ServiceState::RimeOnly
         };
-        let rime_result = self
-            .engine
-            .lock()
-            .map_err(|_| ErrorCode::Internal)
-            .and_then(|mut engine| {
-                engine
+        let model_name = model_display_name(runtime);
+        let (rime_result, rime_duration_ms) = match self.engine.lock() {
+            Err(_) => (Err(ErrorCode::Internal), None),
+            Ok(mut engine) => {
+                let rime_started = Instant::now();
+                let result = engine
                     .candidates_for_rerank(
                         &request.preedit,
                         runtime.map_or(0, |_| config.llm_rerank_count as usize),
                     )
-                    .map_err(|error| error.code)
-            });
+                    .map_err(|error| error.code);
+                (result, Some(elapsed_ms(rime_started.elapsed())))
+            }
+        };
         let rime_batch = match rime_result {
             Ok(batch) => batch,
             Err(code) => {
@@ -432,6 +435,8 @@ impl CoreService {
                     Vec::new(),
                     Vec::new(),
                     service_state,
+                    model_name.clone(),
+                    rime_duration_ms,
                     None,
                 );
                 return Err(code);
@@ -468,6 +473,8 @@ impl CoreService {
             candidates.clone(),
             diagnostics.clone(),
             service_state,
+            model_name,
+            rime_duration_ms,
             llm_performance,
         );
         if !self.generation.is_current(generation) {
@@ -788,12 +795,31 @@ impl CoreService {
                     size_bytes: Some(item.size_bytes),
                     sha256: Some(item.sha256.clone()),
                     loaded: true,
+                    initialization_memory: item.initialization_memory.as_ref().map(|memory| {
+                        let total_bytes = memory_breakdown_total(&memory.breakdown);
+                        let mut breakdown = memory.breakdown.clone();
+                        if let Some(total) = total_bytes {
+                            breakdown.insert("total".to_owned(), total);
+                        }
+                        ModelMemoryInfo {
+                            model_bytes: memory_breakdown_sum(&memory.breakdown, "model"),
+                            context_bytes: memory_breakdown_sum_for_kinds(
+                                &memory.breakdown,
+                                &["kv", "output", "rs", "lora", "state"],
+                            ),
+                            compute_bytes: memory_breakdown_sum(&memory.breakdown, "compute"),
+                            total_bytes,
+                            backend: Some(item.backend_name.to_owned()),
+                            breakdown,
+                        }
+                    }),
                 })
                 .unwrap_or(ModelInfo {
                     path: None,
                     size_bytes: None,
                     sha256: None,
                     loaded: false,
+                    initialization_memory: None,
                 }),
         }
     }
@@ -900,6 +926,8 @@ impl CoreService {
         final_candidates: Vec<lime_protocol::Candidate>,
         diagnostics: Vec<CandidateDiagnostic>,
         service_state: ServiceState,
+        model_name: Option<String>,
+        rime_duration_ms: Option<u64>,
         llm_performance: Option<LlmPerformance>,
     ) {
         let timestamp_ms = self.next_timestamp_ms();
@@ -914,6 +942,8 @@ impl CoreService {
                 rime_candidates,
                 final_candidates,
                 service_state,
+                model_name,
+                rime_duration_ms,
                 diagnostics,
                 llm_performance,
             });
@@ -1054,12 +1084,52 @@ fn infer_active_model_path(presets: &[ModelPreset]) -> Option<String> {
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .map(elapsed_ms)
         .unwrap_or(0)
+}
+
+fn elapsed_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn model_display_name(runtime: Option<&LlamaRuntime>) -> Option<String> {
+    let path = &runtime?.path;
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .or_else(|| Some(normalize_path_string(path)))
 }
 
 fn normalize_path_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn memory_breakdown_sum(breakdown: &BTreeMap<String, u64>, kind: &str) -> Option<u64> {
+    memory_breakdown_sum_for_kinds(breakdown, &[kind])
+}
+
+fn memory_breakdown_sum_for_kinds(
+    breakdown: &BTreeMap<String, u64>,
+    kinds: &[&str],
+) -> Option<u64> {
+    let mut found = false;
+    let total = breakdown
+        .iter()
+        .filter(|(key, _)| {
+            key.rsplit('.')
+                .next()
+                .is_some_and(|suffix| kinds.contains(&suffix))
+        })
+        .fold(0_u64, |total, (_, value)| {
+            found = true;
+            total.saturating_add(*value)
+        });
+    found.then_some(total)
+}
+
+fn memory_breakdown_total(breakdown: &BTreeMap<String, u64>) -> Option<u64> {
+    (!breakdown.is_empty()).then(|| breakdown.values().copied().fold(0_u64, u64::saturating_add))
 }
 
 fn service_state(rime_available: bool, model_loaded: bool, model_loading: bool) -> ServiceState {
@@ -1141,6 +1211,36 @@ mod tests {
             }
             _ => panic!("unexpected history response"),
         }
+    }
+
+    #[test]
+    fn history_records_model_name_and_rime_duration() {
+        let service = CoreService::default();
+        let request = InputRequest {
+            request_id: 9,
+            preedit: "nihao".into(),
+            preceding_text: "上文".into(),
+            context_available: true,
+            config_revision: 0,
+        };
+        service.record_input_history(
+            &request,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            ServiceState::Ready,
+            Some("demo.gguf".into()),
+            Some(17),
+            None,
+        );
+
+        let history = match service.handle(Request::GetInputHistory) {
+            Response::InputHistory(history) => history,
+            other => panic!("unexpected history response: {other:?}"),
+        };
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].model_name.as_deref(), Some("demo.gguf"));
+        assert_eq!(history[0].rime_duration_ms, Some(17));
     }
 
     #[test]
