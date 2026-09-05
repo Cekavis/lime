@@ -59,7 +59,7 @@
     "llm_performance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["total_ms", "tokenize_ms", "decode_ms", "logits_ms", "candidate_count", "scored_count", "target_token_count", "batch_count", "mismatch_count", "context_token_count"],
+      "required": ["total_ms", "tokenize_ms", "decode_ms", "logits_ms", "candidate_count", "scored_count", "target_token_count", "batch_count", "mismatch_count", "context_token_count", "decode_input_token_count", "logits_output_count"],
       "properties": {
         "total_ms": { "type": "integer", "minimum": 0 },
         "tokenize_ms": { "type": "integer", "minimum": 0 },
@@ -70,7 +70,9 @@
         "target_token_count": { "type": "integer", "minimum": 0 },
         "batch_count": { "type": "integer", "minimum": 0 },
         "mismatch_count": { "type": "integer", "minimum": 0 },
-        "context_token_count": { "type": "integer", "minimum": 0 }
+        "context_token_count": { "type": "integer", "minimum": 0 },
+        "decode_input_token_count": { "type": "integer", "minimum": 0 },
+        "logits_output_count": { "type": "integer", "minimum": 0 }
       }
     },
     "input_history_entry": {

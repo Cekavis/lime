@@ -64,6 +64,8 @@ interface LlmPerformance {
   batchCount: number;
   mismatchCount: number;
   contextTokenCount: number;
+  decodeInputTokenCount: number;
+  logitsOutputCount: number;
 }
 
 interface InputData {
@@ -125,7 +127,7 @@ const defaultConfig: Config = {
   page_size: 9,
   llm_rerank_count: 32,
   llm_effective_count: 3,
-  llm_context_token_limit: 32,
+  llm_context_token_limit: 1024,
   llm_backend: "cuda",
   llm_enabled: true,
   auto_start_service: false,
@@ -348,6 +350,8 @@ function normalizeLlmPerformance(value: unknown): LlmPerformance | null {
     batchCount: count(["batch_count", "batchCount"]),
     mismatchCount: count(["mismatch_count", "mismatchCount"]),
     contextTokenCount: count(["context_token_count", "contextTokenCount"]),
+    decodeInputTokenCount: count(["decode_input_token_count", "decodeInputTokenCount"]),
+    logitsOutputCount: count(["logits_output_count", "logitsOutputCount"]),
   };
 }
 
@@ -739,6 +743,8 @@ function llmPerformanceSummary(performance: LlmPerformance | null): string {
     row("解码批次", String(performance.batchCount)) +
     row("边界回退", String(performance.mismatchCount) + " 个") +
     row("上下文 Token", String(performance.contextTokenCount)) +
+    row("Decode 输入行", String(performance.decodeInputTokenCount)) +
+    row("Logits 输出行", String(performance.logitsOutputCount)) +
     '</dl>';
 }
 

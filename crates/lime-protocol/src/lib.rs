@@ -199,6 +199,12 @@ pub struct LlmPerformance {
     /// Number of tokens in the untruncated preceding-text prompt.
     #[serde(default)]
     pub context_token_count: u32,
+    /// Number of token rows submitted to llama.cpp decode, summed across outer batches.
+    #[serde(default)]
+    pub decode_input_token_count: u32,
+    /// Number of logits rows read from llama.cpp, summed across outer batches.
+    #[serde(default)]
+    pub logits_output_count: u32,
 }
 
 /// A bounded, newest-first history page.
@@ -249,7 +255,7 @@ impl Default for Config {
             page_size: 9,
             llm_rerank_count: 32,
             llm_effective_count: 3,
-            llm_context_token_limit: 32,
+            llm_context_token_limit: 1024,
             llm_backend: default_llm_backend(),
             llm_enabled: true,
             auto_start_service: false,
@@ -460,7 +466,7 @@ mod tests {
                 page_size: 9,
                 llm_rerank_count: 32,
                 llm_effective_count: 3,
-                llm_context_token_limit: 32,
+                llm_context_token_limit: 1024,
                 llm_backend: "cuda".into(),
                 llm_enabled: true,
                 auto_start_service: false,
@@ -478,7 +484,7 @@ mod tests {
                 "page_size":9,
                 "llm_rerank_count":32,
                 "llm_effective_count":3,
-                "llm_context_token_limit":32,
+                "llm_context_token_limit":1024,
                 "llm_enabled":true,
                 "auto_start_service":false
             }"#,
@@ -546,6 +552,8 @@ mod tests {
             batch_count: 2,
             mismatch_count: 1,
             context_token_count: 6,
+            decode_input_token_count: 18,
+            logits_output_count: 12,
         };
         let json = serde_json::to_string(&performance).expect("serialize performance");
         let decoded: LlmPerformance = serde_json::from_str(&json).expect("deserialize performance");

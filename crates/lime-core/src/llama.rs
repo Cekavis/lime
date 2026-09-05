@@ -21,13 +21,9 @@ use std::{
 const MAX_CONTEXT_TOKENS: usize = 4096;
 /// One shared prompt plus at most this many candidate sequences are decoded at once.
 const MAX_SEQUENCE_COUNT: usize = 33;
-/// Native llama.cpp batch/output capacity. This is intentionally larger than the logical
-/// context limit: recurrent models may clamp `n_ctx` to their minimum allocation while still
-/// requiring the batch/output parameters to match the runtime's supported capacity.
-const MAX_BATCH_TOKENS: usize = 2048;
 /// Context allocated for callers that use [`LlamaRuntime::load`] directly. The service uses its
 /// validated `llm_context_token_limit` through [`LlamaRuntime::load_with_context`].
-pub const DEFAULT_CONTEXT_TOKENS: usize = 512;
+pub const DEFAULT_CONTEXT_TOKENS: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelMetadata {
@@ -62,6 +58,8 @@ struct ScoringTimings {
     decode: Duration,
     logits: Duration,
     batch_count: u32,
+    decode_input_tokens: usize,
+    logits_output_count: usize,
     context_limit: usize,
     vocab_size: usize,
 }
@@ -77,6 +75,11 @@ impl ScoringTimings {
 
     fn add_logits(&mut self, started: Instant) {
         self.logits += started.elapsed();
+    }
+
+    fn add_decode_workload(&mut self, input_tokens: usize, output_count: usize) {
+        self.decode_input_tokens = self.decode_input_tokens.saturating_add(input_tokens);
+        self.logits_output_count = self.logits_output_count.saturating_add(output_count);
     }
 }
 
@@ -95,6 +98,7 @@ pub struct LlamaRuntime {
     pub dll_path: PathBuf,
     pub context_tokens: usize,
     pub runtime_context_tokens: usize,
+    sequence_count: usize,
     pub vocab_size: usize,
     pub backend_name: &'static str,
     // Field order is intentional: Rust drops fields in declaration order. The
@@ -344,16 +348,21 @@ impl LlamaRuntime {
             .map_err(|error| format!("load GGUF model {}: {error:?}", metadata.path.display()))?;
 
         let context_tokens = context_tokens.clamp(4, MAX_CONTEXT_TOKENS);
+        // Keep the sequence count bounded. Recurrent models allocate state proportional to this
+        // value; raising it to the context-token limit can consume many gigabytes. Thirty-two
+        // candidate sequences plus one reserved slot cover the normal rerank path, while mismatch
+        // targets are chunked when they exceed this native sequence capacity.
+        let sequence_count = MAX_SEQUENCE_COUNT;
         let mut context_params = LlamaContext::default_params(&model);
         context_params.n_ctx = context_tokens as u32;
-        // Keep these native capacity settings aligned with tools/pinyin-eval. The logical
-        // scoring budget remains `context_tokens`; using that smaller value for n_batch and
-        // n_outputs_max causes llama.cpp to abort while constructing recurrent-model contexts.
-        context_params.n_batch = MAX_BATCH_TOKENS as u32;
-        context_params.n_ubatch = 512;
-        context_params.n_seq_max = MAX_SEQUENCE_COUNT as u32;
-        context_params.n_outputs_max = MAX_BATCH_TOKENS as u32;
-        context_params.n_outputs_max_per_seq = MAX_BATCH_TOKENS as u32;
+        // The application uses one total-token budget. Keep native logical, physical and output
+        // capacities aligned with that budget so a request that fits the configured limit can be
+        // submitted in one decode and one micro-batch.
+        context_params.n_batch = context_tokens as u32;
+        context_params.n_ubatch = context_tokens as u32;
+        context_params.n_seq_max = sequence_count as u32;
+        context_params.n_outputs_max = context_tokens as u32;
+        context_params.n_outputs_max_per_seq = context_tokens as u32;
         context_params.kv_unified = true;
         let context = LlamaContext::new(&model, context_params)
             .map_err(|error| format!("create llama.cpp context: {error}"))?;
@@ -375,6 +384,7 @@ impl LlamaRuntime {
             dll_path,
             context_tokens,
             runtime_context_tokens,
+            sequence_count,
             vocab_size: vocab_size as usize,
             backend_name: backend.backend_name(),
             backend,
@@ -508,7 +518,7 @@ impl LlamaRuntime {
             let mut prefix_tokens = 0_usize;
             let mut longest_prefix = 0_usize;
             while chunk_end < exact_indices.len()
-                && chunk_end - chunk_start < MAX_SEQUENCE_COUNT - 1
+                && chunk_end - chunk_start < self.sequence_count.saturating_sub(1)
             {
                 let candidate_prefix = exact_indices[chunk_end].1.score_ids.len().saturating_sub(1);
                 let next_longest = longest_prefix.max(candidate_prefix);
@@ -555,6 +565,7 @@ impl LlamaRuntime {
                 &mut context,
                 &decode_base,
                 &sequences,
+                self.sequence_count,
                 &mut timings,
             )?;
             for (chunk_index, (plan_index, _)) in chunk.iter().enumerate() {
@@ -564,15 +575,17 @@ impl LlamaRuntime {
         }
 
         // Boundary-mismatch candidates are intentionally evaluated with the real standalone token
-        // ids.  Each target is conditioned on the real context plus the already-consumed token
-        // pieces, matching the fallback strategy used by the evaluation tool.
+        // ids. Each target is conditioned on the real context plus the already-consumed token
+        // pieces, matching the previous fallback strategy. Build all prompt/target pairs during
+        // tokenization, then submit them in shared decode batches instead of decoding once per
+        // target token.
         let mismatch_indices = plans
             .iter()
             .enumerate()
             .filter(|(_, plan)| !plan.exact_boundary)
             .collect::<Vec<_>>();
+        let mut mismatch_targets = Vec::new();
         for (plan_index, plan) in mismatch_indices {
-            let mut token_logprobs = Vec::with_capacity(plan.score_ids.len());
             for token_index in 0..plan.score_ids.len() {
                 let consumed = plan.standalone[..token_index]
                     .iter()
@@ -583,22 +596,47 @@ impl LlamaRuntime {
                 timings.add_tokenize(tokenize_started);
                 let prompt_ids = prompt.iter().map(|token| token.id).collect::<Vec<_>>();
                 let prompt_start = prompt_ids.len().saturating_sub(context_limit);
-                timings.batch_count = timings.batch_count.saturating_add(1);
-                let target = score_prompt_target(
-                    &self.backend,
-                    &self.model,
-                    &mut context,
-                    &prompt_ids[prompt_start..],
-                    plan.score_ids[token_index],
-                    &mut timings,
-                )?;
-                token_logprobs.push(target);
+                mismatch_targets.push(MismatchTarget {
+                    plan_index,
+                    token_index,
+                    prompt_tokens: prompt_ids[prompt_start..].to_vec(),
+                    target: plan.score_ids[token_index],
+                });
             }
+        }
+        let mismatch_scores = score_mismatch_targets(
+            &self.backend,
+            &self.model,
+            &mut context,
+            &mismatch_targets,
+            self.sequence_count,
+            &mut timings,
+        )?;
+        let mut mismatch_logprobs = plans
+            .iter()
+            .enumerate()
+            .filter(|(_, plan)| !plan.exact_boundary)
+            .map(|(index, plan)| (index, vec![None; plan.score_ids.len()]))
+            .collect::<std::collections::HashMap<_, _>>();
+        for (plan_index, token_index, value) in mismatch_scores {
+            if let Some(values) = mismatch_logprobs.get_mut(&plan_index) {
+                values[token_index] = Some(value);
+            }
+        }
+        for (plan_index, values) in mismatch_logprobs {
+            let token_logprobs = values
+                .into_iter()
+                .map(|value| {
+                    value.ok_or_else(|| {
+                        format!("mismatch candidate {plan_index} was not scored by llama.cpp")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             output[plan_index] = Some(CandidateScore {
-                token_ids: plan.score_ids.clone(),
+                token_ids: plans[plan_index].score_ids.clone(),
                 logprob: token_logprobs.iter().sum(),
                 token_logprobs,
-                mismatch: plan.mismatch,
+                mismatch: plans[plan_index].mismatch,
             });
         }
 
@@ -628,6 +666,8 @@ impl LlamaRuntime {
                 batch_count: timings.batch_count,
                 mismatch_count: mismatch_count.min(u32::MAX as usize) as u32,
                 context_token_count: base_ids.len().min(u32::MAX as usize) as u32,
+                decode_input_token_count: timings.decode_input_tokens.min(u32::MAX as usize) as u32,
+                logits_output_count: timings.logits_output_count.min(u32::MAX as usize) as u32,
             },
         })
     }
@@ -652,12 +692,21 @@ struct CandidatePlan {
     mismatch: bool,
 }
 
+#[derive(Clone, Debug)]
+struct MismatchTarget {
+    plan_index: usize,
+    token_index: usize,
+    prompt_tokens: Vec<llama_token>,
+    target: llama_token,
+}
+
 fn score_batch(
     backend: &LlamaBackend,
     model: &LlamaModel,
     context: &mut MutexGuard<'_, LlamaContext>,
     base_tokens: &[llama_token],
     candidates: &[Vec<llama_token>],
+    sequence_count: usize,
     timings: &mut ScoringTimings,
 ) -> Result<Vec<CandidateScore>, String> {
     if candidates.is_empty() {
@@ -701,7 +750,7 @@ fn score_batch(
         backend.lib.clone(),
         total_tokens.max(1) as i32,
         0,
-        MAX_SEQUENCE_COUNT as i32,
+        sequence_count as i32,
     );
     let sequence_ids = (1..=candidates.len() as i32).collect::<Vec<_>>();
     for (position, token) in decode_base.iter().copied().enumerate() {
@@ -728,6 +777,7 @@ fn score_batch(
             output_targets.push((candidate_index, tokens[token_index + 1], batch_index));
         }
     }
+    timings.add_decode_workload(total_tokens, output_targets.len().saturating_add(1));
     let decode_started = Instant::now();
     context
         .decode(&batch)
@@ -745,8 +795,11 @@ fn score_batch(
         decode_base.len().saturating_sub(1),
         timings.vocab_size,
     )?;
+    let base_normalizer = log_normalizer(&base_logits).ok_or_else(|| {
+        "llama.cpp returned a non-finite logits normalizer for the shared context output".to_owned()
+    })?;
     for (candidate_index, tokens) in candidates.iter().enumerate() {
-        let value = logprob_for(&base_logits, tokens[0]);
+        let value = logprob_with_normalizer(&base_logits, tokens[0], base_normalizer);
         if !value.is_finite() {
             return Err(format!(
                 "llama.cpp returned a non-finite logprob for token {}",
@@ -757,7 +810,10 @@ fn score_batch(
     }
     for (candidate_index, target_token, batch_index) in output_targets {
         let logits = logits_for(backend, context, batch_index, timings.vocab_size)?;
-        let value = logprob_for(&logits, target_token);
+        let normalizer = log_normalizer(&logits).ok_or_else(|| {
+            format!("llama.cpp returned a non-finite logits normalizer for output {batch_index}")
+        })?;
+        let value = logprob_with_normalizer(&logits, target_token, normalizer);
         if !value.is_finite() {
             return Err(format!(
                 "llama.cpp returned a non-finite logprob for token {target_token}"
@@ -778,52 +834,102 @@ fn score_batch(
         .collect())
 }
 
-fn score_prompt_target(
+fn score_mismatch_targets(
     backend: &LlamaBackend,
     model: &LlamaModel,
     context: &mut MutexGuard<'_, LlamaContext>,
-    prompt_tokens: &[llama_token],
-    target: llama_token,
+    targets: &[MismatchTarget],
+    sequence_count: usize,
     timings: &mut ScoringTimings,
-) -> Result<f64, String> {
-    let prompt = if prompt_tokens.is_empty() {
-        vec![model.get_vocab().bos()]
-    } else {
-        prompt_tokens.to_vec()
-    };
-    if prompt.len() > timings.context_limit {
-        return Err(format!(
-            "mismatch prompt has {} tokens, context limit is {}",
-            prompt.len(),
-            timings.context_limit
-        ));
+) -> Result<Vec<(usize, usize, f64)>, String> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
     }
-    context.kv_cache_clear();
-    let mut batch = LlamaBatch::new(backend.lib.clone(), prompt.len().max(1) as i32, 0, 1);
-    for (position, token) in prompt.iter().copied().enumerate() {
-        batch.add(token, position as i32, &[0], position + 1 == prompt.len());
+
+    let max_targets_per_batch = sequence_count.saturating_sub(1).max(1);
+    let mut scores = Vec::with_capacity(targets.len());
+    let mut chunk_start = 0;
+    while chunk_start < targets.len() {
+        let mut chunk_end = chunk_start;
+        let mut total_tokens = 0_usize;
+        while chunk_end < targets.len() && chunk_end - chunk_start < max_targets_per_batch {
+            let prompt_len = targets[chunk_end].prompt_tokens.len().max(1);
+            if prompt_len > timings.context_limit {
+                return Err(format!(
+                    "mismatch prompt has {prompt_len} tokens, context limit is {}",
+                    timings.context_limit
+                ));
+            }
+            let next_total = total_tokens.saturating_add(prompt_len);
+            if next_total > timings.context_limit {
+                if chunk_end == chunk_start {
+                    return Err(format!(
+                        "mismatch decode batch has {next_total} tokens, context limit is {}",
+                        timings.context_limit
+                    ));
+                }
+                break;
+            }
+            total_tokens = next_total;
+            chunk_end += 1;
+        }
+
+        let chunk = &targets[chunk_start..chunk_end];
+        context.kv_cache_clear();
+        let mut batch = LlamaBatch::new(
+            backend.lib.clone(),
+            total_tokens.max(1) as i32,
+            0,
+            sequence_count as i32,
+        );
+        let sequence_ids = (1..=chunk.len() as i32).collect::<Vec<_>>();
+        let mut output_targets = Vec::with_capacity(chunk.len());
+        for (target_index, target) in chunk.iter().enumerate() {
+            let prompt = if target.prompt_tokens.is_empty() {
+                vec![model.get_vocab().bos()]
+            } else {
+                target.prompt_tokens.clone()
+            };
+            let final_batch_index = batch.handle.n_tokens as usize + prompt.len() - 1;
+            for (position, token) in prompt.into_iter().enumerate() {
+                batch.add(
+                    token,
+                    position as i32,
+                    &[sequence_ids[target_index]],
+                    position + 1 == target.prompt_tokens.len().max(1),
+                );
+            }
+            output_targets.push((target, final_batch_index));
+        }
+        timings.add_decode_workload(total_tokens, chunk.len());
+        timings.batch_count = timings.batch_count.saturating_add(1);
+        let decode_started = Instant::now();
+        context
+            .decode(&batch)
+            .map_err(|error| format!("llama.cpp mismatch decode failed: {error}"))?;
+        timings.add_decode(decode_started);
+
+        let logits_started = Instant::now();
+        for (target, batch_index) in output_targets {
+            let logits = logits_for(backend, context, batch_index, timings.vocab_size)?;
+            let normalizer = log_normalizer(&logits).ok_or_else(|| {
+                format!(
+                    "llama.cpp returned a non-finite logits normalizer for output {batch_index}"
+                )
+            })?;
+            let value = logprob_with_normalizer(&logits, target.target, normalizer);
+            if !value.is_finite() {
+                return Err(format!(
+                    "llama.cpp returned a non-finite logprob for token {}",
+                    target.target
+                ));
+            }
+            scores.push((target.plan_index, target.token_index, value));
+        }
+        timings.add_logits(logits_started);
+        chunk_start = chunk_end;
     }
-    let decode_started = Instant::now();
-    context
-        .decode(&batch)
-        .map_err(|error| format!("llama.cpp mismatch decode failed: {error}"))?;
-    timings.add_decode(decode_started);
-    let logits_started = Instant::now();
-    let logits = logits_for(
-        backend,
-        context,
-        prompt.len().saturating_sub(1),
-        timings.vocab_size,
-    )?;
-    let value = logprob_for(&logits, target);
-    timings.add_logits(logits_started);
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(format!(
-            "llama.cpp returned a non-finite logprob for token {target}"
-        ))
-    }
+    Ok(scores)
 }
 
 fn logits_for(
@@ -842,18 +948,13 @@ fn logits_for(
     Ok(unsafe { std::slice::from_raw_parts(pointer, vocab_size) }.to_vec())
 }
 
-fn logprob_for(logits_pointer: &[f32], token: llama_token) -> f64 {
-    // `logits_for` is expanded to the full vocabulary below; this helper is kept separate so the
-    // numerically stable log-sum-exp implementation is easy to test.
-    if token < 0 || logits_pointer.len() <= token as usize {
-        return f64::NEG_INFINITY;
-    }
+fn log_normalizer(logits_pointer: &[f32]) -> Option<f64> {
     let maximum = logits_pointer
         .iter()
         .copied()
         .fold(f32::NEG_INFINITY, f32::max) as f64;
     if !maximum.is_finite() {
-        return f64::NEG_INFINITY;
+        return None;
     }
     let denominator = maximum
         + logits_pointer
@@ -862,14 +963,31 @@ fn logprob_for(logits_pointer: &[f32], token: llama_token) -> f64 {
             .sum::<f64>()
             .ln();
     if !denominator.is_finite() {
+        None
+    } else {
+        Some(denominator)
+    }
+}
+
+fn logprob_with_normalizer(logits_pointer: &[f32], token: llama_token, normalizer: f64) -> f64 {
+    if token < 0 || logits_pointer.len() <= token as usize {
         return f64::NEG_INFINITY;
     }
     let value = logits_pointer[token as usize] as f64;
     if !value.is_finite() {
         f64::NEG_INFINITY
     } else {
-        value - denominator
+        value - normalizer
     }
+}
+
+#[cfg(test)]
+fn logprob_for(logits_pointer: &[f32], token: llama_token) -> f64 {
+    // `logits_for` is expanded to the full vocabulary below; this helper is kept separate so the
+    // numerically stable log-sum-exp implementation is easy to test.
+    log_normalizer(logits_pointer)
+        .map(|normalizer| logprob_with_normalizer(logits_pointer, token, normalizer))
+        .unwrap_or(f64::NEG_INFINITY)
 }
 
 fn backend_name(backend: llama_cpp_v3::Backend) -> &'static str {
@@ -1133,6 +1251,32 @@ mod tests {
                 .unwrap();
             assert!((single[0].logprob - scores[index].logprob).abs() < 1e-5);
         }
+
+        let mismatch_case = [("hel", "lo"), ("a", "bc"), ("abc", "def"), ("你", "好")]
+            .into_iter()
+            .find(|(preceding, candidate)| {
+                let base = runtime.tokenize(preceding).unwrap();
+                let combined = runtime
+                    .tokenize(&format!("{preceding}{candidate}"))
+                    .unwrap();
+                let base_ids = base.iter().map(|token| token.id).collect::<Vec<_>>();
+                let combined_ids = combined.iter().map(|token| token.id).collect::<Vec<_>>();
+                combined_ids.len() < base_ids.len()
+                    || combined_ids[..base_ids.len()] != base_ids[..]
+            })
+            .expect("test model should provide a tokenizer-boundary mismatch case");
+        let mismatch_scores = runtime
+            .score_candidates(
+                mismatch_case.0,
+                &[Candidate {
+                    display_text: mismatch_case.1.to_owned(),
+                    commit_text: mismatch_case.1.to_owned(),
+                }],
+            )
+            .unwrap();
+        assert!(mismatch_scores[0].mismatch);
+        assert!(mismatch_scores[0].logprob.is_finite());
+
         let ranked = crate::ranking::try_rerank_candidates_with_diagnostics(
             &candidates,
             "我",

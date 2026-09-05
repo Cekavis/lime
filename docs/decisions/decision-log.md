@@ -45,6 +45,8 @@
 | D039 | 历史记录只在实际执行 LLM scorer 时记录可选性能快照；列表显示总耗时，详情显示 tokenization/decode/logits 分阶段耗时及工作量计数，未调用 LLM 时不显示为 0ms |
 | D040 | 中文模式空格始终提交半角 U+0020；其他标点继续使用全角首选映射；有候选时 Space 仍选择候选，Shift+Space 仍透传 |
 | D041 | 管理窗口的词库和输入历史读取必须使用有界分页；完整词库导出由前端逐页拼接，避免本机 IPC 单帧超过 16 MiB；旧历史接口也限制为单页以保持兼容 |
+| D042 | `llm_context_token_limit` 默认 1024；llama.cpp 的 `n_batch`、`n_ubatch` 和 output capacity 跟随该值配置，sequence slot 保持 33 的安全上限，满足预算的请求尽量在一个 decode/micro-batch 完成 |
+| D043 | mismatch 候选在 tokenization 阶段构造逐 token prompt/target 对，后续按 token 预算批量 decode；保持 standalone-token 评分语义但避免逐目标清空 KV |
 
 ## 后续可演进
 
