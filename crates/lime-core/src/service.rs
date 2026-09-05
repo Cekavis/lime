@@ -513,24 +513,27 @@ impl CoreService {
     }
 
     fn load_runtime(&self, path: &Path) -> Result<LlamaRuntime, ErrorCode> {
-        let (context_tokens, backend_preference) = self
+        let (context_tokens, sequence_count, backend_preference) = self
             .config
             .lock()
             .map(|config| {
                 let snapshot = config.snapshot();
                 (
                     snapshot.config.llm_context_token_limit as usize,
+                    snapshot.config.llm_rerank_count as usize,
                     backend_preference_for(&snapshot.config.llm_backend),
                 )
             })
             .unwrap_or((
                 crate::llama::DEFAULT_CONTEXT_TOKENS,
+                crate::llama::DEFAULT_SEQUENCE_COUNT,
                 BackendPreference::Cuda,
             ));
-        LlamaRuntime::load_with_backend_preference(
+        LlamaRuntime::load_with_backend_preference_and_sequence_count(
             path.to_path_buf(),
             context_tokens,
             backend_preference,
+            sequence_count,
         )
         .map_err(|_| {
             if path.exists() {

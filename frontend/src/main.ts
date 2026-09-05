@@ -741,7 +741,7 @@ function llmPerformanceSummary(performance: LlmPerformance | null): string {
     row("返回得分", String(performance.scoredCount) + " 个") +
     row("目标 Token", String(performance.targetTokenCount)) +
     row("解码批次", String(performance.batchCount)) +
-    row("边界回退", String(performance.mismatchCount) + " 个") +
+    row("边界不匹配", String(performance.mismatchCount) + " 个") +
     row("上下文 Token", String(performance.contextTokenCount)) +
     row("Decode 输入行", String(performance.decodeInputTokenCount)) +
     row("Logits 输出行", String(performance.logitsOutputCount)) +

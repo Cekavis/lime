@@ -2,7 +2,7 @@
 
 ## 生产基线
 
-核心逻辑沿用 `tools/pinyin-eval`：
+核心逻辑沿用 `tools/pinyin-eval` 的候选召回、tokenizer 边界检查和批量 logits 计算基础：
 
 1. Rime/雾凇拼音根据 `preedit` 召回候选。
 2. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
@@ -10,9 +10,8 @@
 4. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
 5. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
 6. 使用 llama.cpp 完整 vocabulary logits 计算候选 token 的链式 logprob；运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
-7. 边界不匹配候选仍沿用逐 token 的 standalone-token 评分语义，但在 tokenization 阶段预先构造每个
-   prompt/target 对，随后按统一 token 预算批量 decode；因此不会为每个目标 token 单独清空 KV 和调用
-   llama.cpp。
+7. 边界不匹配候选将 `tokenize(candidate_text)` 得到的 token 逐个追加到上文，并与正常候选共用
+   候选批量 decode 路径计算 logprob；边界不匹配只保留为诊断标记，不再改变评分路径。
 8. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
 
 拼音用于 Rime 召回，不直接写入 LLM prompt。
@@ -48,8 +47,9 @@ final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
 - `preceding_text_char_limit` 默认 128，可在设置中修改。
 - `context_preview_char_limit` 默认 32，可在设置中修改。
 - `llm_context_token_limit` 默认 1024，也可在设置中修改；llama.cpp 的 batch、micro-batch 和输出
-  容量随该值配置。sequence slot 保持 33 的安全上限，避免 recurrent 模型按 sequence 数量分配
-  过大的状态内存；一次 decode 的输入行数超过该值时仍会拆分为多个外层 batch。
+  容量随该值配置。模型加载时 `n_seq_max` 与 `llm_rerank_count` 相同（默认均为 32），每个候选
+  使用一个 zero-based sequence；候选数超过该容量时拆分为多个外层 batch。修改上下文、后端或
+  重排候选检查范围后，需要下一次受控模型重载才能更新 native context 参数。
 - 平台层先按字符裁剪，Rust/llama.cpp 再按 token 后缀截断。
 
 ## llama.cpp 后端
@@ -67,7 +67,7 @@ final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
 
 历史记录在实际执行 LLM scorer 时额外保存 `LlmPerformance`：`total_ms` 是 scorer 的总 wall time，
 并拆分 tokenization、native decode 和 logits 阶段，同时记录送入候选数、目标 token 数、解码批次、
-边界回退数、上下文 token 数、decode 输入行数和 logits 输出行数。没有进入 scorer 的请求不写入该快照。
+边界不匹配数、上下文 token 数、decode 输入行数和 logits 输出行数。没有进入 scorer 的请求不写入该快照。
 
 ## 模型
 

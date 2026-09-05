@@ -68,7 +68,7 @@ LlmPerformance {
 }
 ```
 
-前端/TSF 根据 `candidates` 数组顺序生成页码和选中状态。`diagnostics` 只供用户主动打开的测试/历史详情页使用，不应在原生候选窗口展示。启用模型时，`logprob` 与 `logprobs` 来自真实 llama.cpp vocabulary logits，且 `logprobs` 的和与 `logprob` 一致（允许浮点误差）；没有模型时该行保持 Rime-only 语义。`mismatch` 使用同一 GGUF 的 llama.cpp tokenizer 检查上文/候选边界。
+前端/TSF 根据 `candidates` 数组顺序生成页码和选中状态。`diagnostics` 只供用户主动打开的测试/历史详情页使用，不应在原生候选窗口展示。启用模型时，`logprob` 与 `logprobs` 来自真实 llama.cpp vocabulary logits，且 `logprobs` 的和与 `logprob` 一致（允许浮点误差）；没有模型时该行保持 Rime-only 语义。`mismatch` 使用同一 GGUF 的 llama.cpp tokenizer 检查上文/候选边界；它只用于诊断，边界不匹配候选按其独立 tokenization 逐 token 追加到上文，并与其他候选共用评分路径。
 
 ## 管理 API
 

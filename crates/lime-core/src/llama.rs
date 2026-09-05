@@ -19,10 +19,12 @@ use std::{
 
 /// Maximum context exposed by Lime's validated configuration.
 const MAX_CONTEXT_TOKENS: usize = 4096;
-/// One shared prompt plus at most this many candidate sequences are decoded at once.
-const MAX_SEQUENCE_COUNT: usize = 33;
+/// Maximum sequence slots accepted by the configuration schema.
+const MAX_SEQUENCE_COUNT: usize = 128;
+/// Sequence slots used by direct callers that do not provide the rerank setting.
+pub const DEFAULT_SEQUENCE_COUNT: usize = 32;
 /// Context allocated for callers that use [`LlamaRuntime::load`] directly. The service uses its
-/// validated `llm_context_token_limit` through [`LlamaRuntime::load_with_context`].
+/// validated `llm_context_token_limit` and `llm_rerank_count` through the explicit load helper.
 pub const DEFAULT_CONTEXT_TOKENS: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,6 +179,7 @@ impl LlamaRuntime {
             model_path,
             dll_paths,
             DEFAULT_CONTEXT_TOKENS,
+            DEFAULT_SEQUENCE_COUNT,
             preference,
         )
     }
@@ -204,9 +207,34 @@ impl LlamaRuntime {
         context_tokens: usize,
         preference: BackendPreference,
     ) -> Result<Self, String> {
+        Self::load_with_backend_preference_and_sequence_count(
+            path,
+            context_tokens,
+            preference,
+            DEFAULT_SEQUENCE_COUNT,
+        )
+    }
+
+    /// Load a GGUF model with an explicit CUDA/CPU policy and sequence capacity.
+    ///
+    /// The service passes `llm_rerank_count` as the sequence capacity because each candidate is
+    /// represented by one llama.cpp sequence during scoring. The value is clamped to the same
+    /// bounds as the configuration schema.
+    pub fn load_with_backend_preference_and_sequence_count(
+        path: impl Into<PathBuf>,
+        context_tokens: usize,
+        preference: BackendPreference,
+        sequence_count: usize,
+    ) -> Result<Self, String> {
         let model_path = path.into();
         let dll_paths = discover_runtime_libraries(&model_path, preference)?;
-        Self::load_from_libraries_with_context(model_path, dll_paths, context_tokens, preference)
+        Self::load_from_libraries_with_context(
+            model_path,
+            dll_paths,
+            context_tokens,
+            sequence_count,
+            preference,
+        )
     }
 
     /// Load a GGUF model from an explicit runtime directory or shared-library path.
@@ -251,16 +279,41 @@ impl LlamaRuntime {
         context_tokens: usize,
         preference: BackendPreference,
     ) -> Result<Self, String> {
+        Self::load_with_runtime_dir_and_backend_preference_and_sequence_count(
+            path,
+            runtime_dir_or_library,
+            context_tokens,
+            preference,
+            DEFAULT_SEQUENCE_COUNT,
+        )
+    }
+
+    /// Same as [`Self::load_with_runtime_dir_and_backend_preference`] with an explicit sequence
+    /// capacity.
+    pub fn load_with_runtime_dir_and_backend_preference_and_sequence_count(
+        path: impl Into<PathBuf>,
+        runtime_dir_or_library: impl Into<PathBuf>,
+        context_tokens: usize,
+        preference: BackendPreference,
+        sequence_count: usize,
+    ) -> Result<Self, String> {
         let model_path = path.into();
         let runtime_dir_or_library = runtime_dir_or_library.into();
         let dll_paths = resolve_runtime_libraries(&runtime_dir_or_library, preference)?;
-        Self::load_from_libraries_with_context(model_path, dll_paths, context_tokens, preference)
+        Self::load_from_libraries_with_context(
+            model_path,
+            dll_paths,
+            context_tokens,
+            sequence_count,
+            preference,
+        )
     }
 
     fn load_from_libraries_with_context(
         model_path: PathBuf,
         dll_paths: Vec<PathBuf>,
         context_tokens: usize,
+        sequence_count: usize,
         preference: BackendPreference,
     ) -> Result<Self, String> {
         let metadata = Self::inspect_gguf(model_path.clone())?;
@@ -296,6 +349,7 @@ impl LlamaRuntime {
                     &metadata,
                     dll_path.clone(),
                     context_tokens,
+                    sequence_count,
                     *backend,
                 ) {
                     Ok(runtime) => return Ok(runtime),
@@ -318,6 +372,7 @@ impl LlamaRuntime {
         metadata: &ModelMetadata,
         dll_path: PathBuf,
         context_tokens: usize,
+        sequence_count: usize,
         backend_preference: llama_cpp_v3::Backend,
     ) -> Result<Self, String> {
         let backend_preference = match backend_preference {
@@ -348,11 +403,7 @@ impl LlamaRuntime {
             .map_err(|error| format!("load GGUF model {}: {error:?}", metadata.path.display()))?;
 
         let context_tokens = context_tokens.clamp(4, MAX_CONTEXT_TOKENS);
-        // Keep the sequence count bounded. Recurrent models allocate state proportional to this
-        // value; raising it to the context-token limit can consume many gigabytes. Thirty-two
-        // candidate sequences plus one reserved slot cover the normal rerank path, while mismatch
-        // targets are chunked when they exceed this native sequence capacity.
-        let sequence_count = MAX_SEQUENCE_COUNT;
+        let sequence_count = sequence_count.clamp(1, MAX_SEQUENCE_COUNT);
         let mut context_params = LlamaContext::default_params(&model);
         context_params.n_ctx = context_tokens as u32;
         // The application uses one total-token budget. Keep native logical, physical and output
@@ -422,9 +473,9 @@ impl LlamaRuntime {
 
     /// Compute real chain log probabilities for each candidate.
     ///
-    /// Exact tokenizer-boundary candidates are scored in shared-prefix batches.  Candidates whose
-    /// first token crosses the context/candidate boundary are scored token-by-token with a prompt
-    /// rebuilt from the real token pieces and are marked `mismatch = true`.
+    /// Candidates are scored in shared-prefix batches. Tokenizer-boundary mismatches are retained
+    /// as diagnostics, while the candidate's standalone tokenization is appended to the context
+    /// through the same batch path as every other candidate.
     pub fn score_candidates(
         &self,
         preceding_text: &str,
@@ -489,8 +540,6 @@ impl LlamaRuntime {
             }
             plans.push(CandidatePlan {
                 score_ids,
-                standalone,
-                exact_boundary,
                 mismatch,
             });
         }
@@ -507,20 +556,23 @@ impl LlamaRuntime {
         let context_limit = self.runtime_context_tokens.min(self.context_tokens).max(4);
         timings.context_limit = context_limit;
         timings.vocab_size = self.vocab_size;
-        let exact_indices = plans
-            .iter()
-            .enumerate()
-            .filter(|(_, plan)| plan.exact_boundary)
-            .collect::<Vec<_>>();
+        // Every candidate uses the same batch decode path. Exact-boundary candidates use the
+        // concatenated-text suffix; mismatch candidates use their standalone tokenization and
+        // append those ids to the preceding-text prompt. The boundary check remains diagnostic.
+        let candidate_indices = plans.iter().enumerate().collect::<Vec<_>>();
         let mut chunk_start = 0;
-        while chunk_start < exact_indices.len() {
+        while chunk_start < candidate_indices.len() {
             let mut chunk_end = chunk_start;
             let mut prefix_tokens = 0_usize;
             let mut longest_prefix = 0_usize;
-            while chunk_end < exact_indices.len()
-                && chunk_end - chunk_start < self.sequence_count.saturating_sub(1)
+            while chunk_end < candidate_indices.len()
+                && chunk_end - chunk_start < self.sequence_count
             {
-                let candidate_prefix = exact_indices[chunk_end].1.score_ids.len().saturating_sub(1);
+                let candidate_prefix = candidate_indices[chunk_end]
+                    .1
+                    .score_ids
+                    .len()
+                    .saturating_sub(1);
                 let next_longest = longest_prefix.max(candidate_prefix);
                 if next_longest >= context_limit {
                     return Err(format!(
@@ -550,7 +602,7 @@ impl LlamaRuntime {
                 chunk_end += 1;
             }
 
-            let chunk = &exact_indices[chunk_start..chunk_end];
+            let chunk = &candidate_indices[chunk_start..chunk_end];
             let base_budget = context_limit - longest_prefix;
             let base_start = base_ids.len().saturating_sub(base_budget);
             let decode_base = base_ids[base_start..].to_vec();
@@ -569,75 +621,11 @@ impl LlamaRuntime {
                 &mut timings,
             )?;
             for (chunk_index, (plan_index, _)) in chunk.iter().enumerate() {
-                output[*plan_index] = Some(scores[chunk_index].clone());
+                let mut score = scores[chunk_index].clone();
+                score.mismatch = plans[*plan_index].mismatch;
+                output[*plan_index] = Some(score);
             }
             chunk_start = chunk_end;
-        }
-
-        // Boundary-mismatch candidates are intentionally evaluated with the real standalone token
-        // ids. Each target is conditioned on the real context plus the already-consumed token
-        // pieces, matching the previous fallback strategy. Build all prompt/target pairs during
-        // tokenization, then submit them in shared decode batches instead of decoding once per
-        // target token.
-        let mismatch_indices = plans
-            .iter()
-            .enumerate()
-            .filter(|(_, plan)| !plan.exact_boundary)
-            .collect::<Vec<_>>();
-        let mut mismatch_targets = Vec::new();
-        for (plan_index, plan) in mismatch_indices {
-            for token_index in 0..plan.score_ids.len() {
-                let consumed = plan.standalone[..token_index]
-                    .iter()
-                    .map(|token| token.piece.as_str())
-                    .collect::<String>();
-                let tokenize_started = Instant::now();
-                let prompt = self.tokenize(&format!("{preceding_text}{consumed}"))?;
-                timings.add_tokenize(tokenize_started);
-                let prompt_ids = prompt.iter().map(|token| token.id).collect::<Vec<_>>();
-                let prompt_start = prompt_ids.len().saturating_sub(context_limit);
-                mismatch_targets.push(MismatchTarget {
-                    plan_index,
-                    token_index,
-                    prompt_tokens: prompt_ids[prompt_start..].to_vec(),
-                    target: plan.score_ids[token_index],
-                });
-            }
-        }
-        let mismatch_scores = score_mismatch_targets(
-            &self.backend,
-            &self.model,
-            &mut context,
-            &mismatch_targets,
-            self.sequence_count,
-            &mut timings,
-        )?;
-        let mut mismatch_logprobs = plans
-            .iter()
-            .enumerate()
-            .filter(|(_, plan)| !plan.exact_boundary)
-            .map(|(index, plan)| (index, vec![None; plan.score_ids.len()]))
-            .collect::<std::collections::HashMap<_, _>>();
-        for (plan_index, token_index, value) in mismatch_scores {
-            if let Some(values) = mismatch_logprobs.get_mut(&plan_index) {
-                values[token_index] = Some(value);
-            }
-        }
-        for (plan_index, values) in mismatch_logprobs {
-            let token_logprobs = values
-                .into_iter()
-                .map(|value| {
-                    value.ok_or_else(|| {
-                        format!("mismatch candidate {plan_index} was not scored by llama.cpp")
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            output[plan_index] = Some(CandidateScore {
-                token_ids: plans[plan_index].score_ids.clone(),
-                logprob: token_logprobs.iter().sum(),
-                token_logprobs,
-                mismatch: plans[plan_index].mismatch,
-            });
         }
 
         let scores = output
@@ -651,7 +639,7 @@ impl LlamaRuntime {
             .iter()
             .map(|score| score.token_logprobs.len())
             .sum::<usize>();
-        let mismatch_count = plans.iter().filter(|plan| !plan.exact_boundary).count();
+        let mismatch_count = plans.iter().filter(|plan| plan.mismatch).count();
         let scored_count = scores.len().min(u32::MAX as usize) as u32;
         Ok(ScoredCandidates {
             scores,
@@ -687,17 +675,7 @@ impl LlamaRuntime {
 #[derive(Clone, Debug)]
 struct CandidatePlan {
     score_ids: Vec<llama_token>,
-    standalone: Vec<TokenInfo>,
-    exact_boundary: bool,
     mismatch: bool,
-}
-
-#[derive(Clone, Debug)]
-struct MismatchTarget {
-    plan_index: usize,
-    token_index: usize,
-    prompt_tokens: Vec<llama_token>,
-    target: llama_token,
 }
 
 fn score_batch(
@@ -752,7 +730,9 @@ fn score_batch(
         0,
         sequence_count as i32,
     );
-    let sequence_ids = (1..=candidates.len() as i32).collect::<Vec<_>>();
+    // Sequence ids are zero-based in llama.cpp. Keeping them in `0..N` lets `n_seq_max=N`
+    // describe exactly the number of candidate sequences without a reserved extra slot.
+    let sequence_ids = (0..candidates.len() as i32).collect::<Vec<_>>();
     for (position, token) in decode_base.iter().copied().enumerate() {
         batch.add(
             token,
@@ -832,104 +812,6 @@ fn score_batch(
             mismatch: false,
         })
         .collect())
-}
-
-fn score_mismatch_targets(
-    backend: &LlamaBackend,
-    model: &LlamaModel,
-    context: &mut MutexGuard<'_, LlamaContext>,
-    targets: &[MismatchTarget],
-    sequence_count: usize,
-    timings: &mut ScoringTimings,
-) -> Result<Vec<(usize, usize, f64)>, String> {
-    if targets.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let max_targets_per_batch = sequence_count.saturating_sub(1).max(1);
-    let mut scores = Vec::with_capacity(targets.len());
-    let mut chunk_start = 0;
-    while chunk_start < targets.len() {
-        let mut chunk_end = chunk_start;
-        let mut total_tokens = 0_usize;
-        while chunk_end < targets.len() && chunk_end - chunk_start < max_targets_per_batch {
-            let prompt_len = targets[chunk_end].prompt_tokens.len().max(1);
-            if prompt_len > timings.context_limit {
-                return Err(format!(
-                    "mismatch prompt has {prompt_len} tokens, context limit is {}",
-                    timings.context_limit
-                ));
-            }
-            let next_total = total_tokens.saturating_add(prompt_len);
-            if next_total > timings.context_limit {
-                if chunk_end == chunk_start {
-                    return Err(format!(
-                        "mismatch decode batch has {next_total} tokens, context limit is {}",
-                        timings.context_limit
-                    ));
-                }
-                break;
-            }
-            total_tokens = next_total;
-            chunk_end += 1;
-        }
-
-        let chunk = &targets[chunk_start..chunk_end];
-        context.kv_cache_clear();
-        let mut batch = LlamaBatch::new(
-            backend.lib.clone(),
-            total_tokens.max(1) as i32,
-            0,
-            sequence_count as i32,
-        );
-        let sequence_ids = (1..=chunk.len() as i32).collect::<Vec<_>>();
-        let mut output_targets = Vec::with_capacity(chunk.len());
-        for (target_index, target) in chunk.iter().enumerate() {
-            let prompt = if target.prompt_tokens.is_empty() {
-                vec![model.get_vocab().bos()]
-            } else {
-                target.prompt_tokens.clone()
-            };
-            let final_batch_index = batch.handle.n_tokens as usize + prompt.len() - 1;
-            for (position, token) in prompt.into_iter().enumerate() {
-                batch.add(
-                    token,
-                    position as i32,
-                    &[sequence_ids[target_index]],
-                    position + 1 == target.prompt_tokens.len().max(1),
-                );
-            }
-            output_targets.push((target, final_batch_index));
-        }
-        timings.add_decode_workload(total_tokens, chunk.len());
-        timings.batch_count = timings.batch_count.saturating_add(1);
-        let decode_started = Instant::now();
-        context
-            .decode(&batch)
-            .map_err(|error| format!("llama.cpp mismatch decode failed: {error}"))?;
-        timings.add_decode(decode_started);
-
-        let logits_started = Instant::now();
-        for (target, batch_index) in output_targets {
-            let logits = logits_for(backend, context, batch_index, timings.vocab_size)?;
-            let normalizer = log_normalizer(&logits).ok_or_else(|| {
-                format!(
-                    "llama.cpp returned a non-finite logits normalizer for output {batch_index}"
-                )
-            })?;
-            let value = logprob_with_normalizer(&logits, target.target, normalizer);
-            if !value.is_finite() {
-                return Err(format!(
-                    "llama.cpp returned a non-finite logprob for token {}",
-                    target.target
-                ));
-            }
-            scores.push((target.plan_index, target.token_index, value));
-        }
-        timings.add_logits(logits_started);
-        chunk_start = chunk_end;
-    }
-    Ok(scores)
 }
 
 fn logits_for(

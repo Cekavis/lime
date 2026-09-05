@@ -154,9 +154,9 @@ pub struct CandidateDiagnostic {
     /// aggregate `logprob` (within floating point round-off).
     #[serde(default)]
     pub logprobs: Vec<f64>,
-    /// Whether a llama.cpp tokenizer token spans the boundary between `preceding_text` and the
-    /// candidate. This is useful for diagnosing why a candidate cannot be scored as an independent
-    /// continuation.
+    /// Whether tokenizing `preceding_text + candidate` changes the tokenized prefix of
+    /// `preceding_text`. This remains a diagnostic flag; mismatch candidates use the same scoring
+    /// path as other candidates.
     #[serde(default)]
     pub mismatch: bool,
     #[serde(default)]
@@ -190,10 +190,10 @@ pub struct LlmPerformance {
     /// Number of target tokens whose log probabilities were computed.
     #[serde(default)]
     pub target_token_count: u32,
-    /// Number of batch or fallback decode operations.
+    /// Number of batch decode operations.
     #[serde(default)]
     pub batch_count: u32,
-    /// Number of candidates that used the tokenizer-boundary fallback path.
+    /// Number of scored candidates whose tokenization crosses the preceding-text boundary.
     #[serde(default)]
     pub mismatch_count: u32,
     /// Number of tokens in the untruncated preceding-text prompt.
