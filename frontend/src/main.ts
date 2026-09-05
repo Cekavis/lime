@@ -142,7 +142,7 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Lime UI mount point is missing");
 
 app.innerHTML = [
-  '<div class="shell">',
+  '<div class="shell" data-active-tab="input">',
   '  <header class="header">',
   '    <div class="brand" aria-label="Lime"><img class="brand-logo" src="/logo.svg" alt="Lime" /></div>',
   '    <nav class="tabs" aria-label="Lime 功能">',
@@ -162,9 +162,9 @@ app.innerHTML = [
   "  </div>",
   "  <main>",
   '    <section class="panel" data-panel="input">',
-  '      <div class="panel-heading"><h2>设置</h2></div>',
   '      <form data-config-form>',
   '        <section class="settings-section settings-section-first">',
+  '          <div class="section-heading"><h3>前端</h3></div>',
   '          <div class="form-grid">',
   '            <label class="field"><span>每页展示候选词数</span><input data-config="page_size" type="number" min="1" max="20" required /></label>',
   '            <label class="field"><span>前文预览字符数</span><input data-config="context_preview_char_limit" type="number" min="0" max="1024" required /></label>',
@@ -173,6 +173,7 @@ app.innerHTML = [
   '          </div>',
   '        </section>',
   '        <section class="settings-section">',
+  '          <div class="section-heading"><h3>后端</h3></div>',
   '          <div class="form-grid">',
   '            <label class="field"><span>Rime 方案</span><select data-config="rime_schema"><option value="rime_ice">雾凇拼音（全拼）</option><option value="double_pinyin">自然码双拼</option><option value="double_pinyin_abc">智能 ABC 双拼</option><option value="double_pinyin_mspy">微软双拼</option><option value="double_pinyin_sogou">搜狗双拼</option><option value="double_pinyin_flypy">小鹤双拼</option><option value="double_pinyin_ziguang">紫光双拼</option><option value="double_pinyin_jiajia">拼音加加双拼</option></select></label>',
   '            <label class="field"><span>LLM 单次请求 token 数上限</span><input data-config="llm_context_token_limit" type="number" min="1" max="4096" required /></label>',
@@ -183,10 +184,10 @@ app.innerHTML = [
   '        </section>',
   '        <div class="actions settings-actions"><button class="button button-primary" type="submit">保存设置</button></div>',
   '      </form>',
-  '      <section class="settings-section model-status-section"><div class="section-heading"><span class="status-dot" data-model-state>未加载</span></div>',
+  '      <section class="settings-section model-status-section"><div class="section-heading"><h3>模型状态</h3><span class="status-dot" data-model-state>未加载</span></div>',
   '        <div class="model-card"><dl class="status-list"><dt>路径</dt><dd class="model-path" data-model-path title="—">—</dd><dt>文件大小</dt><dd data-model-size>—</dd></dl><div class="model-memory" data-model-memory><p class="muted">未加载模型，暂无显存占用信息。</p></div></div>',
   '      </section>',
-  '      <section class="settings-section preset-section"><div class="section-heading"><div class="section-heading-actions"><span class="meta-badge" data-preset-count>0 个</span><button class="button button-danger" data-unload-model type="button">卸载模型</button></div></div>',
+  '      <section class="settings-section preset-section"><div class="section-heading"><h3>模型预设</h3><div class="section-heading-actions"><span class="meta-badge" data-preset-count>0 个</span><button class="button button-danger" data-unload-model type="button">卸载模型</button></div></div>',
   '        <div class="actions model-add-actions"><button class="button" data-add-model type="button" aria-expanded="false">添加模型</button></div>',
   '        <form class="preset-form is-hidden" data-preset-form><label class="field"><span>名称</span><input data-preset-name type="text" placeholder="例如 Qwen 7B" required /></label><label class="field field-wide"><span>GGUF 文件路径</span><input data-preset-path type="text" placeholder="C:\\Models\\lime.gguf" required /></label><div class="actions"><button class="button button-primary" type="submit">保存模型</button><button class="button" data-cancel-add-model type="button">取消</button></div></form>',
   '        <div class="preset-list" data-model-presets><p class="muted">尚未读取模型预设。</p></div>',
@@ -194,17 +195,15 @@ app.innerHTML = [
   '      <form class="model-form is-hidden" data-model-form><input data-model-path-input type="text" aria-hidden="true" tabindex="-1" /></form>',
   "    </section>",
   '    <section class="panel is-hidden" data-panel="test">',
-  '      <div class="panel-heading"><div><h2>输入测试</h2></div><span class="meta-badge" data-test-request>尚未请求</span></div>',
   '      <form data-test-form>',
   '        <label class="field field-wide field-stacked"><span>上文</span><textarea data-test-context rows="3" placeholder="可选：输入光标前的中文文本"></textarea></label>',
   '        <label class="field field-wide"><span>拼音</span><input data-test-preedit type="text" placeholder="例如 nihao" required /></label>',
   '        <div class="actions"><button class="button button-primary" type="submit">请求候选</button><button class="button" data-test-clear type="button">清空结果</button></div>',
   "      </form>",
-  '      <div class="test-result" data-test-result><p class="muted">输入上文和拼音后查看服务结果。</p></div>',
+  '      <div class="test-result" data-test-result></div>',
   "    </section>",
   '    <section class="panel is-hidden" data-panel="dictionary">',
-  '      <div class="panel-heading"><h2>词库</h2><span class="meta-badge" data-dictionary-count>— 条</span></div>',
-  '      <div class="actions"><button class="button" data-import-dictionary type="button">导入 JSON</button><button class="button" data-export-dictionary type="button">导出 JSON</button><button class="button button-danger" data-clear-dictionary type="button">清空用户词库</button><input class="visually-hidden" data-dictionary-file type="file" accept="application/json,.json" /></div>',
+  '      <div class="actions"><span class="meta-badge" data-dictionary-count>— 条</span><button class="button" data-import-dictionary type="button">导入 JSON</button><button class="button" data-export-dictionary type="button">导出 JSON</button><button class="button button-danger" data-clear-dictionary type="button">清空用户词库</button><input class="visually-hidden" data-dictionary-file type="file" accept="application/json,.json" /></div>',
   '      <div class="table-wrap"><table><thead><tr><th>拼音</th><th>文本</th><th>权重</th></tr></thead><tbody data-dictionary-table><tr><td colspan="3" class="muted">尚未读取词库</td></tr></tbody></table></div>',
   "    </section>",
   '    <section class="panel is-hidden" data-panel="history">',
@@ -1429,7 +1428,7 @@ query<HTMLButtonElement>("[data-test-clear]")?.addEventListener("click", () => {
   if (context) context.value = "";
   if (preedit) preedit.value = "";
   const result = query<HTMLElement>("[data-test-result]");
-  if (result) result.innerHTML = '<p class="muted">输入上文和拼音后查看服务结果。</p>';
+  if (result) result.innerHTML = "";
   const request = query<HTMLElement>("[data-test-request]");
   if (request) request.textContent = "尚未请求";
 });
@@ -1506,6 +1505,7 @@ for (const tab of all<HTMLButtonElement>("[data-tab]")) {
   tab.addEventListener("click", () => {
     const name = tab.dataset.tab;
     if (!name) return;
+    query<HTMLElement>(".shell")?.setAttribute("data-active-tab", name);
     for (const item of all<HTMLButtonElement>("[data-tab]")) item.classList.toggle("is-active", item === tab);
     for (const panel of all<HTMLElement>("[data-panel]")) panel.classList.toggle("is-hidden", panel.dataset.panel !== name);
     flushDeferredRenders();
