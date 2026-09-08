@@ -56,7 +56,7 @@ interface LlmPerformance {
   totalMs: number;
   tokenizeMs: number;
   decodeMs: number;
-  logitsMs: number;
+  logprobMs: number;
   rimeMs: number | null;
   candidateCount: number;
   scoredCount: number;
@@ -65,12 +65,13 @@ interface LlmPerformance {
   mismatchCount: number;
   contextTokenCount: number;
   decodeInputTokenCount: number;
-  logitsOutputCount: number;
+  logprobOutputCount: number;
 }
 
 interface InputData {
   requestId?: number;
   timestampMs: number | null;
+  endToEndMs: number | null;
   precedingText: string;
   preedit: string;
   rimeCandidates: Candidate[];
@@ -208,7 +209,7 @@ app.innerHTML = [
   "    </section>",
   '    <section class="panel is-hidden" data-panel="history">',
   '      <div class="panel-heading"><h2>历史</h2><div class="actions-inline"><span class="meta-badge" data-history-count>0 条</span><button class="button button-danger" data-clear-history type="button">清空历史</button></div></div>',
-  '      <div class="table-wrap"><table class="history-table"><thead><tr><th>上文</th><th>拼音</th><th>Rime 候选（前 2）</th><th>LLM 排序（前 2）</th><th>LLM 总耗时</th><th>模型</th></tr></thead><tbody data-history-table><tr><td colspan="6" class="muted">暂无输入记录</td></tr></tbody></table></div>',
+  '      <div class="table-wrap"><table class="history-table"><thead><tr><th>上文</th><th>拼音</th><th>Rime 候选（前 2）</th><th>LLM 排序（前 2）</th><th>端到端用时</th><th>模型</th></tr></thead><tbody data-history-table><tr><td colspan="6" class="muted">暂无输入记录</td></tr></tbody></table></div>',
   '      <div class="pagination" data-history-pagination><button class="button" data-history-prev type="button">上一页</button><span data-history-page-label>第 1 页</span><button class="button" data-history-next type="button">下一页</button></div>',
   '      <section class="history-detail is-hidden" data-history-detail aria-live="polite"><div class="panel-heading compact-heading"><p class="muted" data-history-detail-meta>—</p><button class="button" data-history-detail-close type="button">返回列表</button></div><div data-history-detail-table><p class="muted">选择一条记录查看详情。</p></div></section>',
   "    </section>",
@@ -377,7 +378,7 @@ function normalizeLlmPerformance(value: unknown): LlmPerformance | null {
     totalMs: Math.max(0, totalMs),
     tokenizeMs: Math.max(0, asNumber(firstValue(record, ["tokenize_ms", "tokenizeMs"])) ?? 0),
     decodeMs: Math.max(0, asNumber(firstValue(record, ["decode_ms", "decodeMs"])) ?? 0),
-    logitsMs: Math.max(0, asNumber(firstValue(record, ["logits_ms", "logitsMs"])) ?? 0),
+    logprobMs: Math.max(0, asNumber(firstValue(record, ["logprob_ms", "logprobMs", "logits_ms", "logitsMs"])) ?? 0),
     rimeMs: (() => {
       const value = asNumber(firstValue(record, ["rime_duration_ms", "rimeDurationMs", "rime_ms", "rimeMs"]));
       return value == null ? null : Math.max(0, value);
@@ -389,7 +390,7 @@ function normalizeLlmPerformance(value: unknown): LlmPerformance | null {
     mismatchCount: count(["mismatch_count", "mismatchCount"]),
     contextTokenCount: count(["context_token_count", "contextTokenCount"]),
     decodeInputTokenCount: count(["decode_input_token_count", "decodeInputTokenCount"]),
-    logitsOutputCount: count(["logits_output_count", "logitsOutputCount"]),
+    logprobOutputCount: count(["logprob_output_count", "logprobOutputCount", "logits_output_count", "logitsOutputCount"]),
   };
 }
 
@@ -464,9 +465,13 @@ function normalizeInputData(value: unknown, fallback: Partial<InputData> = {}): 
   const precedingText = asString(firstValue(record, ["preceding_text", "precedingText", "context"]), fallback.precedingText || "");
   const preedit = asString(firstValue(record, ["preedit", "input_preedit", "inputPreedit"]), fallback.preedit || "");
   const timestamp = asNumber(firstValue(record, ["timestamp_ms", "timestampMs", "created_at_ms", "createdAtMs", "timestamp"]));
+  const endToEndDuration = asNumber(firstValue(record, [
+    "end_to_end_duration_ms", "endToEndDurationMs", "end_to_end_ms", "endToEndMs",
+  ]));
   return {
     requestId: asNumber(firstValue(record, ["request_id", "requestId"])) ?? fallback.requestId,
     timestampMs: timestamp ?? fallback.timestampMs ?? null,
+    endToEndMs: endToEndDuration ?? fallback.endToEndMs ?? null,
     precedingText,
     preedit,
     rimeCandidates: rime,
@@ -818,7 +823,7 @@ function historyRowContent(entry: InputData): string {
   const rime = entry.rimeCandidates.length ? entry.rimeCandidates : entry.diagnostics.map((item) => item.rimeCandidate).filter((item): item is Candidate => item !== null);
   const diagnosticLlm = entry.diagnostics.map((item) => item.llmCandidate).filter((item): item is Candidate => item !== null);
   const llm = diagnosticLlm.length ? diagnosticLlm : entry.finalCandidates;
-  return '<td>' + escapeHtml(entry.precedingText || "（空）") + '</td><td class="mono">' + escapeHtml(entry.preedit || "—") + "</td><td>" + escapeHtml(candidateText(rime)) + "</td><td>" + escapeHtml(candidateText(llm)) + "</td><td class=\"mono numeric\">" + escapeHtml(formatMilliseconds(entry.llmPerformance?.totalMs)) + "</td><td>" + escapeHtml(entry.model || "—") + "</td>";
+  return '<td>' + escapeHtml(entry.precedingText || "（空）") + '</td><td class="mono">' + escapeHtml(entry.preedit || "—") + "</td><td>" + escapeHtml(candidateText(rime)) + "</td><td>" + escapeHtml(candidateText(llm)) + "</td><td class=\"mono numeric\">" + escapeHtml(formatMilliseconds(entry.endToEndMs)) + "</td><td>" + escapeHtml(entry.model || "—") + "</td>";
 }
 
 function renderHistoryTable(table: HTMLTableSectionElement, page: HistoryPage) {
@@ -873,16 +878,16 @@ function diagnosticTable(data: InputData): string {
   return '<div class="table-wrap diagnostic-table-wrap"><table class="diagnostic-table"><thead><tr><th>#</th><th>Rime 原始候选</th><th>LLM 候选</th><th>Logprob</th><th>Logprobs</th><th>Mismatch</th><th>展示候选</th></tr></thead><tbody>' + diagnosticRows(data) + "</tbody></table></div>";
 }
 
-function llmPerformanceSummary(performance: LlmPerformance | null, rimeMs: number | null): string {
-  if (!performance && rimeMs == null) return '<p class="muted">本次未调用 LLM。</p>';
+function llmPerformanceSummary(performance: LlmPerformance | null, rimeMs: number | null, endToEndMs: number | null): string {
+  if (!performance && rimeMs == null && endToEndMs == null) return '<p class="muted">本次未调用 LLM。</p>';
   const row = (label: string, value: string) => '<dt>' + label + '</dt><dd class="mono">' + escapeHtml(value) + '</dd>';
   const effectiveRimeMs = rimeMs ?? performance?.rimeMs ?? null;
-  return '<dl class="status-list history-performance">' +
-    row("Rime 耗时", formatMilliseconds(effectiveRimeMs)) +
-    row("LLM 总耗时", formatMilliseconds(performance?.totalMs)) +
-    row("Token 化", formatMilliseconds(performance?.tokenizeMs)) +
-    row("推理解码", formatMilliseconds(performance?.decodeMs)) +
-    row("Logits 计算", formatMilliseconds(performance?.logitsMs)) +
+  const timingRows =
+    row("端到端用时", formatMilliseconds(endToEndMs)) +
+    row("Rime 用时", formatMilliseconds(effectiveRimeMs)) +
+    row("推理用时", formatMilliseconds(performance?.decodeMs)) +
+    row("Logprob 计算用时", formatMilliseconds(performance?.logprobMs));
+  const workloadRows =
     row("送入候选", performance ? String(performance.candidateCount) + " 个" : "—") +
     row("返回得分", performance ? String(performance.scoredCount) + " 个" : "—") +
     row("目标 Token", performance ? String(performance.targetTokenCount) : "—") +
@@ -890,8 +895,11 @@ function llmPerformanceSummary(performance: LlmPerformance | null, rimeMs: numbe
     row("边界不匹配", performance ? String(performance.mismatchCount) + " 个" : "—") +
     row("上下文 Token", performance ? String(performance.contextTokenCount) : "—") +
     row("Decode 输入行", performance ? String(performance.decodeInputTokenCount) : "—") +
-    row("Logits 输出行", performance ? String(performance.logitsOutputCount) : "—") +
-    '</dl>';
+    row("Logprob 输出行", performance ? String(performance.logprobOutputCount) : "—");
+  return '<div class="history-performance">' +
+    '<dl class="status-list history-performance-column">' + timingRows + '</dl>' +
+    '<dl class="status-list history-performance-column">' + workloadRows + '</dl>' +
+    '</div>';
 }
 
 function candidateCell(candidate: Candidate | null): string {
@@ -942,7 +950,7 @@ function renderHistoryDetail(entry: InputData) {
   if (title) title.textContent = "记录详情";
   const timestamp = formatTimestamp(entry.timestampMs);
   if (meta) meta.textContent = "上文：" + (entry.precedingText || "（空）") + " | 拼音：" + (entry.preedit || "—") + " | 时间：" + timestamp + " | 模型：" + (entry.model || "—");
-  content.innerHTML = llmPerformanceSummary(entry.llmPerformance, entry.rimeMs) + diagnosticTable(entry);
+  content.innerHTML = llmPerformanceSummary(entry.llmPerformance, entry.rimeMs, entry.endToEndMs) + diagnosticTable(entry);
   detail.scrollIntoView?.({ behavior: "smooth", block: "start" });
 }
 

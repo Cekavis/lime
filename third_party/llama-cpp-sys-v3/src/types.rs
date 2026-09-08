@@ -21,6 +21,10 @@ pub type ggml_log_callback =
 /// layouts.
 pub type ggml_backend_reg = std::ffi::c_void;
 pub type ggml_backend_device = std::ffi::c_void;
+pub type ggml_context = std::ffi::c_void;
+pub type ggml_cgraph = std::ffi::c_void;
+pub type ggml_tensor = std::ffi::c_void;
+pub type ggml_backend_buffer_type = std::ffi::c_void;
 
 /// Values from `enum ggml_backend_dev_type` in ggml-backend.h.
 pub const GGML_BACKEND_DEVICE_TYPE_CPU: i32 = 0;
@@ -57,8 +61,8 @@ pub struct llama_memory {
 
 #[repr(C)]
 pub struct llama_sampler {
-    _data: [u8; 0],
-    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    pub iface: *mut llama_sampler_i,
+    pub ctx: *mut std::ffi::c_void,
 }
 
 #[repr(C)]
@@ -148,4 +152,52 @@ pub struct llama_context_params {
 #[derive(Debug, Copy, Clone)]
 pub struct llama_sampler_chain_params {
     pub no_perf: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct llama_sampler_data {
+    pub logits: *mut ggml_tensor,
+    pub probs: *mut ggml_tensor,
+    pub sampled: *mut ggml_tensor,
+    pub candidates: *mut ggml_tensor,
+}
+
+#[repr(C)]
+pub struct llama_sampler_i {
+    pub name: Option<unsafe extern "C" fn(*const llama_sampler) -> *const std::ffi::c_char>,
+    pub accept: Option<unsafe extern "C" fn(*mut llama_sampler, llama_token)>,
+    pub apply: Option<unsafe extern "C" fn(*mut llama_sampler, *mut std::ffi::c_void)>,
+    pub reset: Option<unsafe extern "C" fn(*mut llama_sampler)>,
+    pub clone: Option<unsafe extern "C" fn(*const llama_sampler) -> *mut llama_sampler>,
+    pub free: Option<unsafe extern "C" fn(*mut llama_sampler)>,
+    pub backend_init: Option<
+        unsafe extern "C" fn(*mut llama_sampler, *mut ggml_backend_buffer_type, u32) -> bool,
+    >,
+    pub backend_accept: Option<
+        unsafe extern "C" fn(
+            *mut llama_sampler,
+            *mut ggml_context,
+            *mut ggml_cgraph,
+            *mut ggml_tensor,
+        ),
+    >,
+    pub backend_apply: Option<
+        unsafe extern "C" fn(
+            *mut llama_sampler,
+            *mut ggml_context,
+            *mut ggml_cgraph,
+            *mut llama_sampler_data,
+        ),
+    >,
+    pub backend_set_input: Option<unsafe extern "C" fn(*mut llama_sampler)>,
+    pub backend_reset: Option<unsafe extern "C" fn(*mut llama_sampler)>,
+    pub copy_state: Option<unsafe extern "C" fn(*const llama_sampler, *mut llama_sampler)>,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct llama_sampler_seq_config {
+    pub seq_id: llama_seq_id,
+    pub sampler: *mut llama_sampler,
 }

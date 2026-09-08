@@ -184,38 +184,30 @@ if (-not [string]::IsNullOrWhiteSpace($SourceDirectory)) {
     throw "Configured llama runtime path does not exist: $sourcePath"
   }
 } else {
-  $localExperimental = Resolve-RepoPath "tools/pinyin-eval/native/llama"
-  $localBackendMarker = if ($Backend -eq "cuda") { "ggml-cuda.dll" } else { "ggml-cpu-x64.dll" }
-  if ((Test-Path -LiteralPath (Join-Path $localExperimental "llama.dll") -PathType Leaf) -and
-      (Test-Path -LiteralPath (Join-Path $localExperimental $localBackendMarker) -PathType Leaf)) {
-    Write-Host "Using local llama.cpp runtime for this build: $localExperimental"
-    $sourceRoots = @($localExperimental)
-  } else {
-    if (Test-Path -LiteralPath $workRoot) {
-      Remove-Item -LiteralPath $workRoot -Recurse -Force
+  if (Test-Path -LiteralPath $workRoot) {
+    Remove-Item -LiteralPath $workRoot -Recurse -Force
+  }
+  New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
+  $sevenZip = Resolve-7Zip
+  $archiveSpecs = @(
+    @{ asset = $manifest.asset; suffix = "main" }
+  )
+  if ($Backend -eq "cuda" -and $manifest.cuda_runtime_asset) {
+    $archiveSpecs += @{ asset = $manifest.cuda_runtime_asset; suffix = "cuda-runtime" }
+  }
+  $archiveIndex = 0
+  foreach ($spec in $archiveSpecs) {
+    $asset = $spec.asset
+    $archive = Join-Path $cacheRoot $asset.name
+    Invoke-VerifiedDownload $asset.url $archive $asset.sha256
+    $extractRoot = Join-Path $workRoot ("archive-{0}-{1}" -f $archiveIndex, $spec.suffix)
+    New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+    & $sevenZip x -y "-o$extractRoot" $archive | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+      throw "7-Zip extraction failed with exit code ${LASTEXITCODE}: $archive"
     }
-    New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
-    $sevenZip = Resolve-7Zip
-    $archiveSpecs = @(
-      @{ asset = $manifest.asset; suffix = "main" }
-    )
-    if ($Backend -eq "cuda" -and $manifest.cuda_runtime_asset) {
-      $archiveSpecs += @{ asset = $manifest.cuda_runtime_asset; suffix = "cuda-runtime" }
-    }
-    $archiveIndex = 0
-    foreach ($spec in $archiveSpecs) {
-      $asset = $spec.asset
-      $archive = Join-Path $cacheRoot $asset.name
-      Invoke-VerifiedDownload $asset.url $archive $asset.sha256
-      $extractRoot = Join-Path $workRoot ("archive-{0}-{1}" -f $archiveIndex, $spec.suffix)
-      New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-      & $sevenZip x -y "-o$extractRoot" $archive | Out-Host
-      if ($LASTEXITCODE -ne 0) {
-        throw "7-Zip extraction failed with exit code ${LASTEXITCODE}: $archive"
-      }
-      $sourceRoots += $extractRoot
-      $archiveIndex++
-    }
+    $sourceRoots += $extractRoot
+    $archiveIndex++
   }
 }
 

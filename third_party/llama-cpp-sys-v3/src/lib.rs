@@ -235,6 +235,10 @@ impl LlamaLib {
 
             // Sampler API
             llama_sampler_chain_init: unsafe extern "C" fn(llama_sampler_chain_params) -> *mut llama_sampler,
+            llama_sampler_chain_default_params: unsafe extern "C" fn() -> llama_sampler_chain_params,
+            llama_sampler_init: unsafe extern "C" fn(*mut llama_sampler_i, *mut std::ffi::c_void) -> *mut llama_sampler,
+            llama_set_sampler: unsafe extern "C" fn(*mut llama_context, llama_seq_id, *mut llama_sampler) -> bool,
+            llama_synchronize: unsafe extern "C" fn(*mut llama_context),
             llama_sampler_init_greedy: unsafe extern "C" fn() -> *mut llama_sampler,
             llama_sampler_free: unsafe extern "C" fn(*mut llama_sampler),
             llama_sampler_init_temp: unsafe extern "C" fn(f32) -> *mut llama_sampler,
@@ -250,6 +254,16 @@ impl LlamaLib {
             llama_sampler_accept: unsafe extern "C" fn(*mut llama_sampler, llama_token),
             llama_chat_apply_template: unsafe extern "C" fn(*const std::ffi::c_char, *const llama_chat_message, usize, bool, *mut std::ffi::c_char, i32) -> i32,
             llama_model_chat_template: unsafe extern "C" fn(*const llama_model, *const std::ffi::c_char, *mut std::ffi::c_char, usize) -> i32,
+            ggml_reshape_1d: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor, i64) -> *mut ggml_tensor,
+            ggml_reshape_2d: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor, i64, i64) -> *mut ggml_tensor,
+            ggml_soft_max: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor) -> *mut ggml_tensor,
+            ggml_get_rows: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor, *mut ggml_tensor) -> *mut ggml_tensor,
+            ggml_log: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor) -> *mut ggml_tensor,
+            ggml_new_tensor_1d: unsafe extern "C" fn(*mut ggml_context, i32, i64) -> *mut ggml_tensor,
+            ggml_set_input: unsafe extern "C" fn(*mut ggml_tensor),
+            ggml_get_data: unsafe extern "C" fn(*const ggml_tensor) -> *mut std::ffi::c_void,
+            ggml_nelements: unsafe extern "C" fn(*const ggml_tensor) -> i64,
+            ggml_backend_tensor_get: unsafe extern "C" fn(*mut ggml_tensor, *mut std::ffi::c_void, usize, usize),
         });
 
         // Backend capability symbols were added to the dynamic backend API
@@ -437,6 +451,12 @@ pub struct LlamaSymbols {
 
     pub llama_sampler_chain_init:
         unsafe extern "C" fn(llama_sampler_chain_params) -> *mut llama_sampler,
+    pub llama_sampler_chain_default_params: unsafe extern "C" fn() -> llama_sampler_chain_params,
+    pub llama_sampler_init:
+        unsafe extern "C" fn(*mut llama_sampler_i, *mut std::ffi::c_void) -> *mut llama_sampler,
+    pub llama_set_sampler:
+        unsafe extern "C" fn(*mut llama_context, llama_seq_id, *mut llama_sampler) -> bool,
+    pub llama_synchronize: unsafe extern "C" fn(*mut llama_context),
     pub llama_sampler_init_greedy: unsafe extern "C" fn() -> *mut llama_sampler,
     pub llama_sampler_free: unsafe extern "C" fn(*mut llama_sampler),
     pub llama_sampler_init_temp: unsafe extern "C" fn(f32) -> *mut llama_sampler,
@@ -466,4 +486,23 @@ pub struct LlamaSymbols {
         *mut std::ffi::c_char,
         usize,
     ) -> i32,
+
+    pub ggml_reshape_1d:
+        unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor, i64) -> *mut ggml_tensor,
+    pub ggml_reshape_2d:
+        unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor, i64, i64) -> *mut ggml_tensor,
+    pub ggml_soft_max:
+        unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor) -> *mut ggml_tensor,
+    pub ggml_get_rows: unsafe extern "C" fn(
+        *mut ggml_context,
+        *mut ggml_tensor,
+        *mut ggml_tensor,
+    ) -> *mut ggml_tensor,
+    pub ggml_log: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor) -> *mut ggml_tensor,
+    pub ggml_new_tensor_1d: unsafe extern "C" fn(*mut ggml_context, i32, i64) -> *mut ggml_tensor,
+    pub ggml_set_input: unsafe extern "C" fn(*mut ggml_tensor),
+    pub ggml_get_data: unsafe extern "C" fn(*const ggml_tensor) -> *mut std::ffi::c_void,
+    pub ggml_nelements: unsafe extern "C" fn(*const ggml_tensor) -> i64,
+    pub ggml_backend_tensor_get:
+        unsafe extern "C" fn(*mut ggml_tensor, *mut std::ffi::c_void, usize, usize),
 }

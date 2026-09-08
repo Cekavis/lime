@@ -1,0 +1,64 @@
+diff --git a/src/llama-context.h b/src/llama-context.h
+index bf91daa..07abb5f 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -290,6 +290,7 @@ private:
+ 
+     // decode output (2-dimensional array: [n_outputs][n_vocab])
+     buffer_view<float> logits = {nullptr, 0};
++    bool raw_logits_valid = false;
+ 
+     // embeddings output (2-dimensional array: [n_outputs][n_embd])
+     // populated only when pooling_type == LLAMA_POOLING_TYPE_NONE
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index a920c42..970cfc9 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -1735,6 +1735,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
+     n_queued_tokens += n_tokens_all;
+ 
+     output_swaps.clear();
++    raw_logits_valid = false;
+ 
+     sched_reserve();
+ 
+@@ -1871,6 +1872,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
+ 
+         // extract logits
+         if (logits.data && t_logits && n_outputs > 0 && needs_raw_logits(ubatch, sampling.samplers)) {
++            raw_logits_valid = true;
+             ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched.get(), t_logits);
+             GGML_ASSERT(backend_res != nullptr);
+             GGML_ASSERT(logits.data != nullptr);
+@@ -2238,7 +2240,7 @@ void llama_context::output_reorder() {
+         const uint64_t i0 = output_swaps[s].i0;
+         const uint64_t i1 = output_swaps[s].i1;
+ 
+-        if (logits.size > 0) {
++        if (raw_logits_valid && logits.size > 0) {
+             for (uint64_t k = 0; k < n_vocab; k++) {
+                 std::swap(logits.data[i0*n_vocab + k], logits.data[i1*n_vocab + k]);
+             }
+@@ -2275,15 +2277,19 @@ void llama_context::output_reorder() {
+             assert(sampling.probs_count.size() > 0);
+             assert(sampling.candidates_count.size() > 0);
+ 
+-            for (uint64_t k = 0; k < n_vocab; ++k) {
++            const uint64_t logits_count = std::max<uint64_t>(sampling.logits_count[i0], sampling.logits_count[i1]);
++            const uint64_t probs_count = std::max<uint64_t>(sampling.probs_count[i0], sampling.probs_count[i1]);
++            const uint64_t candidates_count = std::max<uint64_t>(sampling.candidates_count[i0], sampling.candidates_count[i1]);
++
++            for (uint64_t k = 0; k < logits_count; ++k) {
+                 std::swap(sampling.logits.data[i0*n_vocab + k], sampling.logits.data[i1*n_vocab + k]);
+             }
+ 
+-            for (uint64_t k = 0; k < n_vocab; ++k) {
++            for (uint64_t k = 0; k < probs_count; ++k) {
+                 std::swap(sampling.probs.data[i0*n_vocab + k], sampling.probs.data[i1*n_vocab + k]);
+             }
+ 
+-            for (uint64_t k = 0; k < n_vocab; ++k) {
++            for (uint64_t k = 0; k < candidates_count; ++k) {
+                 std::swap(sampling.candidates.data[i0*n_vocab + k], sampling.candidates.data[i1*n_vocab + k]);
+             }
+ 

@@ -14,11 +14,20 @@ llama.cpp 的固定清单包括 `llama-cpp-b10743-cuda-13.3.manifest.json`、可
 目标目录。完整 Windows 发布构建会把两者分别放在 `llama/cuda/` 和 `llama/cpu/`，服务默认
 选择 CUDA 13.3，CUDA DLL/GPU 初始化失败时按策略回退到 CPU。`LIME_LLAMA_RUNTIME_DIR` 可指向与
 所选 backend 对应的已有运行时目录或 `llama.dll`，用于离线开发/构建；该本地覆盖只做文件
-完整性/后端必需 DLL 检查，不声称已验证上游版本或 SHA-256。未设置时，脚本优先使用仓库中
-实验工具的本地 DLL，找不到才下载固定版本。运行时不会联网下载 native code。完整发布构建
+完整性/后端必需 DLL 检查，不声称已验证上游版本或 SHA-256。未设置时，脚本下载并校验固定
+版本的官方运行时；其中的 `llama.dll` 未应用 Lime patch，不能用于生产紧凑结果路径。运行时不会联网下载 native code。完整发布构建
 如需分别指定两套本地目录，可设置 `LIME_LLAMA_CUDA_RUNTIME_DIR` 与
 `LIME_LLAMA_CPU_RUNTIME_DIR`；单一的 `LIME_LLAMA_RUNTIME_DIR` 适用于同时包含两种后端的
 混合目录。
+
+生产 logits 路径要求使用 `llama.cpp-b10743-output-reorder.patch`，避免输出重排时交换完整词表，
+并在 backend sampler 已生成紧凑结果时跳过 raw logits 主机拷贝。仓库只提交可复现的 patch，
+不提交 DLL；官方未 patch 的 `llama.dll` 不能提供这条生产路径。准备 b10743 源码后执行
+`tools/release/apply-llama-gpu-logprob-patch.ps1 -SourceDirectory <llama.cpp 源码目录>`，
+再编译 `llama.dll` 并通过 `LIME_LLAMA_CUDA_RUNTIME_DIR` 或 `LIME_LLAMA_CPU_RUNTIME_DIR`
+传给发布脚本。脚本会写入 `.lime-output-reorder-patched` 标记和 patch SHA-256，供构建流程识别。
+源码归档地址、commit、归档 SHA-256 和 patch SHA-256 记录在
+`llama-cpp-b10743-source.manifest.json`。
 
 准备后的目录保留雾凇发布包的 `build/`、schema、词库、Lua 和 OpenCC 文件原样，并把官方
 librime DLL（及其发布依赖）放在根目录。构建只排除 `trash/`、`user/`、`*.userdb`、

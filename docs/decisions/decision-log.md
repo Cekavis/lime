@@ -42,7 +42,7 @@
 | D036 | `preceding_text` 为空时跳过 LLM 候选重排并直接采用 Rime 原始顺序，即使模型运行时已加载 |
 | D037 | 候选窗位置使用 TSF `GetTextExt` 返回的组合串起点矩形，并沿用 WeaselPanel 输入位置下方 6px 间距；无法取得 layout 时回退到 GUI caret |
 | D038 | ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 严格相等时才进入 LLM；其他英文候选保留 Rime 顺序但不参与重排 |
-| D039 | 历史记录只在实际执行 LLM scorer 时记录可选性能快照；列表显示总耗时，详情显示 tokenization/decode/logits 分阶段耗时及工作量计数，未调用 LLM 时不显示为 0ms |
+| D039 | 历史记录只在实际执行 LLM scorer 时记录可选性能快照；列表显示端到端用时，详情按列优先显示端到端、Rime、推理和 Logprob 用时及工作量计数，未调用 LLM 的 LLM 项显示为不可用 |
 | D040 | 中文模式空格始终提交半角 U+0020；其他标点继续使用全角首选映射；有候选时 Space 仍选择候选，Shift+Space 仍透传 |
 | D041 | 管理窗口的词库和输入历史读取必须使用有界分页；完整词库导出由前端逐页拼接，避免本机 IPC 单帧超过 16 MiB；旧历史接口也限制为单页以保持兼容 |
 | D042 | `llm_context_token_limit` 默认 1024；llama.cpp 的 `n_batch`、`n_ubatch` 和 output capacity 跟随该值配置，满足预算的请求尽量在一个 decode/micro-batch 完成 |
@@ -50,9 +50,11 @@
 | D044 | llama.cpp 使用 zero-based candidate sequence ids，因此 `n_seq_max` 直接等于模型加载时的 `llm_rerank_count`，不额外保留 `+1` sequence slot |
 | D045 | Tauri 设置页合并前端设置、后端设置、模型状态和模型预设；模型后端/上下文 token/重排输入候选数变化且已有模型时由管理界面立即重载当前模型，旧的模型启用与服务自动连接开关仅保留兼容字段 |
 | D046 | llama.cpp 初始化显存明细通过其公开日志回调捕获 `model`、`KV`、`compute`、`output` 等 buffer size 行，并在加载完成后恢复原回调；不从 GGUF 文件大小或配置值推断显存占用 |
-| D047 | 输入历史新增可选 `model_name`（当前 GGUF 文件名）和可空的 `rime_duration_ms`；旧记录或未进入 Rime 的请求不伪造 0ms，Rime 耗时只包围候选批次生成，不改变实时输入响应结构 |
+| D047 | 输入历史新增可选 `model_name`（当前 GGUF 文件名）和可空的 `rime_duration_ms`；旧记录或未进入 Rime 的请求不伪造 0ms，Rime 用时只包围候选批次生成，不改变实时输入响应结构 |
 | D048 | Tauri 管理窗口默认宽度收紧到约 520px；设置、词库和诊断保持窄单列，测试与历史页按活动页面扩展到约 1000px；设置保留功能分组标题但移除重复的大标题和说明性文本 |
 | D049 | 测试与历史页扩展时，顶部导航保持窄内容宽度并居中；历史表格使用可用宽度填满表头和数据区域，设置控件继续采用紧凑固定宽度 |
+| D050 | LLM 重排统一使用 llama.cpp backend sampler 在 GPU 上完成目标 token 的 softmax/logprob；CPU 只读取紧凑结果，不保留完整 vocabulary logits 回传路径；运行时 llama.dll 必须应用 b10743 output-reorder patch |
+| D051 | 输入历史记录端到端用时；详情按列优先排列性能数据，保留 Rime、推理和 Logprob 三项用时。推理计时统计 native decode 调用，兼容字段 `logits_ms` 只统计 decode 返回后的同步和紧凑 Logprob 结果读取，不与推理计时重叠 |
 
 ## 后续可演进
 

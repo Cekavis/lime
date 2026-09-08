@@ -6,14 +6,14 @@
 
 - 初始化 Rust workspace、Tauri 2 管理窗口、Windows C++ TSF 工程。
 - 建立资源目录、配置 schema、IPC schema 和统一错误码。
-- 将 `_archive/2026-08-25-ime-context-probe` 与 `tools/pinyin-eval` 标记为实验/评测资产，不作为生产 crate 依赖。
+- 将 `_archive/2026-08-25-ime-context-probe` 标记为历史归档资产，不作为生产 crate 依赖。
 
 ## Phase 1：Rust 核心服务
 
 状态：已完成（2026-08-30）。详细文件与验证记录见 [Phase 1 实现记录](phase-1.md)。
 
 - 实现单实例、按需启动、Named Pipe 服务。
-- 抽取 `RimeEngine`，复用 pinyin-eval 的 librime 动态加载和用户目录隔离逻辑。
+- 实现 `RimeEngine`，复用 librime 动态加载和用户目录隔离逻辑。
 - 抽取 `LlamaRuntime`，Windows 默认 CUDA、CPU fallback，支持 GGUF 加载/卸载和 token/logits 评分。
 - 实现 Rime-only、模型重排、取消旧代际和配置热更新。
 - 实现用户词库学习、导入导出和隐私安全日志。

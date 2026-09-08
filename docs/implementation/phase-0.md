@@ -8,12 +8,12 @@
 
 ## 已落地
 
-- Rust workspace：生产 crate 与评测工具分离；`tools/pinyin-eval` 和 `_archive/2026-08-25-ime-context-probe` 保持实验资产定位。
+- Rust workspace：生产 crate 统一纳入根 workspace；历史 TSF 探针保持归档资产定位。
 - Rust crate：`crates/lime-protocol` 提供版本化握手、输入请求/响应、配置快照和统一错误码；`crates/lime-core` 提供配置范围校验与 revisioned 原子更新。
 - Tauri 2 管理窗口：仅承载设置/模型/词库/诊断的管理壳，不进入实时按键路径；前端预置 Vite + TypeScript、Tailwind/shadcn 配置和集中 design tokens。
 - Windows TSF：建立 C++ 平台适配工程与 COM/TSF 生命周期占位接口。
 - 资源边界：建立 `resources/rime`、`resources/models`、`resources/runtime`，不提交模型或本机二进制。
-- 实验资产：在 [实验资产边界](experimental-assets.md) 中记录归档探针和评测工具不进入生产 workspace。
+- 归档资产：在 [归档资产边界](experimental-assets.md) 中记录历史探针不进入生产 workspace。
 - 数据契约：建立配置 schema、IPC 请求/响应 schema 和统一错误码目录，并提供可校验示例。
 - 质量门禁：建立 Rust 格式化、检查、Clippy、单元测试和 schema 校验的 GitHub Actions 工作流。
 

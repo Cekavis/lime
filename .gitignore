@@ -26,9 +26,7 @@ user-data/
 logs/
 *.userdb/
 
-# Local evaluation output
-tools/pinyin-eval/target/
-tools/pinyin-eval/repro.*.log
+# Local test output
 .tmp-rime-ice/
 .tmp-rime-small/
 .tmp-ipc-test/

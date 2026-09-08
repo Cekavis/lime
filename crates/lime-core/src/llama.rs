@@ -5,7 +5,10 @@
 //! still making model-backed ranking use the real GGUF vocabulary and logits.
 
 use lime_protocol::{Candidate, LlmPerformance};
-use llama_cpp_sys_v3::llama_token;
+use llama_cpp_sys_v3::{
+    ggml_backend_buffer_type, ggml_cgraph, ggml_context, ggml_tensor, llama_sampler,
+    llama_sampler_data, llama_sampler_i, llama_token,
+};
 pub use llama_cpp_v3::BackendPreference;
 use llama_cpp_v3::{LlamaBackend, LlamaBatch, LlamaContext, LlamaModel, LoadOptions};
 use sha2::{Digest, Sha256};
@@ -67,7 +70,7 @@ pub(crate) struct ScoredCandidates {
 struct ScoringTimings {
     tokenize: Duration,
     decode: Duration,
-    logits: Duration,
+    logprob: Duration,
     batch_count: u32,
     decode_input_tokens: usize,
     logits_output_count: usize,
@@ -84,14 +87,298 @@ impl ScoringTimings {
         self.decode += started.elapsed();
     }
 
-    fn add_logits(&mut self, started: Instant) {
-        self.logits += started.elapsed();
+    fn add_logprob(&mut self, started: Instant) {
+        self.logprob += started.elapsed();
     }
 
     fn add_decode_workload(&mut self, input_tokens: usize, output_count: usize) {
         self.decode_input_tokens = self.decode_input_tokens.saturating_add(input_tokens);
         self.logits_output_count = self.logits_output_count.saturating_add(output_count);
     }
+}
+
+#[derive(Clone, Copy)]
+struct GpuSamplerFns {
+    reshape_1d: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor, i64) -> *mut ggml_tensor,
+    reshape_2d:
+        unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor, i64, i64) -> *mut ggml_tensor,
+    soft_max: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor) -> *mut ggml_tensor,
+    get_rows: unsafe extern "C" fn(
+        *mut ggml_context,
+        *mut ggml_tensor,
+        *mut ggml_tensor,
+    ) -> *mut ggml_tensor,
+    log: unsafe extern "C" fn(*mut ggml_context, *mut ggml_tensor) -> *mut ggml_tensor,
+    new_tensor_1d: unsafe extern "C" fn(*mut ggml_context, i32, i64) -> *mut ggml_tensor,
+    set_input: unsafe extern "C" fn(*mut ggml_tensor),
+    get_data: unsafe extern "C" fn(*const ggml_tensor) -> *mut std::ffi::c_void,
+    nelements: unsafe extern "C" fn(*const ggml_tensor) -> i64,
+    backend_tensor_get: unsafe extern "C" fn(*mut ggml_tensor, *mut std::ffi::c_void, usize, usize),
+}
+
+struct GpuSamplerState {
+    groups: Vec<Vec<llama_token>>,
+    cursor: usize,
+    target_tensors: Vec<*mut ggml_tensor>,
+    results: Vec<*mut ggml_tensor>,
+    result_ids: Vec<Vec<llama_token>>,
+    target_capacity: usize,
+    iface: *mut llama_sampler_i,
+    fns: GpuSamplerFns,
+}
+
+struct GpuSamplerSet {
+    chains: Vec<*mut llama_sampler>,
+    states: Vec<*mut GpuSamplerState>,
+    target_capacity: usize,
+    free: unsafe extern "C" fn(*mut llama_sampler),
+}
+
+unsafe impl Send for GpuSamplerSet {}
+unsafe impl Sync for GpuSamplerSet {}
+
+impl Drop for GpuSamplerSet {
+    fn drop(&mut self) {
+        // Freeing the chain recursively frees each custom sampler and invokes sampler_free,
+        // which releases its state and interface allocation.
+        for chain in self.chains.drain(..) {
+            if !chain.is_null() {
+                unsafe { (self.free)(chain) };
+            }
+        }
+        self.states.clear();
+    }
+}
+
+unsafe extern "C" fn gpu_sampler_name(_: *const llama_sampler) -> *const std::ffi::c_char {
+    b"lime-gpu-logprob\0".as_ptr() as *const std::ffi::c_char
+}
+unsafe extern "C" fn gpu_sampler_apply(_: *mut llama_sampler, _: *mut std::ffi::c_void) {}
+unsafe extern "C" fn gpu_sampler_accept(_: *mut llama_sampler, _: llama_token) {}
+unsafe extern "C" fn gpu_sampler_reset(_: *mut llama_sampler) {}
+unsafe extern "C" fn gpu_sampler_backend_init(
+    _: *mut llama_sampler,
+    _: *mut ggml_backend_buffer_type,
+    _: u32,
+) -> bool {
+    true
+}
+unsafe extern "C" fn gpu_sampler_backend_accept(
+    _: *mut llama_sampler,
+    _: *mut ggml_context,
+    _: *mut ggml_cgraph,
+    _: *mut ggml_tensor,
+) {
+}
+unsafe extern "C" fn gpu_sampler_backend_reset(sampler: *mut llama_sampler) {
+    let state = &mut *((*sampler).ctx as *mut GpuSamplerState);
+    state.cursor = 0;
+    state.target_tensors.clear();
+    state.results.clear();
+    state.result_ids.clear();
+}
+unsafe extern "C" fn gpu_sampler_backend_set_input(sampler: *mut llama_sampler) {
+    let state = &mut *((*sampler).ctx as *mut GpuSamplerState);
+    for (tensor, ids) in state
+        .target_tensors
+        .iter()
+        .copied()
+        .zip(state.result_ids.iter())
+    {
+        if tensor.is_null() {
+            continue;
+        }
+        let data = (state.fns.get_data)(tensor) as *mut llama_token;
+        if !data.is_null() {
+            std::ptr::write_bytes(
+                data.cast::<u8>(),
+                0,
+                state.target_capacity * std::mem::size_of::<llama_token>(),
+            );
+            for (index, value) in ids.iter().copied().enumerate() {
+                if index >= state.target_capacity {
+                    break;
+                }
+                *data.add(index) = value;
+            }
+        }
+    }
+}
+unsafe extern "C" fn gpu_sampler_free(sampler: *mut llama_sampler) {
+    let state = Box::from_raw((*sampler).ctx as *mut GpuSamplerState);
+    if !state.iface.is_null() {
+        drop(Box::from_raw(state.iface));
+    }
+}
+unsafe extern "C" fn gpu_sampler_backend_apply(
+    sampler: *mut llama_sampler,
+    ctx: *mut ggml_context,
+    _: *mut ggml_cgraph,
+    data: *mut llama_sampler_data,
+) {
+    let state = &mut *((*sampler).ctx as *mut GpuSamplerState);
+    let selected = state
+        .groups
+        .get(state.cursor)
+        .cloned()
+        .unwrap_or_else(|| vec![0]);
+    state.cursor = state.cursor.saturating_add(1);
+    let logits = (state.fns.reshape_1d)(ctx, (*data).logits, (state.fns.nelements)((*data).logits));
+    let probs = (state.fns.soft_max)(ctx, logits);
+    let rows = (state.fns.reshape_2d)(ctx, probs, 1, (state.fns.nelements)(probs));
+    let ids = (state.fns.new_tensor_1d)(ctx, 26, state.target_capacity as i64);
+    (state.fns.set_input)(ids);
+    state.target_tensors.push(ids);
+    let gathered = (state.fns.get_rows)(ctx, rows, ids);
+    let result = (state.fns.log)(ctx, gathered);
+    state.results.push(result);
+    state.result_ids.push(selected);
+    (*data).logits = result;
+    (*data).candidates = ids;
+}
+
+fn new_gpu_sampler_set(
+    backend: &LlamaBackend,
+    sequence_count: usize,
+    target_capacity: usize,
+) -> Result<GpuSamplerSet, String> {
+    let symbols = &backend.lib.symbols;
+    let fns = GpuSamplerFns {
+        reshape_1d: symbols.ggml_reshape_1d,
+        reshape_2d: symbols.ggml_reshape_2d,
+        soft_max: symbols.ggml_soft_max,
+        get_rows: symbols.ggml_get_rows,
+        log: symbols.ggml_log,
+        new_tensor_1d: symbols.ggml_new_tensor_1d,
+        set_input: symbols.ggml_set_input,
+        get_data: symbols.ggml_get_data,
+        nelements: symbols.ggml_nelements,
+        backend_tensor_get: symbols.ggml_backend_tensor_get,
+    };
+    let mut set = GpuSamplerSet {
+        chains: Vec::with_capacity(sequence_count),
+        states: Vec::with_capacity(sequence_count),
+        target_capacity,
+        free: symbols.llama_sampler_free,
+    };
+    for _ in 0..sequence_count {
+        let iface = Box::into_raw(Box::new(llama_sampler_i {
+            name: Some(gpu_sampler_name),
+            accept: Some(gpu_sampler_accept),
+            apply: Some(gpu_sampler_apply),
+            reset: Some(gpu_sampler_reset),
+            clone: None,
+            free: Some(gpu_sampler_free),
+            backend_init: Some(gpu_sampler_backend_init),
+            backend_accept: Some(gpu_sampler_backend_accept),
+            backend_apply: Some(gpu_sampler_backend_apply),
+            backend_set_input: Some(gpu_sampler_backend_set_input),
+            backend_reset: Some(gpu_sampler_backend_reset),
+            copy_state: None,
+        }));
+        let state = Box::into_raw(Box::new(GpuSamplerState {
+            groups: Vec::new(),
+            cursor: 0,
+            target_tensors: Vec::new(),
+            results: Vec::new(),
+            result_ids: Vec::new(),
+            target_capacity,
+            iface,
+            fns,
+        }));
+        let custom = unsafe { (symbols.llama_sampler_init)(iface, state.cast()) };
+        if custom.is_null() {
+            unsafe {
+                drop(Box::from_raw(state));
+                drop(Box::from_raw(iface));
+            }
+            return Err("llama_sampler_init returned null".to_owned());
+        }
+        let chain = unsafe {
+            (symbols.llama_sampler_chain_init)((symbols.llama_sampler_chain_default_params)())
+        };
+        if chain.is_null() {
+            unsafe {
+                (symbols.llama_sampler_free)(custom);
+            }
+            return Err("llama_sampler_chain_init returned null".to_owned());
+        }
+        unsafe {
+            (symbols.llama_sampler_chain_add)(chain, custom);
+        }
+        set.chains.push(chain);
+        set.states.push(state);
+    }
+    Ok(set)
+}
+
+fn configure_gpu_samplers(
+    gpu_samplers: &GpuSamplerSet,
+    target_groups: Vec<Vec<Vec<llama_token>>>,
+) -> Result<(), String> {
+    if target_groups.len() != gpu_samplers.states.len() {
+        return Err(format!(
+            "llama.cpp sampler group count {} does not match sequence count {}",
+            target_groups.len(),
+            gpu_samplers.states.len()
+        ));
+    }
+
+    let max_target_count = target_groups
+        .iter()
+        .flat_map(|groups| groups.iter().map(Vec::len))
+        .max()
+        .unwrap_or(0);
+    if max_target_count > gpu_samplers.target_capacity {
+        return Err(format!(
+            "llama.cpp sampler target count {max_target_count} exceeds capacity {}",
+            gpu_samplers.target_capacity
+        ));
+    }
+
+    for (state_ptr, groups) in gpu_samplers.states.iter().copied().zip(target_groups) {
+        let state = unsafe { &mut *state_ptr };
+        state.groups = groups;
+        state.cursor = 0;
+        // llama.cpp may reuse the sampling graph when batch topology is unchanged. Keep the
+        // current target ids separate from `groups`: backend_apply repopulates them on graph
+        // rebuild, while backend_set_input replaces them on graph reuse.
+        state.result_ids = if state.groups.is_empty() {
+            vec![vec![0]]
+        } else {
+            state.groups.clone()
+        };
+    }
+
+    Ok(())
+}
+
+fn read_gpu_sampler_row(state: &GpuSamplerState, row_index: usize) -> Result<Vec<f64>, String> {
+    let result = state
+        .results
+        .get(row_index)
+        .copied()
+        .ok_or_else(|| format!("llama.cpp GPU sampler result row {row_index} is missing"))?;
+    let ids = state
+        .result_ids
+        .get(row_index)
+        .ok_or_else(|| format!("llama.cpp GPU sampler target row {row_index} is missing"))?;
+    if result.is_null() {
+        return Err(format!(
+            "llama.cpp GPU sampler result row {row_index} is null"
+        ));
+    }
+
+    let mut values = vec![0.0f32; ids.len()];
+    unsafe {
+        (state.fns.backend_tensor_get)(
+            result,
+            values.as_mut_ptr().cast(),
+            0,
+            values.len() * std::mem::size_of::<f32>(),
+        );
+    }
+    Ok(values.into_iter().map(f64::from).collect())
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -117,6 +404,7 @@ pub struct LlamaRuntime {
     // native context and model must be released before LlamaBackend calls the
     // process-global llama_backend_free function.
     context: Mutex<LlamaContext>,
+    gpu_samplers: Mutex<GpuSamplerSet>,
     model: LlamaModel,
     backend: LlamaBackend,
 }
@@ -135,6 +423,22 @@ impl std::fmt::Debug for LlamaRuntime {
             .field("backend_name", &self.backend_name)
             .field("initialization_memory", &self.initialization_memory)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for LlamaRuntime {
+    fn drop(&mut self) {
+        if let (Ok(context), Ok(samplers)) = (self.context.lock(), self.gpu_samplers.lock()) {
+            for seq_id in 0..samplers.chains.len() {
+                unsafe {
+                    (self.backend.lib.symbols.llama_set_sampler)(
+                        context.handle,
+                        seq_id as i32,
+                        std::ptr::null_mut(),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -433,6 +737,21 @@ impl LlamaRuntime {
             backend.with_log_capture(|| LlamaContext::new(&model, context_params));
         let context =
             context_result.map_err(|error| format!("create llama.cpp context: {error}"))?;
+        // Sampler chains are initialized by llama_set_sampler exactly once.  The target-index
+        // tensor shape is therefore fixed up front; later requests update only its input data.
+        // The first shared-context row can contain one target per candidate, while continuation
+        // rows can contain up to one target per candidate token.
+        let gpu_samplers =
+            new_gpu_sampler_set(&backend, sequence_count, context_tokens.max(sequence_count))?;
+        for (seq_id, chain) in gpu_samplers.chains.iter().copied().enumerate() {
+            if !unsafe {
+                (backend.lib.symbols.llama_set_sampler)(context.handle, seq_id as i32, chain)
+            } {
+                return Err(format!(
+                    "llama.cpp rejected GPU sampler for sequence {seq_id}"
+                ));
+            }
+        }
 
         let runtime_context_tokens =
             unsafe { (backend.lib.symbols.llama_n_ctx)(context.handle) as usize };
@@ -461,6 +780,7 @@ impl LlamaRuntime {
             backend,
             model,
             context: Mutex::new(context),
+            gpu_samplers: Mutex::new(gpu_samplers),
         })
     }
 
@@ -568,6 +888,10 @@ impl LlamaRuntime {
             .context
             .lock()
             .map_err(|_| "llama.cpp context mutex poisoned".to_owned())?;
+        let mut gpu_samplers = self
+            .gpu_samplers
+            .lock()
+            .map_err(|_| "llama.cpp GPU sampler mutex poisoned".to_owned())?;
         let mut output = vec![None; plans.len()];
 
         // Keep the most recent context tokens when the input is longer than the configured
@@ -635,6 +959,7 @@ impl LlamaRuntime {
                 &self.backend,
                 &self.model,
                 &mut context,
+                &mut gpu_samplers,
                 &decode_base,
                 &sequences,
                 self.sequence_count,
@@ -667,7 +992,7 @@ impl LlamaRuntime {
                 total_ms: duration_ms(total_started.elapsed()),
                 tokenize_ms: duration_ms(timings.tokenize),
                 decode_ms: duration_ms(timings.decode),
-                logits_ms: duration_ms(timings.logits),
+                logits_ms: duration_ms(timings.logprob),
                 candidate_count: candidates.len().min(u32::MAX as usize) as u32,
                 scored_count,
                 target_token_count: target_token_count.min(u32::MAX as usize) as u32,
@@ -702,6 +1027,7 @@ fn score_batch(
     backend: &LlamaBackend,
     model: &LlamaModel,
     context: &mut MutexGuard<'_, LlamaContext>,
+    gpu_samplers: &mut GpuSamplerSet,
     base_tokens: &[llama_token],
     candidates: &[Vec<llama_token>],
     sequence_count: usize,
@@ -742,86 +1068,156 @@ fn score_batch(
             timings.context_limit
         ));
     }
+    if candidates.len() > gpu_samplers.states.len() {
+        return Err(format!(
+            "llama sampler has {} sequence slots, but {} candidates were requested",
+            gpu_samplers.states.len(),
+            candidates.len()
+        ));
+    }
 
     context.kv_cache_clear();
-    let mut batch = LlamaBatch::new(
-        backend.lib.clone(),
-        total_tokens.max(1) as i32,
-        0,
-        sequence_count as i32,
-    );
     // Sequence ids are zero-based in llama.cpp. Keeping them in `0..N` lets `n_seq_max=N`
     // describe exactly the number of candidate sequences without a reserved extra slot.
     let sequence_ids = (0..candidates.len() as i32).collect::<Vec<_>>();
+    let mut token_logprobs = candidates
+        .iter()
+        .map(|tokens| Vec::with_capacity(tokens.len()))
+        .collect::<Vec<_>>();
+    timings.add_decode_workload(
+        total_tokens,
+        1 + candidates
+            .iter()
+            .map(|tokens| tokens.len().saturating_sub(1))
+            .sum::<usize>(),
+    );
+    // Decode the shared context by itself. Keeping candidate continuations out of this batch
+    // prevents llama.cpp from splitting a coupled multi-sequence batch into several ubatches;
+    // each split rebuilds the sampling graph and would otherwise discard rows collected by the
+    // custom backend sampler.
+    let mut base_batch = LlamaBatch::new(
+        backend.lib.clone(),
+        decode_base.len().max(1) as i32,
+        0,
+        sequence_count as i32,
+    );
     for (position, token) in decode_base.iter().copied().enumerate() {
-        batch.add(
+        base_batch.add(
             token,
             position as i32,
             &sequence_ids,
             position + 1 == decode_base.len(),
         );
     }
-    // `llama_get_logits_ith` takes the original batch-token index, not the ordinal
-    // among tokens whose logits flag is enabled. Keep that index alongside each
-    // target so a non-empty context does not incorrectly query batch token 0.
-    let mut output_targets = Vec::new();
-    for (candidate_index, tokens) in candidates.iter().enumerate() {
-        for token_index in 0..tokens.len().saturating_sub(1) {
-            let batch_index = batch.handle.n_tokens as usize;
-            batch.add(
+    let mut base_target_groups = vec![Vec::new(); gpu_samplers.states.len()];
+    base_target_groups[0].push(candidates.iter().map(|tokens| tokens[0]).collect());
+    configure_gpu_samplers(gpu_samplers, base_target_groups)?;
+
+    let decode_started = Instant::now();
+    context
+        .decode(&base_batch)
+        .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
+    timings.add_decode(decode_started);
+    let logprob_started = Instant::now();
+    unsafe {
+        (backend.lib.symbols.llama_synchronize)(context.handle);
+    }
+    let base_state = unsafe { &*gpu_samplers.states[0] };
+    let base_values = read_gpu_sampler_row(base_state, 0)?;
+    if base_values.len() != candidates.len() {
+        return Err(format!(
+            "llama.cpp GPU sampler returned {} shared-context values, expected {}",
+            base_values.len(),
+            candidates.len()
+        ));
+    }
+    for (candidate_index, value) in base_values.into_iter().enumerate() {
+        token_logprobs[candidate_index].push(value);
+    }
+    timings.add_logprob(logprob_started);
+
+    // Decode continuation tokens by depth. Every round has at most one token per active
+    // sequence, so llama.cpp can represent it as one ubatch and the sampler state has one
+    // unambiguous output row per active candidate.
+    let max_continuations = candidates
+        .iter()
+        .map(|tokens| tokens.len().saturating_sub(1))
+        .max()
+        .unwrap_or(0);
+    for token_index in 0..max_continuations {
+        let active_candidates = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(candidate_index, tokens)| {
+                (tokens.len() > token_index + 1).then_some(candidate_index)
+            })
+            .collect::<Vec<_>>();
+        if active_candidates.is_empty() {
+            continue;
+        }
+
+        let mut continuation_batch = LlamaBatch::new(
+            backend.lib.clone(),
+            active_candidates.len() as i32,
+            0,
+            sequence_count as i32,
+        );
+        let mut continuation_target_groups = vec![Vec::new(); gpu_samplers.states.len()];
+        for &candidate_index in &active_candidates {
+            let tokens = &candidates[candidate_index];
+            continuation_batch.add(
                 tokens[token_index],
                 (decode_base.len() + token_index) as i32,
                 &[sequence_ids[candidate_index]],
                 true,
             );
-            output_targets.push((candidate_index, tokens[token_index + 1], batch_index));
+            continuation_target_groups[candidate_index].push(vec![tokens[token_index + 1]]);
         }
-    }
-    timings.add_decode_workload(total_tokens, output_targets.len().saturating_add(1));
-    let decode_started = Instant::now();
-    context
-        .decode(&batch)
-        .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
-    timings.add_decode(decode_started);
+        configure_gpu_samplers(gpu_samplers, continuation_target_groups)?;
 
-    let mut token_logprobs = candidates
+        let decode_started = Instant::now();
+        context
+            .decode(&continuation_batch)
+            .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
+        timings.add_decode(decode_started);
+        let logprob_started = Instant::now();
+        unsafe {
+            (backend.lib.symbols.llama_synchronize)(context.handle);
+        }
+        for &candidate_index in &active_candidates {
+            let state = unsafe { &*gpu_samplers.states[candidate_index] };
+            let values = read_gpu_sampler_row(state, 0)?;
+            if values.len() != 1 {
+                return Err(format!(
+                    "llama.cpp GPU sampler returned {} values for candidate {candidate_index} continuation {token_index}, expected 1",
+                    values.len()
+                ));
+            }
+            token_logprobs[candidate_index].push(values[0]);
+        }
+        timings.add_logprob(logprob_started);
+    }
+    if let Some((candidate_index, (lp, tokens))) = token_logprobs
         .iter()
-        .map(|tokens| Vec::with_capacity(tokens.len()))
-        .collect::<Vec<_>>();
-    let logits_started = Instant::now();
-    let base_logits = logits_for(
-        backend,
-        context,
-        decode_base.len().saturating_sub(1),
-        timings.vocab_size,
-    )?;
-    let base_normalizer = log_normalizer(&base_logits).ok_or_else(|| {
-        "llama.cpp returned a non-finite logits normalizer for the shared context output".to_owned()
-    })?;
-    for (candidate_index, tokens) in candidates.iter().enumerate() {
-        let value = logprob_with_normalizer(&base_logits, tokens[0], base_normalizer);
-        if !value.is_finite() {
-            return Err(format!(
-                "llama.cpp returned a non-finite logprob for token {}",
-                tokens[0]
-            ));
-        }
-        token_logprobs[candidate_index].push(value);
+        .zip(candidates)
+        .enumerate()
+        .find(|(_, (lp, tokens))| {
+            lp.len() != tokens.len() || lp.iter().any(|value| !value.is_finite())
+        })
+    {
+        let sampler_state = gpu_samplers
+            .states
+            .get(candidate_index)
+            .map(|state| unsafe { &**state });
+        return Err(format!(
+            "llama.cpp GPU sampler returned incomplete logprob rows for candidate {candidate_index}: got {} values, expected {}; sampler results={}, target rows={}, current groups={}",
+            lp.len(),
+            tokens.len(),
+            sampler_state.map_or(0, |state| state.results.len()),
+            sampler_state.map_or(0, |state| state.result_ids.len()),
+            sampler_state.map_or(0, |state| state.groups.len()),
+        ));
     }
-    for (candidate_index, target_token, batch_index) in output_targets {
-        let logits = logits_for(backend, context, batch_index, timings.vocab_size)?;
-        let normalizer = log_normalizer(&logits).ok_or_else(|| {
-            format!("llama.cpp returned a non-finite logits normalizer for output {batch_index}")
-        })?;
-        let value = logprob_with_normalizer(&logits, target_token, normalizer);
-        if !value.is_finite() {
-            return Err(format!(
-                "llama.cpp returned a non-finite logprob for token {target_token}"
-            ));
-        }
-        token_logprobs[candidate_index].push(value);
-    }
-    timings.add_logits(logits_started);
     Ok(token_logprobs
         .into_iter()
         .zip(candidates)
@@ -834,22 +1230,7 @@ fn score_batch(
         .collect())
 }
 
-fn logits_for(
-    backend: &LlamaBackend,
-    context: &MutexGuard<'_, LlamaContext>,
-    index: usize,
-    vocab_size: usize,
-) -> Result<Vec<f32>, String> {
-    let pointer =
-        unsafe { (backend.lib.symbols.llama_get_logits_ith)(context.handle, index as i32) };
-    if pointer.is_null() {
-        return Err(format!(
-            "llama.cpp returned null logits pointer for output {index}"
-        ));
-    }
-    Ok(unsafe { std::slice::from_raw_parts(pointer, vocab_size) }.to_vec())
-}
-
+#[cfg(test)]
 fn log_normalizer(logits_pointer: &[f32]) -> Option<f64> {
     let maximum = logits_pointer
         .iter()
@@ -871,6 +1252,7 @@ fn log_normalizer(logits_pointer: &[f32]) -> Option<f64> {
     }
 }
 
+#[cfg(test)]
 fn logprob_with_normalizer(logits_pointer: &[f32], token: llama_token, normalizer: f64) -> f64 {
     if token < 0 || logits_pointer.len() <= token as usize {
         return f64::NEG_INFINITY;
@@ -1277,5 +1659,41 @@ mod tests {
         assert!(ranked.diagnostics.iter().all(|row| {
             row.logprob.is_finite() && (row.logprob - row.logprobs.iter().sum::<f64>()).abs() < 1e-9
         }));
+    }
+
+    #[test]
+    #[ignore = "requires a local llama.cpp shared library and GGUF model"]
+    fn configured_runtime_scores_rime_sized_batch_with_context() {
+        let model = std::env::var_os("LIME_LLAMA_TEST_MODEL")
+            .map(PathBuf::from)
+            .expect("LIME_LLAMA_TEST_MODEL must point to a GGUF model");
+        let runtime_dir = std::env::var_os("LIME_LLAMA_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .expect("LIME_LLAMA_RUNTIME_DIR must point to llama.cpp runtime");
+        let runtime =
+            LlamaRuntime::load_with_runtime_dir_and_backend_preference_and_sequence_count(
+                &model,
+                &runtime_dir,
+                128,
+                BackendPreference::Cuda,
+                32,
+            )
+            .unwrap();
+        let candidates = [
+            "你好", "👋", "拟好", "你", "尼", "泥", "逆", "拟", "腻", "倪", "霓", "匿", "妮", "溺",
+            "昵", "睨", "旎", "怩", "猊", "鲵", "伲", "坭", "铌", "麑", "薿", "鿭", "呢", "𨺙",
+            "𫐐", "𫠜",
+        ]
+        .into_iter()
+        .map(|text| Candidate {
+            display_text: text.to_owned(),
+            commit_text: text.to_owned(),
+        })
+        .collect::<Vec<_>>();
+        let scores = runtime.score_candidates("我", &candidates).unwrap();
+        assert_eq!(scores.len(), candidates.len());
+        assert!(scores
+            .iter()
+            .all(|score| { score.logprob.is_finite() && score.token_logprobs.len() > 0 }));
     }
 }

@@ -6,7 +6,6 @@ members = [
     "third_party/llama-cpp-sys-v3",
     "third_party/llama-cpp-v3",
 ]
-exclude = ["tools/pinyin-eval"]
 
 [workspace.package]
 version = "0.1.0"

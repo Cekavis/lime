@@ -82,6 +82,7 @@
       "properties": {
         "request_id": { "type": "integer", "minimum": 0 },
         "timestamp_ms": { "type": "integer", "minimum": 0 },
+        "end_to_end_duration_ms": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
         "preceding_text": { "type": "string" },
         "preedit": { "type": "string" },
         "rime_candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },

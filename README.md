@@ -23,12 +23,11 @@ Lime（Language model IME）是一个本地优先的中文拼音输入法项目�
 - [Phase 4 验收矩阵](docs/implementation/phase-4-acceptance.md)
 - [决策记录](docs/decisions/decision-log.md)
 
-## 现有实验资产
+## 归档资产
 
 - `_archive/2026-08-25-ime-context-probe/`：Windows TSF 获取光标前文本的实验代码。
-- `tools/pinyin-eval/`：Rime/雾凇拼音 + llama.cpp 候选评分实验，生产核心算法首期沿用其评分语义。
 
-实验资产用于参考和离线验证，不属于生产运行时；模型、用户数据和构建产物不进入 Git。
+归档资产仅供历史追溯，不属于生产 workspace、构建流程或实时输入路径。
 
 ## 外部资源获取
 

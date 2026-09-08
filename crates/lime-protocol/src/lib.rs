@@ -120,6 +120,10 @@ pub struct InputHistoryEntry {
     /// entries have a larger value, including when several requests arrive in one millisecond.
     #[serde(default)]
     pub timestamp_ms: u64,
+    /// Wall-clock time spent handling this input request before the history entry is recorded,
+    /// including Rime and any LLM work. Older history entries leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_to_end_duration_ms: Option<u64>,
     pub preceding_text: String,
     pub preedit: String,
     pub rime_candidates: Vec<Candidate>,
@@ -184,10 +188,13 @@ pub struct LlmPerformance {
     /// Time spent tokenizing the context and candidate strings, in milliseconds.
     #[serde(default)]
     pub tokenize_ms: u64,
-    /// Time spent in native llama.cpp decode calls, in milliseconds.
+    /// Time spent in native llama.cpp inference decode calls, in milliseconds.
+    /// This is measured separately from `logits_ms`.
     #[serde(default)]
     pub decode_ms: u64,
-    /// Time spent reading logits and deriving token log probabilities, in milliseconds.
+    /// Time spent synchronizing and reading the compact post-inference log-probability results,
+    /// in milliseconds.
+    /// The wire name is retained for compatibility; this value does not include `decode_ms`.
     #[serde(default)]
     pub logits_ms: u64,
     /// Number of candidates passed to the scorer after all filters.
@@ -211,7 +218,7 @@ pub struct LlmPerformance {
     /// Number of token rows submitted to llama.cpp decode, summed across outer batches.
     #[serde(default)]
     pub decode_input_token_count: u32,
-    /// Number of logits rows read from llama.cpp, summed across outer batches.
+    /// Number of compact log-probability result rows read from llama.cpp, summed across outer batches.
     #[serde(default)]
     pub logits_output_count: u32,
 }
@@ -670,6 +677,7 @@ mod tests {
         assert!(legacy.llm_performance.is_none());
         assert!(legacy.model_name.is_none());
         assert!(legacy.rime_duration_ms.is_none());
+        assert!(legacy.end_to_end_duration_ms.is_none());
     }
 
     #[test]
@@ -677,6 +685,7 @@ mod tests {
         let entry = InputHistoryEntry {
             request_id: 7,
             timestamp_ms: 8,
+            end_to_end_duration_ms: Some(29),
             preceding_text: "上文".into(),
             preedit: "nihao".into(),
             rime_candidates: Vec::new(),
@@ -690,6 +699,7 @@ mod tests {
         let json = serde_json::to_string(&entry).expect("serialize history entry");
         assert!(json.contains(r#""model_name":"demo.gguf""#));
         assert!(json.contains(r#""rime_duration_ms":13"#));
+        assert!(json.contains(r#""end_to_end_duration_ms":29"#));
         let decoded: InputHistoryEntry =
             serde_json::from_str(&json).expect("deserialize history entry");
         assert_eq!(decoded, entry);

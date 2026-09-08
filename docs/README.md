@@ -23,7 +23,7 @@
 - [Phase 3 实现记录](implementation/phase-3.md)
 - [Phase 4 实现记录](implementation/phase-4.md)
 - [Phase 4 验收矩阵](implementation/phase-4-acceptance.md)
-- [实验资产边界](implementation/experimental-assets.md)
+- [归档资产边界](implementation/experimental-assets.md)
 
 ## 决策
 

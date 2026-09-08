@@ -387,6 +387,7 @@ impl CoreService {
     }
 
     fn input(&self, request: InputRequest) -> Result<InputResponse, ErrorCode> {
+        let input_started = Instant::now();
         let snapshot = self.config_snapshot();
         if request.config_revision != snapshot.revision {
             self.record_input_history(
@@ -398,6 +399,7 @@ impl CoreService {
                 None,
                 None,
                 None,
+                Some(elapsed_ms(input_started.elapsed())),
             );
             return Err(ErrorCode::RequestCancelled);
         }
@@ -438,6 +440,7 @@ impl CoreService {
                     model_name.clone(),
                     rime_duration_ms,
                     None,
+                    Some(elapsed_ms(input_started.elapsed())),
                 );
                 return Err(code);
             }
@@ -476,6 +479,7 @@ impl CoreService {
             model_name,
             rime_duration_ms,
             llm_performance,
+            Some(elapsed_ms(input_started.elapsed())),
         );
         if !self.generation.is_current(generation) {
             return Err(ErrorCode::RequestCancelled);
@@ -929,6 +933,7 @@ impl CoreService {
         model_name: Option<String>,
         rime_duration_ms: Option<u64>,
         llm_performance: Option<LlmPerformance>,
+        end_to_end_duration_ms: Option<u64>,
     ) {
         let timestamp_ms = self.next_timestamp_ms();
         self.history
@@ -937,6 +942,7 @@ impl CoreService {
             .push(InputHistoryEntry {
                 request_id: request.request_id,
                 timestamp_ms,
+                end_to_end_duration_ms,
                 preceding_text: request.preceding_text.clone(),
                 preedit: request.preedit.clone(),
                 rime_candidates,
@@ -1208,6 +1214,7 @@ mod tests {
                 assert_eq!(history.len(), 1);
                 assert_eq!(history[0].preedit, "nihao");
                 assert!(history[0].rime_candidates.is_empty());
+                assert!(history[0].end_to_end_duration_ms.is_some());
             }
             _ => panic!("unexpected history response"),
         }
@@ -1232,6 +1239,7 @@ mod tests {
             Some("demo.gguf".into()),
             Some(17),
             None,
+            Some(23),
         );
 
         let history = match service.handle(Request::GetInputHistory) {
@@ -1241,6 +1249,7 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].model_name.as_deref(), Some("demo.gguf"));
         assert_eq!(history[0].rime_duration_ms, Some(17));
+        assert_eq!(history[0].end_to_end_duration_ms, Some(23));
     }
 
     #[test]
