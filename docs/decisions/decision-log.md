@@ -33,7 +33,7 @@
 | D027 | librime `RimeStartMaintenance(false)` 返回 false 表示没有待处理部署任务时，仍继续创建会话；只有会话/方案初始化失败才报告 Rime 初始化错误 |
 | D028 | Windows NSIS 安装包使用 ZLIB 压缩，优先降低 CUDA runtime 大型 DLL 的安装解压时间 |
 | D029 | LLM 只接收前 `llm_rerank_count` 个 Rime 候选中、经 librime 候选预览确认已消费完整输入的候选；`llm_effective_count` 限制从该池置顶的数量，未完整候选保留 Rime 原顺序 |
-| D030 | Windows TSF 按内置 Rime `ascii_composer` 实现中英模式：左 Shift 无修饰短按切换并提交原始组合串，右 Shift 和 Shift+Space 不切换；英文模式由宿主直接处理半角输入，中文模式使用全角标点（空格除外） |
+| D030 | Windows TSF 按内置 Rime `ascii_composer` 实现中英模式：左 Shift 无修饰短按切换并提交原始组合串，右 Shift 和 Shift+Space 不切换；英文模式由宿主直接处理半角输入，中文模式使用雾凇拼音 `half_shape` 标点（空格除外） |
 | D031 | 最近一次成功激活的模型路径独立于预设持久化；服务启动后在后台尽力自动恢复，恢复期间报告 `reloading`，卸载模型清除记录，恢复失败不阻止 Rime/服务启动 |
 | D032 | Tauri 管理窗口只展示用户行动所需的状态与摘要；前台管理数据采用合并轮询和代际丢弃，保护编辑表单、历史详情及预设交互不被刷新打断 |
 | D033 | 中文模式的独立标点（空格除外）使用短生命周期 TSF composition 提交，不在按键回调中直接调用 `ITfInsertAtSelection`；所有 IME 提交共用已验证的 composition 生命周期，避免 Chromium/WebView2 文本上下文重入崩溃 |
@@ -43,7 +43,7 @@
 | D037 | 候选窗位置使用 TSF `GetTextExt` 返回的组合串起点矩形，并沿用 WeaselPanel 输入位置下方 6px 间距；无法取得 layout 时回退到 GUI caret |
 | D038 | ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 严格相等时才进入 LLM；其他英文候选保留 Rime 顺序但不参与重排 |
 | D039 | 历史记录只在实际执行 LLM scorer 时记录可选性能快照；列表显示端到端用时，详情按列优先显示端到端、Rime、推理和 Logprob 用时及工作量计数，未调用 LLM 的 LLM 项显示为不可用 |
-| D040 | 中文模式空格始终提交半角 U+0020；其他标点继续使用全角首选映射；有候选时 Space 仍选择候选，Shift+Space 仍透传 |
+| D040 | 中文模式空格始终提交半角 U+0020；其他标点使用雾凇拼音 `half_shape` 首选映射；有候选时 Space 仍选择候选，Shift+Space 仍透传 |
 | D041 | 管理窗口的词库和输入历史读取必须使用有界分页；完整词库导出由前端逐页拼接，避免本机 IPC 单帧超过 16 MiB；旧历史接口也限制为单页以保持兼容 |
 | D042 | `llm_context_token_limit` 默认 1024；llama.cpp 的 `n_batch`、`n_ubatch` 和 output capacity 跟随该值配置，满足预算的请求尽量在一个 decode/micro-batch 完成 |
 | D043 | mismatch 标记只用于诊断；边界不匹配候选将 `tokenize(candidate)` 的 token 逐个追加到上文，并与其他候选共用批量路径计算 logprob |

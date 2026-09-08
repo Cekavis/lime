@@ -160,44 +160,44 @@ constexpr wchar_t AsciiCharForVirtualKey(WPARAM key, bool shift, bool caps_lock,
   }
 }
 
-constexpr std::wstring_view FullShapeForAscii(wchar_t value) {
+constexpr std::wstring_view HalfShapeForAscii(wchar_t value) {
   // These are the first/default choices from the bundled Rime punctuator
-  // table.  Letters and digits intentionally return an empty view: Chinese mode must
+  // half_shape table.  Letters and digits intentionally return an empty view: Chinese mode must
   // still let those keys follow the normal preedit/host paths.
   switch (value) {
-    // Space is intentionally kept half-width even in Chinese mode.  Other
-    // punctuation continues to use the bundled Rime full-shape mapping.
+    // Rime's half_shape table does not define a space entry, but Lime keeps
+    // the existing explicit half-width-space behavior in Chinese mode.
     case L' ': return L" ";
     case L',': return L"，";
     case L'.': return L"。";
     case L'<': return L"《";
     case L'>': return L"》";
-    case L'/': return L"／";
+    case L'/': return L"/";
     case L'?': return L"？";
     case L';': return L"；";
     case L':': return L"：";
     case L'\\': return L"、";
-    case L'|': return L"·";
-    case L'`': return L"｀";
-    case L'~': return L"～";
+    case L'|': return L"|";
+    case L'`': return L"·";
+    case L'~': return L"~";
     case L'!': return L"！";
-    case L'@': return L"＠";
-    case L'#': return L"＃";
-    case L'%': return L"％";
-    case L'$': return L"￥";
+    case L'@': return L"@";
+    case L'#': return L"#";
+    case L'%': return L"%";
+    case L'$': return L"\u00A5";
     case L'^': return L"……";
-    case L'&': return L"＆";
-    case L'*': return L"＊";
+    case L'&': return L"&";
+    case L'*': return L"*";
     case L'(': return L"（";
     case L')': return L"）";
-    case L'-': return L"－";
+    case L'-': return L"-";
     case L'_': return L"——";
-    case L'+': return L"＋";
-    case L'=': return L"＝";
-    case L'[': return L"「";
-    case L']': return L"」";
-    case L'{': return L"『";
-    case L'}': return L"』";
+    case L'+': return L"+";
+    case L'=': return L"=";
+    case L'[': return L"【";
+    case L']': return L"】";
+    case L'{': return L"「";
+    case L'}': return L"」";
     default: return {};
   }
 }
@@ -212,9 +212,12 @@ bool IsPunctuationCharacter(wchar_t value) {
 static_assert(AsciiCharForVirtualKey('A', false, false) == L'a');
 static_assert(AsciiCharForVirtualKey('A', true, false) == L'A');
 static_assert(AsciiCharForVirtualKey('1', true, false) == L'!');
-static_assert(FullShapeForAscii(L' ') == std::wstring_view(L" "));
-static_assert(FullShapeForAscii(L',') == std::wstring_view(L"，"));
-static_assert(FullShapeForAscii(L'^') == std::wstring_view(L"……"));
+static_assert(HalfShapeForAscii(L' ') == std::wstring_view(L" "));
+static_assert(HalfShapeForAscii(L'/') == std::wstring_view(L"/"));
+static_assert(HalfShapeForAscii(L'`') == std::wstring_view(L"·"));
+static_assert(HalfShapeForAscii(L'$') == std::wstring_view(L"\u00A5"));
+static_assert(HalfShapeForAscii(L'[') == std::wstring_view(L"【"));
+static_assert(HalfShapeForAscii(L'^') == std::wstring_view(L"……"));
 
 // Rime's stock Windows key bindings use PageUp/PageDown as well as the
 // unshifted -/= keys.  Keep those aliases in the TSF sink so a key that the
@@ -1085,7 +1088,7 @@ std::wstring TextService::ChinesePunctuationText(WPARAM key) {
     double_quote_open_ = !double_quote_open_;
     return std::wstring(1, quote);
   }
-  const std::wstring_view mapped = FullShapeForAscii(value);
+  const std::wstring_view mapped = HalfShapeForAscii(value);
   return mapped.empty() ? std::wstring() : std::wstring(mapped);
 }
 bool TextService::IsImeKey(WPARAM key) const {
