@@ -1,4 +1,4 @@
-# Windows TSF 适配层（Phase 2）
+# Windows TSF 适配层
 
 这是 Windows 10 22H2+ x64 的 C++ TSF text service。输入路径包含 COM/TSF 生命周期、宿主文本框中的未确认组合串 preedit、光标前文读取、Rust Named Pipe v1 客户端、原生候选 popup、分页/选择/提交，以及连接失败时的英文/数字/标点透传。实时输入路径不依赖 Tauri 管理窗口。
 
@@ -17,8 +17,8 @@ TSF 根据服务状态中的 `rime_schema` 处理输入；通用方案路径按 
 在 Windows Developer PowerShell 中：
 
 ```powershell
-cmake -S platform/windows/tsf -B build/tsf -A x64
-cmake --build build/tsf --config Release
+cmake -S platform/windows/tsf -B out/windows-x64/cmake/tsf -A x64
+cmake --build out/windows-x64/cmake/tsf --config Release
 ```
 
 非 Windows 主机上配置会明确失败；本目录不携带 SDK、librime 或任何预编译二进制。
@@ -33,6 +33,6 @@ TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使�
 
 中文模式下的独立标点（空格除外）即使没有现有拼音组合串，也会建立并立即结束一个短生命周期 TSF composition；独立空格同样复用该生命周期但写入半角 U+0020。不在按键回调中直接调用 `ITfInsertAtSelection` 修改宿主 selection，避免 Chromium/WebView2 等文本上下文的重入崩溃。
 
-候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；异步取消完成前继续吞键，避免按键进入宿主文本。
+候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；取消完成前继续吞键，避免按键进入宿主文本。
 
 若构建环境暂时没有 `third_party/weasel-ui`，可用 `-DLIME_WITH_WEASEL_UI=OFF` 构建内置回退窗口；发布构建默认启用 WeaselUI。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。

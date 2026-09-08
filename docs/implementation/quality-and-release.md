@@ -1,45 +1,9 @@
 # 验证与发布
 
-## 本地验证层级
+CI 覆盖 Rust workspace（包括 `lime-ipc`、`lime-core` 和 `lime-service`）的格式、检查、Clippy 和单元测试；`contracts/` 中的 JSON schema examples；以及管理窗口的前端构建和 `crates/lime-tauri` 独立 crate 检查。
 
-1. 文档/配置：schema 校验、默认值和迁移测试。
-2. Rust 核心：单元测试、Rime smoke test、llama.cpp 评分回归、IPC 协议测试。
-3. Windows：TSF 注册、前文读取、候选定位、提交、断线透传和高 DPI 测试。
-4. 安装：管理员许可安装 TSF、升级保留用户数据、卸载清理。
+输入链路是同步的：服务在一次请求中完成 Rime 召回和可用的 LLM 排序后返回最终候选。并发请求在返回前检查 generation，旧结果不得覆盖较新的输入。
 
-## 回归重点
+Windows 发布还需验证固定第三方源码 commit、llama.cpp patch marker、CPU/CUDA runtime 必需 DLL、TSF Release 构建和 NSIS 安装包 SHA-256。发布脚本将所有中间文件和产物写入 `out/`，不会使用仓库根目录的 `target/` 或 `build/` 作为发布输入输出。
 
-- Rime 候选顺序在 LLM 关闭时完全保持。
-- LLM 只对前 `llm_rerank_count` 项评分，前 `llm_effective_count` 项置顶。
-- 重复/越界/非法 LLM 索引不会丢失合法 Rime 候选。
-- 旧请求不会覆盖新输入。
-- 前文获取失败仍可中文输入，但按空上下文处理。
-- Rust 服务不可用时只透传英文/数字/标点。
-- 默认日志不包含原始输入。
-- Windows 发布校验必须确认 `llama/cuda/` 与 `llama/cpu/` 两套 DLL 均存在；CUDA 默认路径
-  需要在具备 NVIDIA 驱动和设备的 runner 上执行真实 GGUF logits smoke test，CPU fallback
-  需要在无 CUDA 设备的 runner 上执行同一测试。
-
-## GitHub Actions
-
-- 普通 push/PR：格式化、静态检查、单元测试、协议/schema 检查。
-- `vMAJOR.MINOR.PATCH` tag：Windows x64 构建、打包、产物校验、Release 草稿。
-- GGUF、用户词库和大型 Rime 构建产物不进入 Git；Action 使用固定版本资源或缓存。
-
-Phase 0 已落地的门禁入口：
-
-- 根 workspace：`cargo fmt --all -- --check`、`cargo check --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`。
-- IPC/config/error schema：CI 使用 `ajv-cli` 校验默认配置、请求/响应示例和错误码目录。
-- Tauri 管理窗口：`npm --prefix frontend run build`，再由 `src-tauri` 执行 Tauri 构建（平台依赖准备好后启用）。
-- Windows TSF：`cmake -S platform/windows/tsf -B build/tsf -A x64` 与 Release 构建。
-
-Phase 4 发布工作流位于 `.github/workflows/release.yml`：推送 `vMAJOR.MINOR.PATCH`
-tag 后复用 `tools/release/build-windows.ps1` 生成当前用户 NSIS 安装器，并上传安装器与
-SHA-256 校验文件到 GitHub Release 草稿。NSIS 使用 ZLIB 压缩，以较小的安装包体积增幅
-换取 CUDA runtime 大型 DLL 的更快解压安装。
-
-## 版本
-
-- SemVer。
-- Conventional Commits。
-- 破坏性协议或用户数据变更必须升级 major，并更新迁移说明。
+具体命令见 [构建与发布](../reference/build-and-release.md)。

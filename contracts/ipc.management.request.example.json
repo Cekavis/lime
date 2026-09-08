@@ -1,0 +1,4 @@
+{
+  "kind": "get_dictionary_page",
+  "payload": { "page": 1, "page_size": 100 }
+}

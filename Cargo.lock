@@ -82,6 +82,7 @@ dependencies = [
 name = "lime-core"
 version = "0.1.0"
 dependencies = [
+ "lime-ipc",
  "lime-protocol",
  "llama-cpp-sys-v3",
  "llama-cpp-v3",
@@ -91,11 +92,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lime-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lime-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lime-service"
+version = "0.1.0"
+dependencies = [
+ "lime-core",
+ "lime-ipc",
+ "lime-protocol",
 ]
 
 [[package]]

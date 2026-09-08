@@ -1,0 +1,51 @@
+// IPC request and response envelopes.
+
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, ErrorCode, HandshakeRequest,
+    HandshakeResponse, InputHistoryPage, InputRequest, InputResponse, ModelPreset, ServiceStatus,
+};
+
+/// Requests supported by the local service contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+pub enum Request {
+    Handshake(HandshakeRequest),
+    Input(InputRequest),
+    GetConfig,
+    SetConfig(Config),
+    GetStatus,
+    LoadModel { path: String },
+    UnloadModel,
+    ListModelPresets,
+    SaveModelPreset { name: String, path: String },
+    DeleteModelPreset { name: String },
+    SelectModelPreset { name: String },
+    Learn { pinyin: String, text: String },
+    ExportDictionary,
+    GetDictionaryPage { page: u32, page_size: u32 },
+    ImportDictionary { entries: Vec<DictionaryEntry> },
+    ClearDictionary,
+    GetInputHistoryPage { page: u32, page_size: u32 },
+    WaitForInputHistory { revision: u64 },
+    ClearInputHistory,
+}
+
+/// Responses supported by the local service contract.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+pub enum Response {
+    Handshake(HandshakeResponse),
+    Input(InputResponse),
+    Config(ConfigSnapshot),
+    Status(ServiceStatus),
+    ModelPresets(Vec<ModelPreset>),
+    ModelPreset(ModelPreset),
+    Dictionary(Vec<DictionaryEntry>),
+    DictionaryPage(DictionaryPage),
+    InputHistoryPage(InputHistoryPage),
+    InputHistoryRevision(u64),
+    Accepted,
+    Error { code: ErrorCode },
+}

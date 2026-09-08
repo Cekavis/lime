@@ -1,0 +1,14 @@
+{
+  "runtime": "llama.cpp",
+  "version": "b10743",
+  "source_commit": "8887a48f050554f0ee59f56753860c061836b02d",
+  "source": {
+    "url": "https://codeload.github.com/ggml-org/llama.cpp/zip/8887a48f050554f0ee59f56753860c061836b02d",
+    "sha256": "2fef0f28751e059f71ee18bab58944c0832608680df049122d3a195efb917a0d"
+  },
+  "patch": {
+    "file": "output-reorder.patch",
+    "sha256": "4b3a3b623ae48341390acd1a446114fae61df7ec0312852c34431466bcb45d41"
+  },
+  "notes": "Build the patched llama.dll from this exact source commit and patch. Keep ggml backend DLLs from the matching official b10743 runtime bundle; do not commit generated binaries."
+}

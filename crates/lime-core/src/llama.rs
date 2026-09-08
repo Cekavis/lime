@@ -151,7 +151,7 @@ impl Drop for GpuSamplerSet {
 }
 
 unsafe extern "C" fn gpu_sampler_name(_: *const llama_sampler) -> *const std::ffi::c_char {
-    b"lime-gpu-logprob\0".as_ptr() as *const std::ffi::c_char
+    c"lime-gpu-logprob".as_ptr()
 }
 unsafe extern "C" fn gpu_sampler_apply(_: *mut llama_sampler, _: *mut std::ffi::c_void) {}
 unsafe extern "C" fn gpu_sampler_accept(_: *mut llama_sampler, _: llama_token) {}
@@ -1023,6 +1023,7 @@ struct CandidatePlan {
     mismatch: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_batch(
     backend: &LlamaBackend,
     model: &LlamaModel,
@@ -1694,6 +1695,6 @@ mod tests {
         assert_eq!(scores.len(), candidates.len());
         assert!(scores
             .iter()
-            .all(|score| { score.logprob.is_finite() && score.token_logprobs.len() > 0 }));
+            .all(|score| { score.logprob.is_finite() && !score.token_logprobs.is_empty() }));
     }
 }

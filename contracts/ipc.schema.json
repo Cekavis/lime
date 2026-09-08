@@ -1,0 +1,1283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lime.invalid/schemas/ipc.schema.json",
+  "title": "Lime IPC messages",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/handshake_request"
+    },
+    {
+      "$ref": "#/$defs/handshake_response"
+    },
+    {
+      "$ref": "#/$defs/input_request"
+    },
+    {
+      "$ref": "#/$defs/input_response"
+    },
+    {
+      "$ref": "#/$defs/management_request"
+    },
+    {
+      "$ref": "#/$defs/management_response"
+    }
+  ],
+  "$defs": {
+    "input_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "preedit",
+        "preceding_text",
+        "context_available",
+        "config_revision"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preedit": {
+          "type": "string"
+        },
+        "preceding_text": {
+          "type": "string"
+        },
+        "context_available": {
+          "type": "boolean"
+        },
+        "config_revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "input_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "candidates",
+        "context_used",
+        "service_state",
+        "diagnostics"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidate"
+          }
+        },
+        "context_used": {
+          "type": "boolean"
+        },
+        "service_state": {
+          "enum": [
+            "ready",
+            "rime_only",
+            "reloading",
+            "unavailable"
+          ]
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidate_diagnostic"
+          }
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "display_text",
+        "commit_text"
+      ],
+      "properties": {
+        "display_text": {
+          "type": "string"
+        },
+        "commit_text": {
+          "type": "string"
+        }
+      }
+    },
+    "candidate_diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rank",
+        "rime_candidate",
+        "llm_candidate",
+        "logprob",
+        "logprobs",
+        "mismatch",
+        "display_candidate"
+      ],
+      "properties": {
+        "rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rime_candidate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/candidate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "llm_candidate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/candidate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logprob": {
+          "type": "number"
+        },
+        "logprobs": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "mismatch": {
+          "type": "boolean"
+        },
+        "display_candidate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/candidate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "llm_performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_ms",
+        "tokenize_ms",
+        "decode_ms",
+        "logits_ms",
+        "candidate_count",
+        "scored_count",
+        "target_token_count",
+        "batch_count",
+        "mismatch_count",
+        "context_token_count",
+        "decode_input_token_count",
+        "logits_output_count"
+      ],
+      "properties": {
+        "total_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokenize_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decode_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "logits_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidate_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scored_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target_token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "batch_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mismatch_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decode_input_token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "logits_output_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "input_history_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "timestamp_ms",
+        "preceding_text",
+        "preedit",
+        "rime_candidates",
+        "final_candidates",
+        "service_state",
+        "diagnostics"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timestamp_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_to_end_duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preceding_text": {
+          "type": "string"
+        },
+        "preedit": {
+          "type": "string"
+        },
+        "rime_candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidate"
+          }
+        },
+        "final_candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidate"
+          }
+        },
+        "service_state": {
+          "enum": [
+            "ready",
+            "rime_only",
+            "reloading",
+            "unavailable"
+          ]
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rime_duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidate_diagnostic"
+          }
+        },
+        "llm_performance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/llm_performance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "input_history_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "total",
+        "page",
+        "page_size"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/input_history_entry"
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "dictionary_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "total",
+        "page",
+        "page_size"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dictionary_entry"
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "dictionary_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pinyin",
+        "text",
+        "weight"
+      ],
+      "properties": {
+        "pinyin": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "weight": {
+          "type": "integer"
+        }
+      }
+    },
+    "model_preset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "path",
+        "size_bytes",
+        "sha256",
+        "loaded"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loaded": {
+          "type": "boolean"
+        }
+      }
+    },
+    "model_memory_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compute_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backend": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "breakdown": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "model_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256",
+        "loaded"
+      ],
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loaded": {
+          "type": "boolean"
+        },
+        "initialization_memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/model_memory_info"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "management_request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get_config"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get_status"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "unload_model"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "list_model_presets"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "export_dictionary"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "clear_dictionary"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "clear_input_history"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "set_config"
+            },
+            "payload": {
+              "$ref": "#/$defs/config"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "load_model"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "save_model_preset"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "path"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "delete_model_preset"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "select_model_preset"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "learn"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "pinyin",
+                "text"
+              ],
+              "properties": {
+                "pinyin": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get_dictionary_page"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "page",
+                "page_size"
+              ],
+              "properties": {
+                "page": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "page_size": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "import_dictionary"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entries"
+              ],
+              "properties": {
+                "entries": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/dictionary_entry"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get_input_history_page"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "page",
+                "page_size"
+              ],
+              "properties": {
+                "page": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "page_size": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "wait_for_input_history"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "revision"
+              ],
+              "properties": {
+                "revision": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "management_response": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "accepted"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "config"
+            },
+            "payload": {
+              "$ref": "#/$defs/config_snapshot"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "status"
+            },
+            "payload": {
+              "$ref": "#/$defs/service_status"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "model_presets"
+            },
+            "payload": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/model_preset"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "model_preset"
+            },
+            "payload": {
+              "$ref": "#/$defs/model_preset"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "dictionary"
+            },
+            "payload": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/dictionary_entry"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "dictionary_page"
+            },
+            "payload": {
+              "$ref": "#/$defs/dictionary_page"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "input_history_page"
+            },
+            "payload": {
+              "$ref": "#/$defs/input_history_page"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "input_history_revision"
+            },
+            "payload": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "error"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code"
+              ],
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/error_code"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rime_schema",
+        "preceding_text_char_limit",
+        "context_preview_char_limit",
+        "page_size",
+        "llm_rerank_count",
+        "llm_effective_count",
+        "llm_context_token_limit",
+        "llm_backend"
+      ],
+      "properties": {
+        "rime_schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "preceding_text_char_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "context_preview_char_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "llm_rerank_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "llm_effective_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "llm_context_token_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "llm_backend": {
+          "enum": [
+            "cuda",
+            "cpu"
+          ]
+        }
+      }
+    },
+    "config_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "config"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "config": {
+          "$ref": "#/$defs/config"
+        }
+      }
+    },
+    "service_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "config",
+        "model"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "ready",
+            "rime_only",
+            "reloading",
+            "unavailable"
+          ]
+        },
+        "config": {
+          "$ref": "#/$defs/config_snapshot"
+        },
+        "model": {
+          "$ref": "#/$defs/model_info"
+        }
+      }
+    },
+    "error_code": {
+      "enum": [
+        "invalid_request",
+        "protocol_version_mismatch",
+        "config_validation_failed",
+        "service_unavailable",
+        "rime_initialization_failed",
+        "model_load_failed",
+        "model_not_found",
+        "ipc_transport_failed",
+        "request_cancelled",
+        "internal"
+      ]
+    },
+    "handshake_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version"
+      ],
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "handshake_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "accepted"
+      ],
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/error_code"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

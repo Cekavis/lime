@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "crates/lime-protocol",
+    "crates/lime-ipc",
     "crates/lime-core",
+    "crates/lime-service",
     "third_party/llama-cpp-sys-v3",
     "third_party/llama-cpp-v3",
 ]

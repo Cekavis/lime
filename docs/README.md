@@ -1,36 +1,17 @@
-# Lime 文档总览
+# Lime 文档
 
-本目录是 Lime 的设计与实现文档统一入口。文档按“设计约束—实现计划—决策记录”组织。
-
-## 设计
-
-1. [架构设计](design/architecture.md)：进程、模块、平台边界和生命周期。
-2. [IPC 与数据契约](design/ipc.md)：本机通信、最小消息和错误行为。
-3. [候选与 LLM 排序](design/ranking.md)：Rime 召回、llama.cpp 评分和候选合并。
-4. [配置与数据目录](design/configuration.md)：设置、模型、Rime 用户数据和日志。
-5. [UI 与 Design Tokens](design/ui.md)：Tauri 管理界面、原生候选窗口和 token 规则。
-6. [WeaselUI 候选窗口与主题迁移](design/weasel-ui-integration.md)：WeaselUI 集成边界、前文显示、主题覆盖和 GPL 分发要求。
-
-契约的机器可读版本位于仓库根目录 [`schemas/`](../schemas/)。
-
-## 实现
-
-- [实现计划](implementation/roadmap.md)
+- [项目状态](status.md)
+- [架构设计](design/architecture.md)
+- [IPC 与数据契约](design/ipc.md)
+- [候选与排序](design/ranking.md)
+- [配置与数据目录](design/configuration.md)
+- [管理界面设计](design/ui.md)
+- [WeaselUI 集成](design/weasel-ui-integration.md)
 - [验证与发布](implementation/quality-and-release.md)
-- [Phase 0 实现记录](implementation/phase-0.md)
-- [Phase 1 实现记录](implementation/phase-1.md)
-- [Phase 2 实现记录](implementation/phase-2.md)
-- [Phase 3 实现记录](implementation/phase-3.md)
-- [Phase 4 实现记录](implementation/phase-4.md)
-- [Phase 4 验收矩阵](implementation/phase-4-acceptance.md)
-- [归档资产边界](implementation/experimental-assets.md)
+- [构建与发布](reference/build-and-release.md)
+- [机器可读契约](../contracts/README.md)
+- [Tauri 管理窗口](../crates/lime-tauri/README.md)
+- [Windows TSF](../platform/windows/tsf/README.md)
+- [第三方资源](../third_party/README.md)
 
-## 决策
-
-- [决策记录](decisions/decision-log.md)
-
-## 文档规则
-
-- 行为、字段、默认值或平台范围发生变化时，必须同步更新相关文档。
-- 每次代码变更在 PR/commit 描述中引用受影响的文档路径。
-- 未决问题集中放在决策记录的“待确认”小节，不散落在实现文档中。
+设计文档描述当前实现和明确的未来边界；项目状态集中在 [status.md](status.md)。

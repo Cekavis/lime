@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "name": "示例模型",
+      "path": "C:\\Models\\lime.gguf",
+      "size_bytes": 123456789,
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "loaded": false
+    }
+  ],
+  "active_model_path": "C:\\Models\\lime.gguf"
+}

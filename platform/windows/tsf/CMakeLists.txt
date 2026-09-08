@@ -30,8 +30,18 @@ set_target_properties(lime_tsf PROPERTIES OUTPUT_NAME "lime-tsf")
 target_link_libraries(lime_tsf PRIVATE ole32 advapi32 user32 shlwapi)
 
 if (LIME_WITH_WEASEL_UI AND EXISTS "${LIME_WEASEL_UI_DIR}/src/WeaselUI.cpp")
-  file(GLOB LIME_WEASEL_UI_SOURCES CONFIGURE_DEPENDS
-       "${LIME_WEASEL_UI_DIR}/src/*.cpp")
+  set(LIME_WEASEL_UI_SOURCES
+      "${LIME_WEASEL_UI_DIR}/src/DirectWriteResources.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/FullScreenLayout.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/GdiplusBlur.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/HorizontalLayout.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/Layout.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/StandardLayout.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/VerticalLayout.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/VHorizontalLayout.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/WeaselPanel.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/WeaselUI.cpp"
+      "${LIME_WEASEL_UI_DIR}/src/stdafx.cpp")
   add_library(lime_weasel_ui STATIC ${LIME_WEASEL_UI_SOURCES})
   target_compile_features(lime_weasel_ui PRIVATE cxx_std_20)
   target_compile_definitions(lime_weasel_ui PRIVATE

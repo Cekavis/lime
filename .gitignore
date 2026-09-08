@@ -1,10 +1,10 @@
 # Rust / Tauri build output
 target/
-src-tauri/target/
-src-tauri/gen/
-src-tauri/icons/
+crates/lime-tauri/target/
+crates/lime-tauri/gen/
 dist/
 build/
+out/
 frontend/node_modules/
 
 # Local models and native runtime binaries
@@ -42,15 +42,13 @@ logs/
 
 /_archive
 /tools/*
-!/tools/release/
-!/tools/release/build-windows.ps1
-!/tools/release/prepare-rime-runtime.ps1
-!/tools/release/prepare-llama-runtime.ps1
+!/tools/*.ps1
+!/tools/*.psm1
 
 # Large upstream Rime text assets are fetched and verified by the release scripts.
 # Keep only the project-facing documentation, license, and Weasel theme in Git.
-resources/rime/*
-!resources/rime/.gitkeep
-!resources/rime/README.md
-!resources/rime/LICENSE
-!resources/rime/weasel.yaml
+third_party/rime/*
+!third_party/rime/README.md
+!third_party/rime/LICENSE
+!third_party/rime/weasel.yaml
+!third_party/rime/librime-1.17.0.json

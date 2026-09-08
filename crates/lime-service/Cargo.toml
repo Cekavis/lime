@@ -1,0 +1,12 @@
+[package]
+name = "lime-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Lime local service process and platform listeners"
+
+[dependencies]
+lime-core = { path = "../lime-core" }
+lime-ipc = { path = "../lime-ipc" }
+lime-protocol = { path = "../lime-protocol" }

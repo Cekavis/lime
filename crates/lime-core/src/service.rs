@@ -4,15 +4,16 @@ use crate::{
     logging::PrivacyLogger,
     ranking::{try_rerank_selected_candidates_with_preedit, GenerationTracker, LlamaRuntime},
 };
+mod history;
+mod persistence;
 use lime_protocol::{
     CandidateDiagnostic, ConfigSnapshot, DictionaryPage, ErrorCode, InputHistoryEntry,
     InputHistoryPage, InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelMemoryInfo,
     ModelPreset, Request, Response, ServiceState, ServiceStatus, DICTIONARY_PAGE_SIZE,
-    INPUT_HISTORY_PAGE_SIZE,
 };
 use llama_cpp_v3::BackendPreference;
+pub(crate) use persistence::{load_config, load_model_state};
 use std::{
-    cmp::Reverse,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
@@ -23,12 +24,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const CONFIG_FILE_VERSION: u32 = 1;
-/// Version two adds `active_model_path`, which records the last successfully activated model.
-/// Version one remains readable so existing installations keep their saved presets.
-const MODEL_PRESETS_FILE_VERSION: u32 = 2;
-const LEGACY_MODEL_PRESETS_FILE_VERSION: u32 = 1;
-
 fn backend_preference_for(value: &str) -> BackendPreference {
     match value {
         "cpu" => BackendPreference::Cpu,
@@ -37,48 +32,6 @@ fn backend_preference_for(value: &str) -> BackendPreference {
         // still allowing the runtime's documented CPU fallback.
         _ => BackendPreference::Cuda,
     }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum PersistedConfig {
-    Versioned {
-        version: u32,
-        config: lime_protocol::Config,
-    },
-    Legacy(lime_protocol::Config),
-}
-
-#[derive(serde::Serialize)]
-struct VersionedConfig<'a> {
-    version: u32,
-    config: &'a lime_protocol::Config,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum PersistedModelPresets {
-    Versioned {
-        version: u32,
-        presets: Vec<ModelPreset>,
-        #[serde(default)]
-        active_model_path: Option<String>,
-    },
-    Legacy(Vec<ModelPreset>),
-}
-
-#[derive(serde::Serialize)]
-struct VersionedModelPresets<'a> {
-    version: u32,
-    presets: &'a [ModelPreset],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active_model_path: Option<&'a str>,
-}
-
-#[derive(Default)]
-struct LoadedModelPresets {
-    presets: Vec<ModelPreset>,
-    active_model_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -98,6 +51,18 @@ pub struct CoreService {
     /// `ModelPreset::loaded`, which is a runtime-only status bit exposed to clients.
     active_model_path: Arc<Mutex<Option<String>>>,
     model_loading: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct InputHistoryRecord<'a> {
+    request: &'a InputRequest,
+    rime_candidates: Vec<lime_protocol::Candidate>,
+    final_candidates: Vec<lime_protocol::Candidate>,
+    diagnostics: Vec<CandidateDiagnostic>,
+    service_state: ServiceState,
+    model_name: Option<String>,
+    rime_duration_ms: Option<u64>,
+    llm_performance: Option<LlmPerformance>,
+    end_to_end_duration_ms: Option<u64>,
 }
 
 impl Default for CoreService {
@@ -363,15 +328,6 @@ impl CoreService {
                 Ok(()) => Response::Accepted,
                 Err(error) => Response::Error { code: error.code },
             },
-            // Keep the legacy response bounded for older management clients. New clients should
-            // use GetInputHistoryPage, but an unbounded compatibility response can itself exceed
-            // the IPC frame limit after a long-running service accumulates history.
-            Request::GetInputHistory => Response::InputHistory(
-                self.history_snapshot()
-                    .into_iter()
-                    .take(INPUT_HISTORY_PAGE_SIZE as usize)
-                    .collect(),
-            ),
             Request::GetInputHistoryPage { page, page_size } => {
                 Response::InputHistoryPage(self.history_page(page, page_size))
             }
@@ -390,24 +346,23 @@ impl CoreService {
         let input_started = Instant::now();
         let snapshot = self.config_snapshot();
         if request.config_revision != snapshot.revision {
-            self.record_input_history(
-                &request,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                self.current_service_state(),
-                None,
-                None,
-                None,
-                Some(elapsed_ms(input_started.elapsed())),
-            );
+            self.record_input_history(InputHistoryRecord {
+                request: &request,
+                rime_candidates: Vec::new(),
+                final_candidates: Vec::new(),
+                diagnostics: Vec::new(),
+                service_state: self.current_service_state(),
+                model_name: None,
+                rime_duration_ms: None,
+                llm_performance: None,
+                end_to_end_duration_ms: Some(elapsed_ms(input_started.elapsed())),
+            });
             return Err(ErrorCode::RequestCancelled);
         }
         let generation = self.generation.next();
         let config = snapshot.config;
         let model = self.model.lock().map_err(|_| ErrorCode::Internal)?;
-        // The management UI no longer exposes an "enable local reranking" switch. Keep the
-        // legacy config field on the wire for older clients, but a loaded model is always active.
+        // A loaded model is active; model absence selects the Rime-only path.
         let runtime = model.as_ref();
         let service_state = if model.is_some() {
             ServiceState::Ready
@@ -431,17 +386,17 @@ impl CoreService {
         let rime_batch = match rime_result {
             Ok(batch) => batch,
             Err(code) => {
-                self.record_input_history(
-                    &request,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
+                self.record_input_history(InputHistoryRecord {
+                    request: &request,
+                    rime_candidates: Vec::new(),
+                    final_candidates: Vec::new(),
+                    diagnostics: Vec::new(),
                     service_state,
-                    model_name.clone(),
+                    model_name: model_name.clone(),
                     rime_duration_ms,
-                    None,
-                    Some(elapsed_ms(input_started.elapsed())),
-                );
+                    llm_performance: None,
+                    end_to_end_duration_ms: Some(elapsed_ms(input_started.elapsed())),
+                });
                 return Err(code);
             }
         };
@@ -470,17 +425,17 @@ impl CoreService {
         let llm_performance = ranking.llm_performance.clone();
         let candidates = ranking.result.candidates;
         let diagnostics = ranking.result.diagnostics;
-        self.record_input_history(
-            &request,
+        self.record_input_history(InputHistoryRecord {
+            request: &request,
             rime_candidates,
-            candidates.clone(),
-            diagnostics.clone(),
+            final_candidates: candidates.clone(),
+            diagnostics: diagnostics.clone(),
             service_state,
             model_name,
             rime_duration_ms,
             llm_performance,
-            Some(elapsed_ms(input_started.elapsed())),
-        );
+            end_to_end_duration_ms: Some(elapsed_ms(input_started.elapsed())),
+        });
         if !self.generation.is_current(generation) {
             return Err(ErrorCode::RequestCancelled);
         }
@@ -842,35 +797,12 @@ impl CoreService {
         )
     }
 
-    fn history_snapshot(&self) -> Vec<InputHistoryEntry> {
-        let mut entries = self.history.lock().expect("history mutex poisoned").clone();
-        // Newest first. `request_id` remains a wire-compatibility field, but never participates
-        // in history ordering.
-        entries.sort_by_key(|entry| Reverse(entry.timestamp_ms));
-        entries
-    }
-
     fn history_page(&self, page: u32, page_size: u32) -> InputHistoryPage {
-        let entries = self.history_snapshot();
-        let total = entries.len() as u64;
-        let page = page.max(1);
-        let page_size = if page_size == 0 {
-            INPUT_HISTORY_PAGE_SIZE
-        } else {
-            page_size.clamp(1, INPUT_HISTORY_PAGE_SIZE)
-        };
-        let start = (u64::from(page - 1) * u64::from(page_size)) as usize;
-        let items = entries
-            .into_iter()
-            .skip(start)
-            .take(page_size as usize)
-            .collect();
-        InputHistoryPage {
-            items,
-            total,
+        history::page(
+            &self.history.lock().expect("history mutex poisoned"),
             page,
             page_size,
-        }
+        )
     }
 
     fn dictionary_page(
@@ -923,18 +855,18 @@ impl CoreService {
         changed.notify_all();
     }
 
-    fn record_input_history(
-        &self,
-        request: &InputRequest,
-        rime_candidates: Vec<lime_protocol::Candidate>,
-        final_candidates: Vec<lime_protocol::Candidate>,
-        diagnostics: Vec<CandidateDiagnostic>,
-        service_state: ServiceState,
-        model_name: Option<String>,
-        rime_duration_ms: Option<u64>,
-        llm_performance: Option<LlmPerformance>,
-        end_to_end_duration_ms: Option<u64>,
-    ) {
+    fn record_input_history(&self, record: InputHistoryRecord<'_>) {
+        let InputHistoryRecord {
+            request,
+            rime_candidates,
+            final_candidates,
+            diagnostics,
+            service_state,
+            model_name,
+            rime_duration_ms,
+            llm_performance,
+            end_to_end_duration_ms,
+        } = record;
         let timestamp_ms = self.next_timestamp_ms();
         self.history
             .lock()
@@ -977,114 +909,21 @@ impl CoreService {
         &self,
         presets: &BTreeMap<String, ModelPreset>,
     ) -> Result<(), std::io::Error> {
-        let Some(dir) = &self.data_dir else {
-            return Ok(());
-        };
-        fs::create_dir_all(dir)?;
-        let target = dir.join("model-presets.json");
-        let temp = dir.join("model-presets.json.tmp");
-        let values = presets.values().cloned().collect::<Vec<_>>();
         let active_model_path = self
             .active_model_path
             .lock()
             .map_err(|_| std::io::Error::other("active model mutex poisoned"))?
             .clone();
-        let bytes = serde_json::to_vec_pretty(&VersionedModelPresets {
-            version: MODEL_PRESETS_FILE_VERSION,
-            presets: &values,
-            active_model_path: active_model_path.as_deref(),
-        })
-        .map_err(std::io::Error::other)?;
-        fs::write(&temp, bytes)?;
-        match fs::rename(&temp, &target) {
-            Ok(()) => Ok(()),
-            Err(_error) if target.exists() => {
-                // Windows does not replace an existing file with rename(2).  Remove only the
-                // exact managed target, then complete the atomic-ish temp-file replacement.
-                fs::remove_file(&target)?;
-                fs::rename(temp, target)
-            }
-            Err(error) => Err(error),
-        }
+        persistence::persist_model_state(
+            self.data_dir.as_deref(),
+            presets,
+            active_model_path.as_deref(),
+        )
     }
 
     fn persist_config(&self, config: &lime_protocol::Config) -> Result<(), std::io::Error> {
-        let Some(dir) = &self.data_dir else {
-            return Ok(());
-        };
-        fs::create_dir_all(dir)?;
-        let target = dir.join("config.json");
-        let temp = dir.join("config.json.tmp");
-        let bytes = serde_json::to_vec_pretty(&VersionedConfig {
-            version: CONFIG_FILE_VERSION,
-            config,
-        })
-        .map_err(std::io::Error::other)?;
-        fs::write(&temp, bytes)?;
-        fs::rename(temp, target)
+        persistence::persist_config(self.data_dir.as_deref(), config)
     }
-}
-
-fn load_config(path: &Path) -> Option<lime_protocol::Config> {
-    let bytes = fs::read(path.join("config.json")).ok()?;
-    match serde_json::from_slice::<PersistedConfig>(&bytes).ok()? {
-        PersistedConfig::Versioned { version, config } if version == CONFIG_FILE_VERSION => {
-            Some(migrate_persisted_config(config))
-        }
-        PersistedConfig::Versioned { .. } => None,
-        PersistedConfig::Legacy(config) => Some(migrate_persisted_config(config)),
-    }
-}
-
-/// Normalize backend names written by pre-CUDA builds before validating the rest of the
-/// persisted configuration.  In particular, an older `auto` value means "prefer acceleration"
-/// and must become the new CUDA default without discarding unrelated user settings.
-fn migrate_persisted_config(mut config: lime_protocol::Config) -> lime_protocol::Config {
-    match config.llm_backend.trim().to_ascii_lowercase().as_str() {
-        "" | "auto" | "default" | "cuda" => {
-            config.llm_backend = lime_protocol::DEFAULT_LLM_BACKEND.to_owned();
-        }
-        "cpu" => {
-            config.llm_backend = "cpu".to_owned();
-        }
-        _ => {}
-    }
-    config
-}
-
-fn load_model_state(path: &Path) -> Option<LoadedModelPresets> {
-    let bytes = fs::read(path.join("model-presets.json")).ok()?;
-    match serde_json::from_slice::<PersistedModelPresets>(&bytes).ok()? {
-        PersistedModelPresets::Versioned {
-            version,
-            presets,
-            active_model_path,
-        } if version == MODEL_PRESETS_FILE_VERSION
-            || version == LEGACY_MODEL_PRESETS_FILE_VERSION =>
-        {
-            Some(LoadedModelPresets {
-                active_model_path: active_model_path
-                    .filter(|path| !path.is_empty())
-                    .or_else(|| infer_active_model_path(&presets)),
-                presets,
-            })
-        }
-        PersistedModelPresets::Versioned { .. } => None,
-        PersistedModelPresets::Legacy(presets) => Some(LoadedModelPresets {
-            active_model_path: infer_active_model_path(&presets),
-            presets,
-        }),
-    }
-}
-
-/// Older files only persisted the runtime `loaded` bit.  Use it as a one-time
-/// migration hint when no explicit active path exists, then clear it while the
-/// service is being constructed so it never masquerades as live state.
-fn infer_active_model_path(presets: &[ModelPreset]) -> Option<String> {
-    presets
-        .iter()
-        .find(|preset| preset.loaded && !preset.path.is_empty())
-        .map(|preset| preset.path.clone())
 }
 
 fn now_unix_ms() -> u64 {
@@ -1158,34 +997,9 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().skip(count - limit).collect()
 }
 
-pub mod framing {
-    use std::io::{self, Read, Write};
-    pub fn read_json<R: Read, T: serde::de::DeserializeOwned>(reader: &mut R) -> io::Result<T> {
-        let mut len = [0; 4];
-        reader.read_exact(&mut len)?;
-        let length = u32::from_le_bytes(len) as usize;
-        if length > 16 * 1024 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "IPC frame too large",
-            ));
-        }
-        let mut bytes = vec![0; length];
-        reader.read_exact(&mut bytes)?;
-        serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    }
-    pub fn write_json<W: Write, T: serde::Serialize>(writer: &mut W, value: &T) -> io::Result<()> {
-        let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
-        let length = u32::try_from(bytes.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "IPC frame too large"))?;
-        writer.write_all(&length.to_le_bytes())?;
-        writer.write_all(&bytes)?;
-        writer.flush()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::persistence::{VersionedModelPresets, MODEL_PRESETS_FILE_VERSION};
     use super::*;
     use lime_protocol::Config;
 
@@ -1209,15 +1023,17 @@ mod tests {
                 code: ErrorCode::RimeInitializationFailed
             }
         );
-        match service.handle(Request::GetInputHistory) {
-            Response::InputHistory(history) => {
-                assert_eq!(history.len(), 1);
-                assert_eq!(history[0].preedit, "nihao");
-                assert!(history[0].rime_candidates.is_empty());
-                assert!(history[0].end_to_end_duration_ms.is_some());
-            }
-            _ => panic!("unexpected history response"),
-        }
+        let page = match service.handle(Request::GetInputHistoryPage {
+            page: 1,
+            page_size: 1,
+        }) {
+            Response::InputHistoryPage(page) => page,
+            other => panic!("unexpected history response: {other:?}"),
+        };
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].preedit, "nihao");
+        assert!(page.items[0].rime_candidates.is_empty());
+        assert!(page.items[0].end_to_end_duration_ms.is_some());
     }
 
     #[test]
@@ -1230,20 +1046,23 @@ mod tests {
             context_available: true,
             config_revision: 0,
         };
-        service.record_input_history(
-            &request,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            ServiceState::Ready,
-            Some("demo.gguf".into()),
-            Some(17),
-            None,
-            Some(23),
-        );
+        service.record_input_history(InputHistoryRecord {
+            request: &request,
+            rime_candidates: Vec::new(),
+            final_candidates: Vec::new(),
+            diagnostics: Vec::new(),
+            service_state: ServiceState::Ready,
+            model_name: Some("demo.gguf".into()),
+            rime_duration_ms: Some(17),
+            llm_performance: None,
+            end_to_end_duration_ms: Some(23),
+        });
 
-        let history = match service.handle(Request::GetInputHistory) {
-            Response::InputHistory(history) => history,
+        let history = match service.handle(Request::GetInputHistoryPage {
+            page: 1,
+            page_size: 100,
+        }) {
+            Response::InputHistoryPage(page) => page.items,
             other => panic!("unexpected history response: {other:?}"),
         };
         assert_eq!(history.len(), 1);
@@ -1278,7 +1097,7 @@ mod tests {
             other => panic!("unexpected history page response: {other:?}"),
         };
         assert_eq!(page.page, 1);
-        assert_eq!(page.page_size, INPUT_HISTORY_PAGE_SIZE);
+        assert_eq!(page.page_size, lime_protocol::INPUT_HISTORY_PAGE_SIZE);
         assert_eq!(page.total, 105);
         assert_eq!(page.items.len(), 100);
         assert_eq!(page.items[0].request_id, 105);
@@ -1288,21 +1107,13 @@ mod tests {
             .all(|rows| rows[0].timestamp_ms > rows[1].timestamp_ms));
         let second = match service.handle(Request::GetInputHistoryPage {
             page: 2,
-            page_size: INPUT_HISTORY_PAGE_SIZE,
+            page_size: lime_protocol::INPUT_HISTORY_PAGE_SIZE,
         }) {
             Response::InputHistoryPage(page) => page,
             other => panic!("unexpected history page response: {other:?}"),
         };
         assert_eq!(second.items.len(), 5);
         assert_eq!(second.items[0].request_id, 5);
-
-        match service.handle(Request::GetInputHistory) {
-            Response::InputHistory(history) => {
-                assert_eq!(history.len(), INPUT_HISTORY_PAGE_SIZE as usize);
-                assert_eq!(history[0].request_id, 105);
-            }
-            other => panic!("unexpected legacy history response: {other:?}"),
-        }
     }
 
     #[test]
@@ -1404,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn model_preset_state_persists_active_path_and_reads_legacy_formats() {
+    fn model_preset_state_persists_active_path_and_rejects_unknown_versions() {
         let directory = std::env::temp_dir().join(format!(
             "lime-core-model-state-test-{}-{}",
             std::process::id(),
@@ -1440,37 +1251,12 @@ mod tests {
         );
         assert_eq!(loaded.presets, vec![preset.clone()]);
 
-        // Version one had no active path.  A persisted `loaded` bit is used as
-        // a migration hint so an upgrade can still restore the previous model.
-        let mut legacy_preset = preset.clone();
-        legacy_preset.loaded = true;
-        let legacy_format = serde_json::json!({
-            "version": LEGACY_MODEL_PRESETS_FILE_VERSION,
-            "presets": [legacy_preset],
-        });
         fs::write(
             directory.join("model-presets.json"),
-            serde_json::to_vec(&legacy_format).unwrap(),
+            serde_json::to_vec(&serde_json::json!({ "version": 99, "presets": [] })).unwrap(),
         )
         .unwrap();
-        let loaded = load_model_state(&directory).expect("legacy model state should load");
-        assert_eq!(
-            loaded.active_model_path.as_deref(),
-            Some(preset.path.as_str())
-        );
-        assert!(loaded.presets[0].loaded);
-
-        // The original unversioned array remains readable as well.
-        fs::write(
-            directory.join("model-presets.json"),
-            serde_json::to_vec(&vec![legacy_preset]).unwrap(),
-        )
-        .unwrap();
-        let loaded = load_model_state(&directory).expect("unversioned state should load");
-        assert_eq!(
-            loaded.active_model_path.as_deref(),
-            Some(preset.path.as_str())
-        );
+        assert!(load_model_state(&directory).is_none());
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -1606,8 +1392,8 @@ mod tests {
     fn framing_round_trips_requests() {
         let request = Request::GetStatus;
         let mut bytes = Vec::new();
-        framing::write_json(&mut bytes, &request).unwrap();
-        let decoded: Request = framing::read_json(&mut bytes.as_slice()).unwrap();
+        lime_ipc::write_json(&mut bytes, &request).unwrap();
+        let decoded: Request = lime_ipc::read_json(&mut bytes.as_slice()).unwrap();
         assert_eq!(decoded, request);
     }
 
@@ -1638,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn config_survives_restart_and_legacy_format_is_migrated() {
+    fn config_persists_versioned_format_and_rejects_unknown_versions() {
         let directory =
             std::env::temp_dir().join(format!("lime-core-config-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
@@ -1661,34 +1447,15 @@ mod tests {
 
         fs::write(
             directory.join("config.json"),
-            serde_json::to_vec(&Config {
-                page_size: 7,
-                ..Config::default()
-            })
+            serde_json::to_vec(&serde_json::json!({
+                "version": 99,
+                "config": Config::default(),
+            }))
             .unwrap(),
         )
         .unwrap();
-        let migrated = CoreService::new(Some(directory.clone()));
-        assert_eq!(migrated.config_snapshot().config.page_size, 7);
-
-        // `auto` was accepted by the pre-CUDA runtime policy.  It must migrate to the new CUDA
-        // default without throwing away unrelated settings from the same config file.
-        let mut legacy_backend_config = Config {
-            page_size: 13,
-            ..Config::default()
-        };
-        legacy_backend_config.llm_backend = "auto".into();
-        fs::write(
-            directory.join("config.json"),
-            serde_json::to_vec(&legacy_backend_config).unwrap(),
-        )
-        .unwrap();
-        let migrated_backend = CoreService::new(Some(directory.clone()));
-        assert_eq!(migrated_backend.config_snapshot().config.page_size, 13);
-        assert_eq!(
-            migrated_backend.config_snapshot().config.llm_backend,
-            lime_protocol::DEFAULT_LLM_BACKEND
-        );
+        let rejected = CoreService::new(Some(directory.clone()));
+        assert_eq!(rejected.config_snapshot().config, Config::default());
         let _ = fs::remove_dir_all(directory);
     }
 

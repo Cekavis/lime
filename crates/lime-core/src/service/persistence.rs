@@ -1,0 +1,102 @@
+use std::{collections::BTreeMap, fs, io, path::Path};
+
+use lime_protocol::{Config, ModelPreset};
+
+pub(crate) const CONFIG_FILE_VERSION: u32 = 1;
+pub(crate) const MODEL_PRESETS_FILE_VERSION: u32 = 1;
+
+#[derive(serde::Serialize)]
+pub(crate) struct VersionedConfig<'a> {
+    pub(crate) version: u32,
+    pub(crate) config: &'a Config,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct VersionedConfigOwned {
+    pub(crate) version: u32,
+    pub(crate) config: Config,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct PersistedModelPresets {
+    pub(crate) version: u32,
+    pub(crate) presets: Vec<ModelPreset>,
+    pub(crate) active_model_path: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct VersionedModelPresets<'a> {
+    pub(crate) version: u32,
+    pub(crate) presets: &'a [ModelPreset],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) active_model_path: Option<&'a str>,
+}
+
+#[derive(Default)]
+pub(crate) struct LoadedModelPresets {
+    pub(crate) presets: Vec<ModelPreset>,
+    pub(crate) active_model_path: Option<String>,
+}
+
+pub(crate) fn persist_config(data_dir: Option<&Path>, config: &Config) -> Result<(), io::Error> {
+    let Some(dir) = data_dir else {
+        return Ok(());
+    };
+    let bytes = serde_json::to_vec_pretty(&VersionedConfig {
+        version: CONFIG_FILE_VERSION,
+        config,
+    })
+    .map_err(io::Error::other)?;
+    atomic_write(dir, "config.json", bytes)
+}
+
+pub(crate) fn persist_model_state(
+    data_dir: Option<&Path>,
+    presets: &BTreeMap<String, ModelPreset>,
+    active_model_path: Option<&str>,
+) -> Result<(), io::Error> {
+    let Some(dir) = data_dir else {
+        return Ok(());
+    };
+    let values = presets.values().cloned().collect::<Vec<_>>();
+    let bytes = serde_json::to_vec_pretty(&VersionedModelPresets {
+        version: MODEL_PRESETS_FILE_VERSION,
+        presets: &values,
+        active_model_path,
+    })
+    .map_err(io::Error::other)?;
+    atomic_write(dir, "model-presets.json", bytes)
+}
+
+fn atomic_write(dir: &Path, file_name: &str, bytes: Vec<u8>) -> Result<(), io::Error> {
+    fs::create_dir_all(dir)?;
+    let target = dir.join(file_name);
+    let temp = dir.join(format!("{file_name}.tmp"));
+    fs::write(&temp, bytes)?;
+    match fs::rename(&temp, &target) {
+        Ok(()) => Ok(()),
+        Err(_) if target.exists() => {
+            fs::remove_file(&target)?;
+            fs::rename(temp, target)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn load_config(path: &Path) -> Option<Config> {
+    let bytes = fs::read(path.join("config.json")).ok()?;
+    let persisted: VersionedConfigOwned = serde_json::from_slice(&bytes).ok()?;
+    (persisted.version == CONFIG_FILE_VERSION).then_some(persisted.config)
+}
+
+pub(crate) fn load_model_state(path: &Path) -> Option<LoadedModelPresets> {
+    let bytes = fs::read(path.join("model-presets.json")).ok()?;
+    let persisted: PersistedModelPresets = serde_json::from_slice(&bytes).ok()?;
+    if persisted.version != MODEL_PRESETS_FILE_VERSION {
+        return None;
+    }
+    Some(LoadedModelPresets {
+        active_model_path: persisted.active_model_path.filter(|path| !path.is_empty()),
+        presets: persisted.presets,
+    })
+}

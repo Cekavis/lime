@@ -14,17 +14,44 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo check -p lime-ipc -p lime-service
+      - run: cargo clippy -p lime-protocol -p lime-ipc -p lime-core -p lime-service --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  schemas:
+  contracts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
-      - run: bunx --yes ajv-cli@5 validate -s schemas/config.schema.json -d schemas/config.defaults.json --spec=draft2020
-      - run: bunx --yes ajv-cli@5 validate -s schemas/ipc.schema.json -d schemas/ipc.request.example.json --spec=draft2020
-      - run: bunx --yes ajv-cli@5 validate -s schemas/ipc.schema.json -d schemas/ipc.response.example.json --spec=draft2020
-      - run: bunx --yes ajv-cli@5 validate -s schemas/errors.json -d schemas/errors.catalog.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/config.schema.json -d contracts/config.defaults.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.request.example.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.response.example.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.management.request.example.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.management.response.example.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/persistence.schema.json -d contracts/config.persisted.example.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/persistence.schema.json -d contracts/model-presets.persisted.example.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/errors.json -d contracts/errors.catalog.json --spec=draft2020
+
+  management:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: npm ci --prefix frontend
+      - run: npm run build --prefix frontend
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Provide release resource placeholders for Tauri check
+        run: |
+          mkdir -p out/windows-x64/staging/app/rime out/windows-x64/staging/app/llama out/windows-x64/staging/app/licenses
+          touch out/windows-x64/staging/app/lime-service.exe out/windows-x64/staging/app/lime-tsf.dll
+      - run: cargo check --manifest-path crates/lime-tauri/Cargo.toml --locked

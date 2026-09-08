@@ -36,10 +36,10 @@ final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
 
 ## 时序与降级
 
-- Rime 候选立即可见。
-- LLM 在后台异步重排；新输入取消旧代际。
-- 没有上文时不执行 LLM 重排，候选顺序严格采用 Rime 返回值。
-- LLM 超时、模型忙、输出非法或内存不足：保持 Rime-only 顺序。
+- 每次输入请求同步完成 Rime 召回和可用的 LLM 排序后才返回最终候选。
+- 没有上文时不执行 LLM 排序，候选顺序严格采用 Rime 返回值。
+- LLM 失败、模型忙、输出非法或内存不足：保持 Rime-only 顺序。
+- 并发请求通过 generation 检查丢弃旧结果，旧结果不得覆盖较新的输入。
 - Rust 服务崩溃时不能得到 Rime 候选，TSF 直接英文/数字/标点透传。
 
 ## 上下文设置
@@ -75,6 +75,6 @@ decode 调用；兼容字段 `logits_ms` 只统计 decode 返回后的同步和�
 ## 模型
 
 - 模型输入为用户导入的单个 GGUF 文件；不要求额外 manifest。
-- 开发模型由 `LIME_LLAMA_TEST_MODEL` 指定；模型文件不进入 Git，建议放在 `resources/models/` 或使用绝对路径。
+- 开发模型由 `LIME_LLAMA_TEST_MODEL` 指定；模型文件不进入 Git，使用用户数据目录或绝对路径，不放在仓库资源目录。
 - 模型切换通过服务受控重载；同一时间只激活一个模型。多个命名预设由服务持久化到 `model-presets.json`，可列出、保存、删除和切换；服务同时记录最近一次成功激活的模型路径并在下次启动时自动恢复，切换失败不会替换当前模型。
 - Windows 首期默认 CUDA，并随安装包提供 CPU 回退；未安装可用模型时仍保持 Rime-only。

@@ -17,9 +17,6 @@ llm_context_token_limit     = 1024
 llm_backend                 = cuda
 ```
 
-`llm_enabled` 与 `auto_start_service` 仅作为旧版配置/IPC 字段保留，不再出现在管理界面，
-也不再作为当前模型重排的开关。
-
 `rime_schema` 默认使用雾凇全拼 `rime_ice`；服务启动前也可用 `LIME_RIME_SCHEMA` 选择
 安装包内随官方雾凇发布包提供、且当前 Windows 运行时支持的双拼方案。方案资源不由 Lime
 解析或改写；上游归档中的其他平台专用文件仍原样保留，但不在 Windows 设置中冒充可用能力。
@@ -40,10 +37,9 @@ Rime 顺序中，不送入模型。
 
 `llm_backend` 只接受 `cuda` 或 `cpu`，默认值为 `cuda`。`cuda` 表示优先加载打包的 CUDA
 llama.cpp CUDA 13.3 runtime；CUDA DLL、驱动或设备初始化失败时，服务按显式降级策略尝试同包的 CPU
-runtime。选择 `cpu` 时不会尝试 CUDA。旧版 `config.json` 缺少该字段时由 serde 默认补为
-`cuda`；更早版本写入的 `auto`/`default` 也会迁移为 `cuda`，不会改变其他设置。
+ runtime。选择 `cpu` 时不会尝试 CUDA。
 
-Rust 服务将配置持久化到用户数据目录的 `config.json`，格式为 `{ "version": 1, "config": { ... } }`，写入采用临时文件后原子替换。读取时兼容 Phase 3 之前直接保存的配置对象；未知版本或非法配置回退到默认值，不覆盖现有文件。
+Rust 服务将配置持久化到用户数据目录的 `config.json`，格式为 `{ "version": 1, "config": { ... } }`，写入采用临时文件后原子替换。未知版本或非法配置回退到默认值，不覆盖现有文件。
 
 ## 数据分层
 
