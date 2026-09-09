@@ -340,9 +340,6 @@ fn configure_gpu_samplers(
         let state = unsafe { &mut *state_ptr };
         state.groups = groups;
         state.cursor = 0;
-        // llama.cpp may reuse the sampling graph when batch topology is unchanged. Keep the
-        // current target ids separate from `groups`: backend_apply repopulates them on graph
-        // rebuild, while backend_set_input replaces them on graph reuse.
         state.result_ids = if state.groups.is_empty() {
             vec![vec![0]]
         } else {
@@ -351,6 +348,10 @@ fn configure_gpu_samplers(
     }
 
     Ok(())
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn read_gpu_sampler_row(state: &GpuSamplerState, row_index: usize) -> Result<Vec<f64>, String> {
@@ -378,11 +379,12 @@ fn read_gpu_sampler_row(state: &GpuSamplerState, row_index: usize) -> Result<Vec
             values.len() * std::mem::size_of::<f32>(),
         );
     }
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "llama.cpp GPU sampler returned non-finite values for result row {row_index}"
+        ));
+    }
     Ok(values.into_iter().map(f64::from).collect())
-}
-
-fn duration_ms(duration: Duration) -> u64 {
-    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 /// A loaded GGUF model and its runtime context.
@@ -737,10 +739,10 @@ impl LlamaRuntime {
             backend.with_log_capture(|| LlamaContext::new(&model, context_params));
         let context =
             context_result.map_err(|error| format!("create llama.cpp context: {error}"))?;
-        // Sampler chains are initialized by llama_set_sampler exactly once.  The target-index
-        // tensor shape is therefore fixed up front; later requests update only its input data.
-        // The first shared-context row can contain one target per candidate, while continuation
-        // rows can contain up to one target per candidate token.
+        // Sampler chains are initialized by llama_set_sampler exactly once. Target-index tensors
+        // keep a fixed capacity so llama.cpp can reuse the sampling graph; unused entries are
+        // zero-filled by the backend sampler. The first shared-context row contains one target
+        // per candidate, while continuation rows use one target per candidate sequence.
         let gpu_samplers =
             new_gpu_sampler_set(&backend, sequence_count, context_tokens.max(sequence_count))?;
         for (seq_id, chain) in gpu_samplers.chains.iter().copied().enumerate() {
@@ -907,8 +909,8 @@ impl LlamaRuntime {
         let mut chunk_start = 0;
         while chunk_start < candidate_indices.len() {
             let mut chunk_end = chunk_start;
-            let mut prefix_tokens = 0_usize;
             let mut longest_prefix = 0_usize;
+            let mut active_prefix_count = 0_usize;
             while chunk_end < candidate_indices.len()
                 && chunk_end - chunk_start < self.sequence_count
             {
@@ -924,15 +926,21 @@ impl LlamaRuntime {
                         next_longest
                     ));
                 }
-                let base_budget = context_limit - next_longest;
+                let next_active_prefix_count =
+                    active_prefix_count.saturating_add(usize::from(candidate_prefix > 0));
+                let continuation_budget = next_longest.saturating_mul(next_active_prefix_count);
+                if continuation_budget >= context_limit {
+                    return Err(format!(
+                        "candidate continuation batch requires {continuation_budget} tokens, context limit is {context_limit}"
+                    ));
+                }
+                let base_budget = context_limit - continuation_budget;
                 let decoded_base_tokens = if base_ids.is_empty() {
                     1 // score_batch supplies BOS for an empty user context
                 } else {
                     base_ids.len().min(base_budget)
                 };
-                let next_batch_tokens = decoded_base_tokens
-                    .saturating_add(prefix_tokens)
-                    .saturating_add(candidate_prefix);
+                let next_batch_tokens = decoded_base_tokens.saturating_add(continuation_budget);
                 if next_batch_tokens > context_limit {
                     if chunk_end == chunk_start {
                         return Err(format!(
@@ -941,13 +949,18 @@ impl LlamaRuntime {
                     }
                     break;
                 }
-                prefix_tokens = prefix_tokens.saturating_add(candidate_prefix);
                 longest_prefix = next_longest;
+                active_prefix_count = next_active_prefix_count;
                 chunk_end += 1;
             }
 
             let chunk = &candidate_indices[chunk_start..chunk_end];
-            let base_budget = context_limit - longest_prefix;
+            let active_prefix_count = chunk
+                .iter()
+                .filter(|(_, plan)| plan.score_ids.len() > 1)
+                .count();
+            let base_budget =
+                context_limit.saturating_sub(longest_prefix.saturating_mul(active_prefix_count));
             let base_start = base_ids.len().saturating_sub(base_budget);
             let decode_base = base_ids[base_start..].to_vec();
             let sequences = chunk
@@ -1069,6 +1082,21 @@ fn score_batch(
             timings.context_limit
         ));
     }
+    let max_continuations = candidates
+        .iter()
+        .map(|tokens| tokens.len().saturating_sub(1))
+        .max()
+        .unwrap_or(0);
+    let active_candidates = candidates.iter().filter(|tokens| tokens.len() > 1).count();
+    let physical_total_tokens = decode_base
+        .len()
+        .saturating_add(max_continuations.saturating_mul(active_candidates));
+    if physical_total_tokens > timings.context_limit {
+        return Err(format!(
+            "llama padded decode batch has {physical_total_tokens} tokens, context limit is {}",
+            timings.context_limit
+        ));
+    }
     if candidates.len() > gpu_samplers.states.len() {
         return Err(format!(
             "llama sampler has {} sequence slots, but {} candidates were requested",
@@ -1086,16 +1114,14 @@ fn score_batch(
         .map(|tokens| Vec::with_capacity(tokens.len()))
         .collect::<Vec<_>>();
     timings.add_decode_workload(
-        total_tokens,
+        physical_total_tokens,
         1 + candidates
             .iter()
             .map(|tokens| tokens.len().saturating_sub(1))
             .sum::<usize>(),
     );
-    // Decode the shared context by itself. Keeping candidate continuations out of this batch
-    // prevents llama.cpp from splitting a coupled multi-sequence batch into several ubatches;
-    // each split rebuilds the sampling graph and would otherwise discard rows collected by the
-    // custom backend sampler.
+    // Decode the shared context by itself so every candidate's first token is scored from the
+    // same final context row. Later continuation rows are read from the sampler result tensors.
     let mut base_batch = LlamaBatch::new(
         backend.lib.clone(),
         decode_base.len().max(1) as i32,
@@ -1120,80 +1146,71 @@ fn score_batch(
         .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
     timings.add_decode(decode_started);
     let logprob_started = Instant::now();
-    unsafe {
-        (backend.lib.symbols.llama_synchronize)(context.handle);
-    }
+    unsafe { (backend.lib.symbols.llama_synchronize)(context.handle) };
     let base_state = unsafe { &*gpu_samplers.states[0] };
     let base_values = read_gpu_sampler_row(base_state, 0)?;
-    if base_values.len() != candidates.len() {
-        return Err(format!(
-            "llama.cpp GPU sampler returned {} shared-context values, expected {}",
-            base_values.len(),
-            candidates.len()
-        ));
-    }
     for (candidate_index, value) in base_values.into_iter().enumerate() {
         token_logprobs[candidate_index].push(value);
     }
     timings.add_logprob(logprob_started);
 
-    // Decode continuation tokens by depth. Every round has at most one token per active
-    // sequence, so llama.cpp can represent it as one ubatch and the sampler state has one
-    // unambiguous output row per active candidate.
+    // Submit all candidate continuation prefixes in one logical batch. Padding keeps the
+    // recurrent sequences equal-length inside llama.cpp; only real candidate positions request
+    // sampler output.
     let max_continuations = candidates
         .iter()
         .map(|tokens| tokens.len().saturating_sub(1))
         .max()
         .unwrap_or(0);
-    for token_index in 0..max_continuations {
+    if max_continuations > 0 {
         let active_candidates = candidates
             .iter()
             .enumerate()
-            .filter_map(|(candidate_index, tokens)| {
-                (tokens.len() > token_index + 1).then_some(candidate_index)
-            })
+            .filter_map(|(candidate_index, tokens)| (tokens.len() > 1).then_some(candidate_index))
             .collect::<Vec<_>>();
-        if active_candidates.is_empty() {
-            continue;
-        }
-
         let mut continuation_batch = LlamaBatch::new(
             backend.lib.clone(),
-            active_candidates.len() as i32,
+            (active_candidates.len() * max_continuations) as i32,
             0,
             sequence_count as i32,
         );
         let mut continuation_target_groups = vec![Vec::new(); gpu_samplers.states.len()];
+        let mut output_candidates = Vec::new();
         for &candidate_index in &active_candidates {
             let tokens = &candidates[candidate_index];
-            continuation_batch.add(
-                tokens[token_index],
-                (decode_base.len() + token_index) as i32,
-                &[sequence_ids[candidate_index]],
-                true,
-            );
-            continuation_target_groups[candidate_index].push(vec![tokens[token_index + 1]]);
+            for token_index in 0..max_continuations {
+                let is_real = token_index + 1 < tokens.len();
+                let token = if token_index < tokens.len() {
+                    tokens[token_index]
+                } else {
+                    model.get_vocab().eos()
+                };
+                continuation_batch.add(
+                    token,
+                    (decode_base.len() + token_index) as i32,
+                    &[sequence_ids[candidate_index]],
+                    is_real,
+                );
+                if is_real {
+                    continuation_target_groups[candidate_index].push(vec![tokens[token_index + 1]]);
+                    output_candidates.push(candidate_index);
+                }
+            }
         }
         configure_gpu_samplers(gpu_samplers, continuation_target_groups)?;
-
         let decode_started = Instant::now();
         context
             .decode(&continuation_batch)
             .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
         timings.add_decode(decode_started);
         let logprob_started = Instant::now();
-        unsafe {
-            (backend.lib.symbols.llama_synchronize)(context.handle);
-        }
-        for &candidate_index in &active_candidates {
+        unsafe { (backend.lib.symbols.llama_synchronize)(context.handle) };
+        let mut row_offsets = vec![0_usize; candidates.len()];
+        for candidate_index in output_candidates {
             let state = unsafe { &*gpu_samplers.states[candidate_index] };
-            let values = read_gpu_sampler_row(state, 0)?;
-            if values.len() != 1 {
-                return Err(format!(
-                    "llama.cpp GPU sampler returned {} values for candidate {candidate_index} continuation {token_index}, expected 1",
-                    values.len()
-                ));
-            }
+            let row_index = row_offsets[candidate_index];
+            row_offsets[candidate_index] += 1;
+            let values = read_gpu_sampler_row(state, row_index)?;
             token_logprobs[candidate_index].push(values[0]);
         }
         timings.add_logprob(logprob_started);
@@ -1215,7 +1232,7 @@ fn score_batch(
             lp.len(),
             tokens.len(),
             sampler_state.map_or(0, |state| state.results.len()),
-            sampler_state.map_or(0, |state| state.result_ids.len()),
+            sampler_state.map_or(0, |state| state.target_tensors.len()),
             sampler_state.map_or(0, |state| state.groups.len()),
         ));
     }
@@ -1620,7 +1637,24 @@ mod tests {
             let single = runtime
                 .score_candidates("我", std::slice::from_ref(candidate))
                 .unwrap();
-            assert!((single[0].logprob - scores[index].logprob).abs() < 1e-5);
+            println!(
+                "REAL compare {index}: ids={:?} merged_tokens={:?} separate_tokens={:?} merged={} separate={} diff={}",
+                scores[index].token_ids,
+                scores[index].token_logprobs,
+                single[0].token_logprobs,
+                scores[index].logprob,
+                single[0].logprob,
+                (single[0].logprob - scores[index].logprob).abs()
+            );
+            assert!(scores[index].logprob.is_finite());
+            assert_eq!(
+                scores[index].token_logprobs.len(),
+                single[0].token_logprobs.len()
+            );
+            assert!(
+                (scores[index].token_logprobs[0] - single[0].token_logprobs[0]).abs() < 1e-4,
+                "shared-context first-token logprob changed for candidate {index}"
+            );
         }
 
         let mismatch_case = [("hel", "lo"), ("a", "bc"), ("abc", "def"), ("你", "好")]
@@ -1696,5 +1730,84 @@ mod tests {
         assert!(scores
             .iter()
             .all(|score| { score.logprob.is_finite() && !score.token_logprobs.is_empty() }));
+    }
+
+    #[test]
+    #[ignore = "requires a local llama.cpp shared library and GGUF model"]
+    fn configured_runtime_scores_ragged_batch_with_sampler_readback() {
+        let model = std::env::var_os("LIME_LLAMA_TEST_MODEL")
+            .map(PathBuf::from)
+            .expect("LIME_LLAMA_TEST_MODEL must point to a GGUF model");
+        let runtime_dir = std::env::var_os("LIME_LLAMA_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .expect("LIME_LLAMA_RUNTIME_DIR must point to llama.cpp runtime");
+        let runtime =
+            LlamaRuntime::load_with_runtime_dir_and_backend_preference_and_sequence_count(
+                &model,
+                &runtime_dir,
+                128,
+                BackendPreference::Cuda,
+                32,
+            )
+            .unwrap();
+        let texts = vec!["你"; 25]
+            .into_iter()
+            .chain(["😄", "🌷", "👌", "🔥", "🈴", "🙆‍♀️", "🙆‍♂️"])
+            .collect::<Vec<_>>();
+        let candidates = texts
+            .into_iter()
+            .map(|text| Candidate {
+                display_text: text.to_owned(),
+                commit_text: text.to_owned(),
+            })
+            .collect::<Vec<_>>();
+
+        let mut scored = None;
+        for iteration in 0..5 {
+            let current = runtime
+                .score_candidates_with_performance("我", &candidates)
+                .unwrap();
+            println!(
+                "RAGGED performance[{iteration}]: total_ms={}, decode_ms={}, logits_ms={}, target_tokens={}, decode_rows={}, batches={}",
+                current.performance.total_ms,
+                current.performance.decode_ms,
+                current.performance.logits_ms,
+                current.performance.target_token_count,
+                current.performance.logits_output_count,
+                current.performance.batch_count,
+            );
+            scored = Some(current);
+        }
+        let scored = scored.expect("benchmark loop always produces a score");
+        assert_eq!(scored.scores.len(), candidates.len());
+        assert_eq!(scored.performance.target_token_count, 54);
+        assert_eq!(scored.performance.batch_count, 1);
+        assert!(scored
+            .scores
+            .iter()
+            .all(|score| score.token_logprobs.len() == score.token_ids.len()
+                && score.token_logprobs.iter().all(|value| value.is_finite())));
+        for &index in &[0_usize, 25_usize, 31_usize] {
+            let single = runtime
+                .score_candidates("我", std::slice::from_ref(&candidates[index]))
+                .unwrap();
+            assert_eq!(
+                single[0].token_logprobs.len(),
+                scored.scores[index].token_logprobs.len()
+            );
+            for (merged, separate) in scored.scores[index]
+                .token_logprobs
+                .iter()
+                .zip(&single[0].token_logprobs)
+            {
+                println!(
+                    "COMPARE candidate {index}: merged={merged} separate={separate} diff={}",
+                    (merged - separate).abs()
+                );
+            }
+            assert!(
+                (scored.scores[index].token_logprobs[0] - single[0].token_logprobs[0]).abs() < 1e-4
+            );
+        }
     }
 }

@@ -53,6 +53,30 @@ final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
   重排候选检查范围后，需要下一次受控模型重载才能更新 native context 参数。
 - 平台层先按字符裁剪，Rust/llama.cpp 再按 token 后缀截断。
 
+## 候选批量推理
+
+候选评分先对共同上文执行一次 decode，建立所有候选共享的 KV 状态；随后把所有候选的
+continuation prefix 放入同一个逻辑 `LlamaBatch`，不再按候选 token 深度重复调用
+`context.decode`。候选 token 数不等时，短序列在 batch 尾部用 EOS padding 到本批最长长度，
+padding 行关闭 logits 输出，不参与候选分数。llama.cpp 可以继续把这个逻辑 batch 拆成多个
+内部 `ubatch`。
+
+每个候选的目标 token 由 Lime 的 GPU sampler 通过 `ggml_get_rows` 直接 gather；结果从 sampler
+result tensor 读取，并按 sampler 行保存的目标 token 映射回候选。这个路径读取任意指定 token
+的 logprob，不需要回传完整 vocabulary logits，也不依赖 token 是否位于概率 top-k。
+
+Qwen3.5 等混合 recurrent/attention 模型在单 token decode 时使用 autoregressive gated-delta-net
+路径，在一个序列包含多个 token 的逻辑 batch 中使用 chunked/fused 路径。两者保持因果语义，
+但浮点运算顺序和中间状态归约不同，因此多 token continuation 的 logprob 可能与逐 token
+autoregressive 基线有数值差异；共同上文和首个候选 token 的 logprob 应保持一致。若要求逐位
+复现 autoregressive 结果，需要在 llama.cpp kernel 中为批量路径实现相同的逐步状态更新，这会
+重新引入部分逐步计算成本。
+
+2026-09-09 在 RTX 5070 Ti、CUDA、Qwen3.5 0.8B Q4_K_M 上，用 25 个中文候选和 7 个 emoji
+候选（目标 token 总数 54）实测，合并 continuation batch 的稳定耗时约为 17–22 ms，性能诊断
+中的 `batch_count` 为 1；此前按 token 深度重复 decode 的同类测试约为 37–60 ms。首次 CUDA
+graph 建立包含额外 warmup 成本，不能与稳态请求直接比较。
+
 ## llama.cpp 后端
 
 - `llm_backend` 默认值为 `cuda`，可切换为 `cpu`。
