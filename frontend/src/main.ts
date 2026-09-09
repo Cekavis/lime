@@ -882,23 +882,24 @@ function llmPerformanceSummary(performance: LlmPerformance | null, rimeMs: numbe
   if (!performance && rimeMs == null && endToEndMs == null) return '<p class="muted">本次未调用 LLM。</p>';
   const row = (label: string, value: string) => '<dt>' + label + '</dt><dd class="mono">' + escapeHtml(value) + '</dd>';
   const effectiveRimeMs = rimeMs ?? performance?.rimeMs ?? null;
-  const timingRows =
-    row("端到端用时", formatMilliseconds(endToEndMs)) +
-    row("Rime 用时", formatMilliseconds(effectiveRimeMs)) +
-    row("推理用时", formatMilliseconds(performance?.decodeMs)) +
-    row("Logprob 计算用时", formatMilliseconds(performance?.logprobMs));
-  const workloadRows =
-    row("送入候选", performance ? String(performance.candidateCount) + " 个" : "—") +
-    row("返回得分", performance ? String(performance.scoredCount) + " 个" : "—") +
-    row("目标 Token", performance ? String(performance.targetTokenCount) : "—") +
-    row("解码批次", performance ? String(performance.batchCount) : "—") +
-    row("边界不匹配", performance ? String(performance.mismatchCount) + " 个" : "—") +
-    row("上下文 Token", performance ? String(performance.contextTokenCount) : "—") +
-    row("Decode 输入行", performance ? String(performance.decodeInputTokenCount) : "—") +
-    row("Logprob 输出行", performance ? String(performance.logprobOutputCount) : "—");
+  const rows = [
+    row("端到端用时", formatMilliseconds(endToEndMs)),
+    row("Rime 用时", formatMilliseconds(effectiveRimeMs)),
+    row("推理用时", formatMilliseconds(performance?.decodeMs)),
+    row("Logprob 计算用时", formatMilliseconds(performance?.logprobMs)),
+    row("送入候选", performance ? String(performance.candidateCount) + " 个" : "—"),
+    row("返回得分", performance ? String(performance.scoredCount) + " 个" : "—"),
+    row("目标 Token", performance ? String(performance.targetTokenCount) : "—"),
+    row("解码批次", performance ? String(performance.batchCount) : "—"),
+    row("边界不匹配", performance ? String(performance.mismatchCount) + " 个" : "—"),
+    row("上下文 Token", performance ? String(performance.contextTokenCount) : "—"),
+    row("Decode 输入行", performance ? String(performance.decodeInputTokenCount) : "—"),
+    row("Logprob 输出行", performance ? String(performance.logprobOutputCount) : "—"),
+  ];
+  const splitAt = Math.ceil(rows.length / 2);
+  const columns = [rows.slice(0, splitAt), rows.slice(splitAt)];
   return '<div class="history-performance">' +
-    '<dl class="status-list history-performance-column">' + timingRows + '</dl>' +
-    '<dl class="status-list history-performance-column">' + workloadRows + '</dl>' +
+    columns.map((column) => '<dl class="status-list history-performance-column">' + column.join("") + '</dl>').join("") +
     '</div>';
 }
 
@@ -913,7 +914,7 @@ function renderTestResult(data: InputData) {
   if (!target) return;
   const status = stateLabel[data.serviceState] || "—";
   const context = data.contextUsed == null ? "—" : data.contextUsed ? "是" : "否";
-  target.innerHTML = '<div class="result-summary"><span>服务状态</span><strong>' + escapeHtml(status) + '</strong><span>上文已使用</span><strong>' + context + '</strong><span>拼音</span><strong class="mono">' + escapeHtml(data.preedit || "—") + "</strong></div>" + diagnosticTable(data);
+  target.innerHTML = '<div class="result-summary"><span>服务状态</span><strong>' + escapeHtml(status) + '</strong><span>上文已使用</span><strong>' + context + '</strong><span>拼音</span><strong class="mono">' + escapeHtml(data.preedit || "—") + "</strong></div>" + llmPerformanceSummary(data.llmPerformance, data.rimeMs, data.endToEndMs) + diagnosticTable(data);
 }
 
 function renderHistory(page: HistoryPage, options: { force?: boolean } = {}) {

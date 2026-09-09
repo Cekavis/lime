@@ -155,7 +155,8 @@ impl RimeEngine {
             .process_key(keycode, mask)
     }
 
-    /// Returns Rime candidates plus the complete-input subset of the first `rerank_count` rows.
+    /// Returns a bounded Rime candidate prefix plus the complete-input subset of the first
+    /// `rerank_count` rows. A zero `candidate_limit` keeps the direct engine API unbounded.
     /// librime determines coverage through its commit preview, so the result also works for
     /// double-pinyin schemas, emoji conversions, and other candidates whose displayed character
     /// count does not match the number of pinyin syllables.
@@ -163,6 +164,7 @@ impl RimeEngine {
         &mut self,
         preedit: &str,
         rerank_count: usize,
+        candidate_limit: usize,
     ) -> Result<CandidateBatch, CoreError> {
         self.native
             .as_mut()
@@ -172,7 +174,7 @@ impl RimeEngine {
                     "librime backend is unavailable on this platform or was not initialized",
                 )
             })?
-            .candidates_for_rerank(preedit, rerank_count)
+            .candidates_for_rerank(preedit, rerank_count, candidate_limit)
     }
 
     /// Preserves the existing persistence-facing API boundary while routing migrated entries
@@ -614,6 +616,7 @@ mod native {
             &mut self,
             input: &str,
             rerank_count: usize,
+            candidate_limit: usize,
         ) -> Result<CandidateBatch, CoreError> {
             // The legacy candidate engine accepted pinyin case-insensitively and ignored
             // separators.  Keep that contract at the native boundary as well: TSF normally
@@ -629,7 +632,7 @@ mod native {
                     "librime rejected input",
                 ));
             }
-            self.current_candidates(rerank_count)
+            self.current_candidates(rerank_count, candidate_limit)
         }
 
         pub(super) fn process_key(
@@ -645,7 +648,7 @@ mod native {
             }
             let handled = unsafe { (self.api.process_key)(self.session, keycode, mask) != 0 };
             let commit_text = self.take_commit()?;
-            let candidates = self.current_candidates(0)?.candidates;
+            let candidates = self.current_candidates(0, 0)?.candidates;
             Ok(RimeKeyResult {
                 handled,
                 commit_text,
@@ -675,7 +678,11 @@ mod native {
             Ok((!text.is_empty()).then_some(text))
         }
 
-        fn current_candidates(&self, rerank_count: usize) -> Result<CandidateBatch, CoreError> {
+        fn current_candidates(
+            &self,
+            rerank_count: usize,
+            candidate_limit: usize,
+        ) -> Result<CandidateBatch, CoreError> {
             let mut context = Context {
                 data_size: (std::mem::size_of::<Context>() - std::mem::size_of::<c_int>()) as c_int,
                 composition: Composition {
@@ -709,22 +716,6 @@ mod native {
                 context.menu.page_no.max(0) as usize * context.menu.page_size.max(0) as usize
                     + context.menu.highlighted_candidate_index.max(0) as usize
             });
-            if !context.menu.candidates.is_null() {
-                for index in 0..context.menu.num_candidates.max(0) as usize {
-                    let item = unsafe { &*context.menu.candidates.add(index) };
-                    let text = c_string(item.text);
-                    if !text.is_empty() {
-                        let candidate = Candidate {
-                            display_text: text.clone(),
-                            commit_text: text,
-                        };
-                        let source_index = context.menu.page_no.max(0) as usize
-                            * context.menu.page_size.max(0) as usize
-                            + index;
-                        out.push((candidate, source_index));
-                    }
-                }
-            }
             unsafe { (self.api.free_context)(&mut context) };
             let mut iterator = CandidateIterator {
                 ptr: ptr::null_mut(),
@@ -738,15 +729,19 @@ mod native {
             unsafe {
                 if (self.api.candidate_list_begin)(self.session, &mut iterator) != 0 {
                     loop {
-                        let text = c_string(iterator.candidate.text);
-                        if !text.is_empty() && !out.iter().any(|(item, _)| item.commit_text == text)
+                        let source_index = iterator.index.max(0) as usize;
+                        if candidate_limit > 0 && source_index >= candidate_limit.max(rerank_count)
                         {
+                            break;
+                        }
+                        let text = c_string(iterator.candidate.text);
+                        if !text.is_empty() {
                             out.push((
                                 Candidate {
                                     display_text: text.clone(),
                                     commit_text: text,
                                 },
-                                iterator.index.max(0) as usize,
+                                source_index,
                             ));
                         }
                         if (self.api.candidate_list_next)(&mut iterator) == 0 {
@@ -1256,7 +1251,12 @@ impl NativeBackend {
         ))
     }
 
-    fn candidates_for_rerank(&mut self, _: &str, _: usize) -> Result<CandidateBatch, CoreError> {
+    fn candidates_for_rerank(
+        &mut self,
+        _: &str,
+        _: usize,
+        _: usize,
+    ) -> Result<CandidateBatch, CoreError> {
         Err(CoreError::new(
             ErrorCode::RimeInitializationFailed,
             "bundled librime supports Windows x64 only",
@@ -1299,7 +1299,7 @@ impl NativeBackend {
 
 impl CandidateEngine for RimeEngine {
     fn candidates(&mut self, preedit: &str) -> Result<Vec<Candidate>, CoreError> {
-        self.candidates_for_rerank(preedit, 0)
+        self.candidates_for_rerank(preedit, 0, 0)
             .map(|batch| batch.candidates)
     }
 
@@ -1552,8 +1552,9 @@ mod tests {
         .expect("load packaged Rime resources");
 
         let batch = engine
-            .candidates_for_rerank("nihao", 32)
+            .candidates_for_rerank("nihao", 32, 32)
             .expect("read candidate coverage");
+        assert!(batch.candidates.len() <= 32);
         let complete = batch
             .complete_candidate_indices
             .iter()

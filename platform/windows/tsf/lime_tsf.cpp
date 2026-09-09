@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -1554,12 +1555,17 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       selected_candidate_ = candidate_page_ * page_size_;
       g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
                         page_size_, {}, preceding_preview_, CandidateAnchor());
-    } else if (next_page &&
-               (candidate_page_ + 1) * page_size_ < candidates_.size()) {
-      ++candidate_page_;
-      selected_candidate_ = candidate_page_ * page_size_;
-      g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                        page_size_, {}, preceding_preview_, CandidateAnchor());
+    } else if (next_page) {
+      const size_t next_begin = (candidate_page_ + 1) * page_size_;
+      if (next_begin >= candidates_.size()) {
+        LoadMoreCandidates(context, next_begin + page_size_);
+      }
+      if (next_begin < candidates_.size()) {
+        ++candidate_page_;
+        selected_candidate_ = candidate_page_ * page_size_;
+        g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
+                          page_size_, {}, preceding_preview_, CandidateAnchor());
+      }
     }
     // Page keys are owned by the candidate window even at the ends; treating
     // the boundary as a no-op prevents the host from scrolling unexpectedly.
@@ -1585,9 +1591,15 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       }
     } else if (selected_candidate_ + 1 < end) {
       ++selected_candidate_;
-    } else if ((candidate_page_ + 1) * page_size_ < candidates_.size()) {
-      ++candidate_page_;
-      selected_candidate_ = candidate_page_ * page_size_;
+    } else {
+      const size_t next_begin = (candidate_page_ + 1) * page_size_;
+      if (next_begin >= candidates_.size()) {
+        LoadMoreCandidates(context, next_begin + page_size_);
+      }
+      if (next_begin < candidates_.size()) {
+        ++candidate_page_;
+        selected_candidate_ = candidate_page_ * page_size_;
+      }
     }
     g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
                       page_size_, {}, preceding_preview_, CandidateAnchor());
@@ -1639,9 +1651,10 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
 }
 
 bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preedit,
-                                  std::vector<Candidate>& result_candidates,
-                                  std::wstring& preceding, bool& context_available,
-                                  RECT& anchor, bool& anchor_available) {
+                                   std::vector<Candidate>& result_candidates,
+                                   std::wstring& preceding, bool& context_available,
+                                   RECT& anchor, bool& anchor_available,
+                                   size_t candidate_limit) {
   if (!context) return false;
   result_candidates.clear();
   preceding.clear();
@@ -1706,7 +1719,19 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
     anchor = {};
     anchor_available = false;
   }
-  std::string body; const std::string json = "{\"kind\":\"input\",\"payload\":{\"request_id\":" + std::to_string(++request_id_) + ",\"preedit\":\"" + JsonEscape(preedit) + "\",\"preceding_text\":\"" + JsonEscape(preceding) + "\",\"context_available\":" + (context_available ? "true" : "false") + ",\"config_revision\":" + std::to_string(config_revision_) + "}}";
+  const uint64_t requested_limit = (std::min)(
+      static_cast<uint64_t>(candidate_limit),
+      static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+  std::string body;
+  const std::string json = "{\"kind\":\"input\",\"payload\":{\"request_id\":" +
+                           std::to_string(++request_id_) +
+                           ",\"preedit\":\"" + JsonEscape(preedit) +
+                           "\",\"preceding_text\":\"" + JsonEscape(preceding) +
+                           "\",\"context_available\":" +
+                           (context_available ? "true" : "false") +
+                           ",\"config_revision\":" + std::to_string(config_revision_) +
+                           ",\"candidate_limit\":" + std::to_string(requested_limit) +
+                           "}}";
    if (!g_pipe.Request(json, body)) { connected_ = false; return false; }
    if (body.find("\"kind\":\"error\"") != std::string::npos) { RefreshConfigRevision(context); return false; }
     std::string service_state;
@@ -1723,18 +1748,44 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
      const size_t c = body.find("\"commit_text\":\"", d); if (c == std::string::npos) break;
      if (d >= array_end || c >= array_end) break;
      Candidate candidate; candidate.display = Wide(JsonString(body, d + 16)); candidate.commit = Wide(JsonString(body, c + 15)); result_candidates.push_back(std::move(candidate)); pos = c + 15;
-   }
+  }
+  return true;
+}
+
+bool TextService::LoadMoreCandidates(ITfContext* context, size_t required_count) {
+  if (candidate_fetch_complete_) return false;
+
+  std::vector<Candidate> fetched;
+  std::wstring preceding;
+  bool context_available = false;
+  RECT anchor{};
+  bool anchor_available = false;
+  if (!FetchCandidates(context, preedit_, fetched, preceding, context_available, anchor,
+                       anchor_available, required_count)) {
+    return false;
+  }
+  if (fetched.size() <= candidates_.size()) {
+    candidate_fetch_complete_ = true;
+    return false;
+  }
+
+  candidates_ = std::move(fetched);
+  preceding_preview_ = PreviewText(preceding, context_preview_limit_);
+  candidate_anchor_ = anchor;
+  candidate_anchor_available_ = anchor_available;
+  if (candidates_.size() < required_count) candidate_fetch_complete_ = true;
   return true;
 }
 
 bool TextService::UpdateCandidates(ITfContext* context) {
   if (!context) return false;
+  candidate_fetch_complete_ = false;
   std::wstring preceding;
   bool context_available = false;
   RECT anchor{};
   bool anchor_available = false;
   if (!FetchCandidates(context, preedit_, candidates_, preceding, context_available,
-                       anchor, anchor_available)) {
+                       anchor, anchor_available, page_size_)) {
     candidates_.clear();
     preceding_preview_.clear();
     candidate_anchor_ = {};
@@ -2066,6 +2117,7 @@ void TextService::ClearCompositionState() {
   candidate_anchor_ = {};
   candidate_anchor_available_ = false;
   candidates_.clear();
+  candidate_fetch_complete_ = false;
   candidate_page_ = 0;
   selected_candidate_ = 0;
   HideCandidates();

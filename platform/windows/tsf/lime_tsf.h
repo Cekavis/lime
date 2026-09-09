@@ -69,7 +69,8 @@ class TextService final : public ITfTextInputProcessorEx,
   bool FetchCandidates(ITfContext* context, const std::wstring& preedit,
                        std::vector<Candidate>& candidates, std::wstring& preceding,
                        bool& context_available, RECT& anchor,
-                       bool& anchor_available);
+                       bool& anchor_available, size_t candidate_limit);
+  bool LoadMoreCandidates(ITfContext* context, size_t required_count);
   bool UpdateCandidates(ITfContext* context);
   void RefreshConfigRevision(ITfContext* context = nullptr);
   bool ResetCompositionForSchemaChange(ITfContext* context);
@@ -109,6 +110,7 @@ class TextService final : public ITfTextInputProcessorEx,
   uint32_t context_limit_ = 128;
   uint32_t context_preview_limit_ = 32;
   uint32_t page_size_ = 9;
+  bool candidate_fetch_complete_ = false;
   bool schema_reset_pending_ = false;
   bool cancel_pending_ = false;
   bool last_edit_pending_ = false;

@@ -50,6 +50,12 @@
         "config_revision": {
           "type": "integer",
           "minimum": 0
+        },
+        "candidate_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Requested leading candidate count; zero uses the legacy full-list behavior."
         }
       }
     },
@@ -90,6 +96,38 @@
           "items": {
             "$ref": "#/$defs/candidate_diagnostic"
           }
+        },
+        "end_to_end_duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rime_duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "llm_performance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/llm_performance"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },

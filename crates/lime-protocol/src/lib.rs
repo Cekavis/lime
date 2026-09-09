@@ -64,10 +64,19 @@ mod tests {
             context_used: true,
             service_state: ServiceState::RimeOnly,
             diagnostics: Vec::new(),
+            end_to_end_duration_ms: Some(29),
+            rime_duration_ms: Some(13),
+            llm_performance: Some(LlmPerformance {
+                total_ms: 17,
+                ..LlmPerformance::default()
+            }),
         };
         let json = serde_json::to_string(&response).expect("serialize response");
         assert!(json.contains("rime_only"));
-        assert!(!json.contains("score"));
+        assert!(json.contains(r#""end_to_end_duration_ms":29"#));
+        assert!(json.contains(r#""rime_duration_ms":13"#));
+        assert!(json.contains(r#""llm_performance":{"total_ms":17"#));
+        assert!(!json.contains(r#""score":"#));
     }
 
     #[test]

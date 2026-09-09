@@ -18,6 +18,7 @@ InputRequest {
   preceding_text: string
   context_available: bool
   config_revision: u64
+  candidate_limit: u32
 }
 ```
 
@@ -25,6 +26,9 @@ InputRequest {
 - 不传光标后文本、完整文档、窗口标题、应用名称、用户身份或控件类型。
 - `context_available=false` 表示读取失败；服务仍按空上下文运行。
 - `config_revision` 用于丢弃旧设置请求，不用于跨版本兼容。
+- `candidate_limit` 表示客户端本次需要的候选前缀长度；零表示显式请求完整列表。测试页按当前页请求，
+  Windows TSF 首次也按当前页请求；服务在模型启用时自动将其提升到 `llm_rerank_count`，翻页超出
+  已加载范围后再请求更长前缀。
 
 ## 响应
 
@@ -35,6 +39,9 @@ InputResponse {
   context_used: bool
   service_state: ready | rime_only | reloading | unavailable
   diagnostics: CandidateDiagnostic[]
+  end_to_end_duration_ms: u64?
+  rime_duration_ms: u64?
+  llm_performance: LlmPerformance?
 }
 
 Candidate {

@@ -51,6 +51,14 @@ pub struct InputRequest {
     pub preceding_text: String,
     pub context_available: bool,
     pub config_revision: u64,
+    /// Number of leading candidates requested by the client.
+    ///
+    /// Zero requests the full list for protocol clients that explicitly need it. The management
+    /// test page requests the current page, while Windows TSF sends the end of the page it needs
+    /// so the service can read more candidates lazily when the user pages past the initial rerank
+    /// window.
+    #[serde(default)]
+    pub candidate_limit: u32,
 }
 
 /// Candidate data exposed to the platform adapter/UI.
@@ -79,6 +87,15 @@ pub struct InputResponse {
     pub service_state: ServiceState,
     /// One row per candidate used by the management/test diagnostics table.
     pub diagnostics: Vec<CandidateDiagnostic>,
+    /// Wall-clock time spent handling this request, for management diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_to_end_duration_ms: Option<u64>,
+    /// Wall-clock time spent obtaining the Rime candidate batch, for management diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rime_duration_ms: Option<u64>,
+    /// Optional LLM timing and workload counters for the management/test page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_performance: Option<LlmPerformance>,
 }
 
 /// A diagnostic record for one input request received by the core service.

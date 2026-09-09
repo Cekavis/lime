@@ -370,15 +370,20 @@ impl CoreService {
             ServiceState::RimeOnly
         };
         let model_name = model_display_name(runtime);
+        let rerank_count = runtime.map_or(0, |_| config.llm_rerank_count as usize);
+        let candidate_limit = if request.candidate_limit == 0 {
+            0
+        } else {
+            (request.candidate_limit as usize)
+                .max(config.page_size as usize)
+                .max(rerank_count)
+        };
         let (rime_result, rime_duration_ms) = match self.engine.lock() {
             Err(_) => (Err(ErrorCode::Internal), None),
             Ok(mut engine) => {
                 let rime_started = Instant::now();
                 let result = engine
-                    .candidates_for_rerank(
-                        &request.preedit,
-                        runtime.map_or(0, |_| config.llm_rerank_count as usize),
-                    )
+                    .candidates_for_rerank(&request.preedit, rerank_count, candidate_limit)
                     .map_err(|error| error.code);
                 (result, Some(elapsed_ms(rime_started.elapsed())))
             }
@@ -425,6 +430,7 @@ impl CoreService {
         let llm_performance = ranking.llm_performance.clone();
         let candidates = ranking.result.candidates;
         let diagnostics = ranking.result.diagnostics;
+        let end_to_end_duration_ms = Some(elapsed_ms(input_started.elapsed()));
         self.record_input_history(InputHistoryRecord {
             request: &request,
             rime_candidates,
@@ -433,8 +439,8 @@ impl CoreService {
             service_state,
             model_name,
             rime_duration_ms,
-            llm_performance,
-            end_to_end_duration_ms: Some(elapsed_ms(input_started.elapsed())),
+            llm_performance: llm_performance.clone(),
+            end_to_end_duration_ms,
         });
         if !self.generation.is_current(generation) {
             return Err(ErrorCode::RequestCancelled);
@@ -445,6 +451,9 @@ impl CoreService {
             context_used: request.context_available && !request.preceding_text.is_empty(),
             service_state,
             diagnostics,
+            end_to_end_duration_ms,
+            rime_duration_ms,
+            llm_performance,
         })
     }
 
@@ -1016,6 +1025,7 @@ mod tests {
             preceding_text: String::new(),
             context_available: false,
             config_revision: 0,
+            candidate_limit: 0,
         }));
         assert_eq!(
             response,
@@ -1045,6 +1055,7 @@ mod tests {
             preceding_text: "上文".into(),
             context_available: true,
             config_revision: 0,
+            candidate_limit: 0,
         };
         service.record_input_history(InputHistoryRecord {
             request: &request,
@@ -1081,6 +1092,7 @@ mod tests {
                 preceding_text: String::new(),
                 context_available: false,
                 config_revision: 0,
+                candidate_limit: 0,
             }));
             assert!(matches!(
                 response,
@@ -1128,6 +1140,7 @@ mod tests {
             preceding_text: String::new(),
             context_available: false,
             config_revision: 0,
+            candidate_limit: 0,
         }));
         assert_eq!(
             thread.join().expect("history waiter should finish"),
@@ -1414,6 +1427,7 @@ mod tests {
             preceding_text: String::new(),
             context_available: false,
             config_revision: 0,
+            candidate_limit: 0,
         }));
         assert_eq!(
             response,
@@ -1487,6 +1501,7 @@ mod tests {
             preceding_text: String::new(),
             context_available: false,
             config_revision: revision,
+            candidate_limit: 0,
         }));
         match response {
             Response::Input(value) => assert!(!value.candidates.is_empty()),

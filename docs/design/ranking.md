@@ -5,14 +5,15 @@
 生产实现位于 `crates/lime-core`，由 `RimeEngine` 和 `LlamaRuntime` 负责候选召回、tokenizer 边界检查和批量 logprob 计算：
 
 1. Rime/雾凇拼音根据 `preedit` 召回候选。
-2. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
-3. ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 完全相等时才进入 LLM；其他英文候选保留在 Rime 原始顺序中，但不参与评分。
-4. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
-5. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
-6. 使用 llama.cpp backend sampler 在 GPU 上完成 softmax、目标 token gather 和 logprob 计算；主机只读取目标 token 的紧凑结果，不回传完整 vocabulary logits。运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
-7. 边界不匹配候选将 `tokenize(candidate_text)` 得到的 token 逐个追加到上文，并与正常候选共用
+2. 平台按需请求 Rime 候选前缀；首个请求至少覆盖当前显示页，启用模型时至少覆盖前 `llm_rerank_count` 个候选。翻页超出已读取范围后，再请求更长的前缀，不预先遍历完整候选列表。
+3. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
+4. ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 完全相等时才进入 LLM；其他英文候选保留在 Rime 原始顺序中，但不参与评分。
+5. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
+6. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
+7. 使用 llama.cpp backend sampler 在 GPU 上完成 softmax、目标 token gather 和 logprob 计算；主机只读取目标 token 的紧凑结果，不回传完整 vocabulary logits。运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
+8. 边界不匹配候选将 `tokenize(candidate_text)` 得到的 token 逐个追加到上文，并与正常候选共用
    候选批量 decode 路径计算 logprob；边界不匹配只保留为诊断标记，不再改变评分路径。
-8. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
+9. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
 
 拼音用于 Rime 召回，不直接写入 LLM prompt。
 
