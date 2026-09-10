@@ -114,20 +114,23 @@ bool IsKeyRepeat(LPARAM lparam) {
   return (static_cast<UINT_PTR>(lparam) & (static_cast<UINT_PTR>(1) << 30)) != 0;
 }
 
+constexpr bool IsLetterVirtualKey(WPARAM key) {
+  // Windows virtual-key codes for letters are VK_A..VK_Z (0x41..0x5A).
+  // Do not accept the lowercase ASCII range here: 0x61..0x7A is also used
+  // by numpad/operator keys and F1..F11.
+  return key >= 'A' && key <= 'Z';
+}
+
 // Convert a virtual key to the character that a standard Windows keyboard
 // layout would produce.  Keeping this as a side-effect-free function makes
 // the mode logic testable without a TSF context; the caller supplies the
 // modifier state captured by GetKeyState().
 constexpr wchar_t AsciiCharForVirtualKey(WPARAM key, bool shift, bool caps_lock,
                                          bool num_lock = true) {
-  if (key >= 'A' && key <= 'Z') {
+  if (IsLetterVirtualKey(key)) {
     const bool upper = shift != caps_lock;
     const wchar_t letter = static_cast<wchar_t>(key);
     return upper ? letter : static_cast<wchar_t>(letter + (L'a' - L'A'));
-  }
-  if (key >= 'a' && key <= 'z') {
-    const wchar_t upper = static_cast<wchar_t>(key - (L'a' - L'A'));
-    return (shift != caps_lock) ? upper : static_cast<wchar_t>(key);
   }
   if (key >= '0' && key <= '9') {
     constexpr wchar_t shifted[] = L")!@#$%^&*(";
@@ -213,6 +216,26 @@ bool IsPunctuationCharacter(wchar_t value) {
 static_assert(AsciiCharForVirtualKey('A', false, false) == L'a');
 static_assert(AsciiCharForVirtualKey('A', true, false) == L'A');
 static_assert(AsciiCharForVirtualKey('1', true, false) == L'!');
+static_assert(AsciiCharForVirtualKey(VK_NUMPAD1, false, false) == L'1');
+static_assert(AsciiCharForVirtualKey(VK_NUMPAD9, false, false) == L'9');
+static_assert(AsciiCharForVirtualKey(VK_MULTIPLY, false, false) == L'*');
+static_assert(AsciiCharForVirtualKey(VK_ADD, false, false) == L'+');
+static_assert(AsciiCharForVirtualKey(VK_SEPARATOR, false, false) == L',');
+static_assert(AsciiCharForVirtualKey(VK_SUBTRACT, false, false) == L'-');
+static_assert(AsciiCharForVirtualKey(VK_DECIMAL, false, false) == L'.');
+static_assert(AsciiCharForVirtualKey(VK_DIVIDE, false, false) == L'/');
+static_assert(AsciiCharForVirtualKey(VK_F1, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F2, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F3, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F4, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F5, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F6, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F7, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F8, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F9, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F10, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F11, false, false) == 0);
+static_assert(AsciiCharForVirtualKey(VK_F12, false, false) == 0);
 static_assert(HalfShapeForAscii(L' ') == std::wstring_view(L" "));
 static_assert(HalfShapeForAscii(L'/') == std::wstring_view(L"/"));
 static_assert(HalfShapeForAscii(L'`') == std::wstring_view(L"·"));
@@ -1037,13 +1060,9 @@ wchar_t TextService::PreeditChar(WPARAM key) const {
   // AltGr, shell commands, ...).  Only an unmodified or Shift-modified
   // letter may enter the Rime snapshot path.
   if (HasNonTextModifier()) return 0;
-  if (key >= 'A' && key <= 'Z') {
+  if (IsLetterVirtualKey(key)) {
     const wchar_t letter = static_cast<wchar_t>(key);
     return UppercaseLetterActive() ? letter : static_cast<wchar_t>(letter + ('a' - 'A'));
-  }
-  if (key >= 'a' && key <= 'z') {
-    const wchar_t letter = static_cast<wchar_t>(key);
-    return UppercaseLetterActive() ? static_cast<wchar_t>(letter - ('a' - 'A')) : letter;
   }
   if (key == VK_OEM_3) return L'`';
   if (key == VK_OEM_7) return L'\'';
@@ -1060,7 +1079,7 @@ bool TextService::IsPreeditKey(WPARAM key) const {
     if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) return false;
     return !preedit_.empty();
   }
-  return (key >= 'A' && key <= 'Z') || (key >= 'a' && key <= 'z');
+  return IsLetterVirtualKey(key);
 }
 std::wstring TextService::AsciiText(WPARAM key) const {
   if (HasNonTextModifier()) return {};
@@ -1157,12 +1176,15 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
       *eaten = FALSE;
       return S_OK;
     }
+    const bool previous_page = IsPreviousPageKey(key);
+    const bool next_page = IsNextPageKey(key);
     if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && key == VK_SPACE) {
       // Shift+Space is explicitly not an ascii-composer switch gesture.
       *eaten = FALSE;
       return S_OK;
     }
-    if (IsPreeditKey(key) || IsChinesePunctuationKey(key)) {
+    if (IsPreeditKey(key) ||
+        (IsChinesePunctuationKey(key) && !previous_page && !next_page)) {
       if (!connected_) RefreshConfigRevision();
       if (!connected_) {
         if (!passthrough_notified_) {
@@ -1188,8 +1210,6 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
     *eaten = FALSE;
   } else if (IsPreeditKey(key)) {
     *eaten = connected_ ? TRUE : FALSE;
-  } else if (IsChinesePunctuationKey(key)) {
-    *eaten = connected_ ? TRUE : FALSE;
   } else if (key == VK_ESCAPE &&
              (composition_ || !preedit_.empty() || terminal_edit_pending_)) {
     // The host must never see Esc while a TSF composition is still alive,
@@ -1202,6 +1222,8 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
     // Navigation belongs to Lime only while a candidate page is visible;
     // otherwise the host must retain its normal scrolling/caret behavior.
     *eaten = !candidates_.empty() && connected_ ? TRUE : FALSE;
+  } else if (IsChinesePunctuationKey(key)) {
+    *eaten = connected_ ? TRUE : FALSE;
   } else {
     *eaten = IsImeKey(key) && !preedit_.empty() && connected_ ? TRUE : FALSE;
   }
