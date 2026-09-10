@@ -21,6 +21,8 @@ cmake -S platform/windows/tsf -B out/windows-x64/cmake/tsf -A x64
 cmake --build out/windows-x64/cmake/tsf --config Release
 ```
 
+TSF DLL 和静态链接进来的 WeaselUI 使用 MSVC 静态运行库：Release 为 `/MT`，Debug 为 `/MTd`。TSF 会被不同宿主进程以内嵌 COM 服务器加载，不能依赖宿主私带的 `MSVCP140.dll`/`VCRUNTIME140.dll`；修改 CMake 时必须保留 `MSVC_RUNTIME_LIBRARY` 设置。
+
 非 Windows 主机上配置会明确失败；本目录不携带 SDK、librime 或任何预编译二进制。
 
 发布安装器使用 `perMachine`，以管理员权限将 TSF profile 注册到系统，并在当前用户 profile 下显式启用 Lime；服务进程仍按当前用户 SID 配置 Named Pipe ACL。卸载时会撤销 profile 与 COM 注册。

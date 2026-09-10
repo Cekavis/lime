@@ -9,6 +9,13 @@ endif()
 option(LIME_WITH_WEASEL_UI "Render the native candidate window with WeaselUI" ON)
 option(LIME_WEASEL_UI_OPENMP "Enable OpenMP acceleration for WeaselUI blur rendering" OFF)
 
+if (MSVC)
+  # This DLL is loaded in-process by arbitrary hosts.  Static-link the MSVC
+  # runtime so a host's private MSVCP140/VCRUNTIME140 copies cannot override
+  # the runtime version used to build Lime and WeaselUI.
+  set(LIME_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 set(LIME_WEASEL_UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/weasel-ui")
 set(LIME_TSF_SOURCES
     tsf_module.cpp
@@ -23,6 +30,8 @@ target_compile_features(lime_tsf PRIVATE cxx_std_20)
 target_compile_definitions(lime_tsf PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(lime_tsf PRIVATE LIME_TSF_EXPORTS)
 if (MSVC)
+  set_property(TARGET lime_tsf PROPERTY
+    MSVC_RUNTIME_LIBRARY "${LIME_MSVC_RUNTIME_LIBRARY}")
   target_compile_options(lime_tsf PRIVATE /utf-8)
 endif()
 set_target_properties(lime_tsf PROPERTIES OUTPUT_NAME "lime-tsf")
@@ -50,6 +59,8 @@ if (LIME_WITH_WEASEL_UI AND EXISTS "${LIME_WEASEL_UI_DIR}/src/WeaselUI.cpp")
       "${LIME_WEASEL_UI_DIR}/include"
       "${LIME_WEASEL_UI_DIR}/src")
   if (MSVC)
+    set_property(TARGET lime_weasel_ui PROPERTY
+      MSVC_RUNTIME_LIBRARY "${LIME_MSVC_RUNTIME_LIBRARY}")
     target_compile_options(lime_weasel_ui PRIVATE /utf-8)
     if (LIME_WEASEL_UI_OPENMP)
       target_compile_options(lime_weasel_ui PRIVATE /openmp)
