@@ -2,7 +2,9 @@
 
 ## 传输
 
-- Windows：当前用户 SID 专属 Named Pipe。
+- Windows：使用 Named Pipe `\\.\pipe\lime-core-v1`。为兼容开始菜单、系统设置等
+  Windows packaged/AppContainer 宿主，管道 ACL 允许普通客户端、低完整性客户端和
+  `ALL APPLICATION PACKAGES`；当前版本不额外做调用方身份校验或用户隔离。
 - macOS：用户私有运行时目录中的 Unix Domain Socket，权限 `0600`。
 - 不监听 TCP/UDP，不接受局域网连接。
 - 所有服务在同一发布版本中，采用简单握手；版本不匹配直接拒绝连接，不实现旧客户端兼容层。
@@ -100,7 +102,7 @@ LlmPerformance {
 
 ## 管理 API
 
-Tauri 使用 `lime-ipc` 的同一 IPC 通道调用配置、模型、词库和输入诊断操作。除用户主动请求的历史接口外，管理响应不回传输入原文；详细信息写结构化日志。帧使用 4 字节 little-endian 长度前缀和 UTF-8 JSON，单帧上限 16 MiB；Windows 使用当前用户 Named Pipe，Unix 使用 `LIME_SOCKET` 指定的 Unix socket，开发默认值为 `/tmp/lime-core.sock`，部署时应放在用户私有运行时目录并设为 `0600`。
+Tauri 使用 `lime-ipc` 的同一 IPC 通道调用配置、模型、词库和输入诊断操作。除用户主动请求的历史接口外，管理响应不回传输入原文；详细信息写结构化日志。帧使用 4 字节 little-endian 长度前缀和 UTF-8 JSON，单帧上限 16 MiB；Windows 使用兼容优先的 Named Pipe ACL，Unix 使用 `LIME_SOCKET` 指定的 Unix socket，开发默认值为 `/tmp/lime-core.sock`，部署时应放在用户私有运行时目录并设为 `0600`。
 
 管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`list_model_presets`、`save_model_preset`、`delete_model_preset`、`select_model_preset`、`learn`、`export_dictionary`、`get_dictionary_page`、`import_dictionary`、`clear_dictionary`、`get_input_history_page`、`wait_for_input_history` 和 `clear_input_history`。`get_dictionary_page` 与 `get_input_history_page` 每次最多返回 100 条，管理窗口刷新和预览只使用分页接口；完整词库导出由管理窗口逐页读取后在本地拼接，避免单帧超过 16 MiB。`wait_for_input_history { revision }` 在历史 revision 变化前保持连接（最多 30 秒），响应 `input_history_revision`；管理窗口用它接收即时通知，不传输输入内容。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型；模型预设保存于服务数据目录的 `model-presets.json`，切换失败时保留当前模型。
 

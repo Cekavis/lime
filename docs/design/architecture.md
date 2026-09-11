@@ -13,7 +13,7 @@ Windows TSF C++ DLL / host
   ├─ preceding-text reader
   ├─ native candidate UI
   └─ IPC client
-          │ current-user Named Pipe
+          │ compatibility-first Named Pipe
           ▼
 lime-service Rust process
   ├─ lime-ipc framing and platform listener
@@ -48,6 +48,9 @@ macOS 未来只替换最上层平台适配器和候选 UI，复用 Rust 服务 A
 - 模型切换执行受控重载；重载期间状态为 `reloading`，中文暂不可用并透传英文。
 - 模型缺失/关闭/加载失败：服务保持 `rime_only`。
 - Rust 服务不可用：TSF 进入英文、数字、常用标点透传；恢复后重新握手。
+
+Windows Named Pipe 为兼容开始菜单、系统设置等 packaged/AppContainer 宿主，允许普通、
+低完整性和 packaged 客户端连接；当前版本不额外实现调用方身份校验或用户隔离。
 
 ## 平台范围
 

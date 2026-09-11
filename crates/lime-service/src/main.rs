@@ -158,7 +158,7 @@ impl NamedPipe {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let security = PipeSecurity::for_current_user()?;
+        let security = PipeSecurity::for_compatible_clients()?;
         let mut attributes = SecurityAttributes {
             length: std::mem::size_of::<SecurityAttributes>() as u32,
             descriptor: security.descriptor,
@@ -206,73 +206,21 @@ struct SecurityAttributes {
 }
 
 #[cfg(windows)]
-#[repr(C)]
-struct SidAndAttributes {
-    sid: *mut std::ffi::c_void,
-    attributes: u32,
-}
-
-#[cfg(windows)]
-#[repr(C)]
-struct TokenUser {
-    user: SidAndAttributes,
-}
-
-#[cfg(windows)]
 struct PipeSecurity {
     descriptor: *mut std::ffi::c_void,
 }
 
 #[cfg(windows)]
 impl PipeSecurity {
-    fn for_current_user() -> io::Result<Self> {
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        let mut token = std::ptr::null_mut();
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut required = 0u32;
-        unsafe {
-            GetTokenInformation(
-                token,
-                TOKEN_USER_CLASS,
-                std::ptr::null_mut(),
-                0,
-                &mut required,
-            );
-        }
-        if required == 0 {
-            unsafe { CloseHandle(token) };
-            return Err(io::Error::last_os_error());
-        }
-        let mut buffer = vec![0u8; required as usize];
-        let ok = unsafe {
-            GetTokenInformation(
-                token,
-                TOKEN_USER_CLASS,
-                buffer.as_mut_ptr() as *mut std::ffi::c_void,
-                required,
-                &mut required,
-            )
-        };
-        if ok == 0 {
-            unsafe { CloseHandle(token) };
-            return Err(io::Error::last_os_error());
-        }
-        unsafe { CloseHandle(token) };
-        let token_user = unsafe { &*(buffer.as_ptr() as *const TokenUser) };
-        let mut sid_text = std::ptr::null_mut();
-        if unsafe { ConvertSidToStringSidW(token_user.user.sid, &mut sid_text) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let sid = unsafe {
-            std::ffi::OsString::from_wide(std::slice::from_raw_parts(sid_text, wcslen(sid_text)))
-        };
-        unsafe {
-            LocalFree(sid_text as *mut std::ffi::c_void);
-        }
-        let sddl = format!("D:P(A;;GA;;;{})", sid.to_string_lossy());
-        let sddl_wide: Vec<u16> = std::ffi::OsStr::new(&sddl)
+    fn for_compatible_clients() -> io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+
+        // Input must continue to work in Windows packaged/AppContainer hosts
+        // such as SearchHost and Settings. Match Weasel's compatibility-first
+        // pipe policy: allow normal, low-integrity, and packaged clients. Lime
+        // intentionally does not add a second caller-authentication layer here.
+        const SDDL: &str = "S:(ML;;NW;;;LW)D:(A;;GA;;;SY)(A;;GA;;;WD)(A;;GA;;;AC)";
+        let sddl_wide: Vec<u16> = std::ffi::OsStr::new(SDDL)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -299,15 +247,6 @@ impl Drop for PipeSecurity {
             LocalFree(self.descriptor);
         }
     }
-}
-
-#[cfg(windows)]
-unsafe fn wcslen(mut value: *const u16) -> usize {
-    let start = value;
-    while *value != 0 {
-        value = value.add(1);
-    }
-    value.offset_from(start) as usize
 }
 
 #[cfg(windows)]
@@ -408,7 +347,6 @@ extern "system" {
         overlapped: *mut std::ffi::c_void,
     ) -> i32;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
-    fn GetCurrentProcess() -> *mut std::ffi::c_void;
     fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
     fn CreateMutexW(
         attributes: *mut std::ffi::c_void,
@@ -421,19 +359,6 @@ extern "system" {
 #[cfg(windows)]
 #[link(name = "advapi32")]
 extern "system" {
-    fn OpenProcessToken(
-        process: *mut std::ffi::c_void,
-        access: u32,
-        token: *mut *mut std::ffi::c_void,
-    ) -> i32;
-    fn GetTokenInformation(
-        token: *mut std::ffi::c_void,
-        class: u32,
-        information: *mut std::ffi::c_void,
-        length: u32,
-        returned: *mut u32,
-    ) -> i32;
-    fn ConvertSidToStringSidW(sid: *mut std::ffi::c_void, string: *mut *mut u16) -> i32;
     fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
         string: *const u16,
         revision: u32,
@@ -441,11 +366,6 @@ extern "system" {
         size: *mut u32,
     ) -> i32;
 }
-
-#[cfg(windows)]
-const TOKEN_USER_CLASS: u32 = 1;
-#[cfg(windows)]
-const TOKEN_QUERY: u32 = 0x0008;
 
 #[cfg(windows)]
 const ERROR_ALREADY_EXISTS: u32 = 183;
