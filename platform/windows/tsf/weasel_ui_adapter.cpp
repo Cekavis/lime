@@ -608,10 +608,15 @@ void LoadTheme(weasel::UIStyle& style) {
 WeaselUiAdapter::~WeaselUiAdapter() { Stop(); }
 
 RECT WeaselUiAdapter::Anchor(ITfContext* context) const {
+  HWND context_window = nullptr;
+  Microsoft::WRL::ComPtr<ITfContextView> context_view;
+  if (context && SUCCEEDED(context->GetActiveView(&context_view)) && context_view)
+    context_view->GetWnd(&context_window);
   GUITHREADINFO info{};
   info.cbSize = sizeof(info);
   const HWND foreground = GetForegroundWindow();
-  const DWORD thread_id = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+  const HWND reference = context_window ? context_window : foreground;
+  const DWORD thread_id = reference ? GetWindowThreadProcessId(reference, nullptr) : 0;
   if (thread_id && GetGUIThreadInfo(thread_id, &info) &&
       info.hwndCaret && info.rcCaret.bottom > info.rcCaret.top) {
     // GUITHREADINFO reports rcCaret in hwndCaret's client coordinates, while
@@ -622,12 +627,11 @@ RECT WeaselUiAdapter::Anchor(ITfContext* context) const {
     POINT bottom_right{info.rcCaret.right, info.rcCaret.bottom};
     if (ClientToScreen(info.hwndCaret, &top_left) &&
         ClientToScreen(info.hwndCaret, &bottom_right)) {
-      return RECT{top_left.x, top_left.y, bottom_right.x, bottom_right.y};
+      const RECT result{top_left.x, top_left.y, bottom_right.x, bottom_right.y};
+      return result;
     }
   }
-  Microsoft::WRL::ComPtr<ITfContextView> view;
-  HWND hwnd = nullptr;
-  if (context && SUCCEEDED(context->GetActiveView(&view)) && view) view->GetWnd(&hwnd);
+  HWND hwnd = context_window;
   RECT rect{200, 200, 200, 220};
   if (hwnd && GetWindowRect(hwnd, &rect)) {
     rect.left += 16;
@@ -648,12 +652,10 @@ void WeaselUiAdapter::Show(ITfContext* context,
                            const RECT* anchor) {
   Snapshot snapshot;
   snapshot.visible = true;
-  snapshot.target_window = GetForegroundWindow();
-  if (!snapshot.target_window) {
-    Microsoft::WRL::ComPtr<ITfContextView> view;
-    if (context && SUCCEEDED(context->GetActiveView(&view)) && view)
-      view->GetWnd(&snapshot.target_window);
-  }
+  Microsoft::WRL::ComPtr<ITfContextView> view;
+  if (context && SUCCEEDED(context->GetActiveView(&view)) && view)
+    view->GetWnd(&snapshot.target_window);
+  if (!snapshot.target_window) snapshot.target_window = GetForegroundWindow();
   snapshot.anchor = anchor ? *anchor : Anchor(context);
   if (!preceding.empty()) snapshot.preceding.assign(preceding.data(), preceding.size());
   // The unconfirmed pinyin is a real TSF composition rendered by the host
@@ -691,7 +693,10 @@ void WeaselUiAdapter::ShowStatus(ITfContext* context, std::wstring_view message)
   Snapshot snapshot;
   snapshot.visible = true;
   snapshot.is_status = true;
-  snapshot.target_window = GetForegroundWindow();
+  Microsoft::WRL::ComPtr<ITfContextView> view;
+  if (context && SUCCEEDED(context->GetActiveView(&view)) && view)
+    view->GetWnd(&snapshot.target_window);
+  if (!snapshot.target_window) snapshot.target_window = GetForegroundWindow();
   snapshot.anchor = Anchor(context);
   if (!message.empty()) snapshot.status.assign(message.data(), message.size());
   Update(std::move(snapshot));
@@ -768,6 +773,7 @@ LRESULT CALLBACK WeaselUiAdapter::HostProc(HWND hwnd, UINT message, WPARAM wpara
 void WeaselUiAdapter::UiThread() {
   ui_thread_id_ = GetCurrentThreadId();
   const HRESULT coinit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  const bool com_usable = SUCCEEDED(coinit) || coinit == RPC_E_CHANGED_MODE;
 
   WNDCLASSW wc{};
   wc.lpfnWndProc = &WeaselUiAdapter::HostProc;
@@ -790,7 +796,7 @@ void WeaselUiAdapter::UiThread() {
   // Signal readiness even when the host window or COM apartment cannot be
   // created.  Stop() can then join a thread that has already exited instead
   // of waiting forever for a message that will never arrive.
-  if (!host || FAILED(coinit)) {
+  if (!host || !com_usable) {
     if (host && IsWindow(host)) DestroyWindow(host);
     {
       std::lock_guard lock(state_mutex_);
@@ -832,19 +838,17 @@ void WeaselUiAdapter::UiThread() {
                             : (*scroll_next_page ? VK_DOWN : VK_UP));
     }
   });
-  const bool ui_created = ui_.Create(nullptr);
-
-  if (ui_created) {
-    MSG message{};
-    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-      TranslateMessage(&message);
-      DispatchMessageW(&message);
-    }
+  MSG message{};
+  while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+    TranslateMessage(&message);
+    DispatchMessageW(&message);
   }
 
-  if (ui_created) {
+  if (ui_created_) {
     ui_.Hide();
     ui_.Destroy(true);
+    ui_created_ = false;
+    ui_parent_ = nullptr;
   }
   if (host && IsWindow(host)) DestroyWindow(host);
   {
@@ -854,6 +858,27 @@ void WeaselUiAdapter::UiThread() {
   if (SUCCEEDED(coinit)) CoUninitialize();
 }
 
+bool WeaselUiAdapter::EnsureUiCreated(HWND parent) {
+  if (parent && !IsWindow(parent)) parent = nullptr;
+  if (ui_created_ && (!IsWindow(ui_parent_) || ui_parent_ != parent)) {
+    ui_.Hide();
+    // Keep Weasel's DirectWrite resources and style, but recreate the popup
+    // with the active TSF view as owner.  A cached owner belongs to the prior
+    // focused control and causes stale placement or UWP clipping.
+    ui_.Destroy(false);
+    ui_created_ = false;
+    ui_parent_ = nullptr;
+  }
+  if (ui_created_) return true;
+  ui_created_ = ui_.Create(parent);
+  if (ui_created_) ui_parent_ = parent;
+  if (!ui_created_ && parent) {
+    ui_created_ = ui_.Create(nullptr);
+    if (ui_created_) ui_parent_ = nullptr;
+  }
+  return ui_created_;
+}
+
 void WeaselUiAdapter::Render() {
   Snapshot snapshot;
   {
@@ -861,9 +886,11 @@ void WeaselUiAdapter::Render() {
     snapshot = snapshot_;
   }
   if (!snapshot.visible) {
-    ui_.Hide();
+    if (ui_created_) ui_.Hide();
     return;
   }
+
+  if (!EnsureUiCreated(snapshot.target_window)) return;
 
   weasel::Context context;
   weasel::Status status;

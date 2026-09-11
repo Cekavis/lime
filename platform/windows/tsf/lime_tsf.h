@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,9 +19,15 @@ extern const LANGID kLanguageId;
 extern HINSTANCE g_instance;
 extern std::atomic<long> g_module_references;
 
+class CandidateUiElement;
+struct CandidateAnchorSession;
+struct AccessibleContextState;
+
 class TextService final : public ITfTextInputProcessorEx,
                           public ITfKeyEventSink,
-                          public ITfCompositionSink {
+                          public ITfCompositionSink,
+                          public ITfDisplayAttributeProvider,
+                          public ITfTextLayoutSink {
  public:
   struct Candidate {
     std::wstring display;
@@ -52,6 +59,13 @@ class TextService final : public ITfTextInputProcessorEx,
   HRESULT STDMETHODCALLTYPE OnPreservedKey(ITfContext* context, REFGUID guid, BOOL* eaten) override;
   HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie cookie,
                                                      ITfComposition* composition) override;
+  HRESULT STDMETHODCALLTYPE OnLayoutChange(ITfContext* context,
+                                            TfLayoutCode code,
+                                            ITfContextView* view) override;
+  HRESULT STDMETHODCALLTYPE EnumDisplayAttributeInfo(
+      IEnumTfDisplayAttributeInfo** enumerator) override;
+  HRESULT STDMETHODCALLTYPE GetDisplayAttributeInfo(
+      REFGUID guid, ITfDisplayAttributeInfo** info) override;
 
   bool EnsureComposition(ITfContext* context, TfEditCookie cookie);
   bool SetCompositionText(TfEditCookie cookie, const std::wstring& text);
@@ -64,6 +78,9 @@ class TextService final : public ITfTextInputProcessorEx,
   uint32_t ContextLimit() const { return context_limit_; }
 
  private:
+  friend class CandidateUiElement;
+  friend struct CandidateAnchorSession;
+
   bool HandleKey(ITfContext* context, WPARAM key);
   bool ToggleAsciiMode(ITfContext* context);
   bool IsImeKey(WPARAM key) const;
@@ -83,6 +100,7 @@ class TextService final : public ITfTextInputProcessorEx,
   bool UpdateCandidates(ITfContext* context);
   bool SelectCandidate(ITfContext* context, size_t index);
   void RefreshConfigRevision(ITfContext* context = nullptr);
+  void PrimeFocusedUiAutomation();
   bool ResetCompositionForSchemaChange(ITfContext* context);
   void LearnCandidate(std::wstring_view pinyin, std::wstring_view text);
   void ClearPendingPartialSelection();
@@ -92,6 +110,18 @@ class TextService final : public ITfTextInputProcessorEx,
                    const std::wstring& remainder = {});
   bool CancelComposition(ITfContext* context);
   bool SetSelectionToCompositionEnd(TfEditCookie cookie);
+  bool SetCompositionDisplayAttribute(TfEditCookie cookie);
+  void ClearCompositionDisplayAttribute(TfEditCookie cookie);
+  bool RefreshCandidateAnchor(TfEditCookie cookie);
+  bool QueueCandidateAnchorRefresh(ITfContext* context, uint64_t generation,
+                                   uint8_t attempt = 0);
+  void AdviseLayoutSink(ITfContext* context);
+  void UnadviseLayoutSink();
+  void InitializeDisplayAttribute();
+  bool BeginCandidateUi();
+  void UpdateCandidateUi();
+  void EndCandidateUi();
+  void ShowCandidates(ITfContext* context);
   void ClearCompositionState();
   void HideCandidates();
   const RECT* CandidateAnchor() const {
@@ -104,12 +134,20 @@ class TextService final : public ITfTextInputProcessorEx,
   TfClientId client_id_ = TF_CLIENTID_NULL;
   DWORD activation_flags_ = 0;
   Microsoft::WRL::ComPtr<ITfComposition> composition_;
+  TfGuidAtom display_attribute_atom_ = TF_INVALID_GUIDATOM;
+  Microsoft::WRL::ComPtr<CandidateUiElement> candidate_ui_;
+  bool candidate_ui_external_ = true;
   // The context that owns composition_.  Keeping it alongside the
   // composition lets every text update restore the host caret to the end of
   // the unconfirmed range instead of leaving it at the range start.
   Microsoft::WRL::ComPtr<ITfContext> composition_context_;
+  Microsoft::WRL::ComPtr<ITfSource> layout_source_;
+  DWORD layout_sink_cookie_ = TF_INVALID_COOKIE;
   std::wstring preedit_;
   std::wstring preceding_preview_;
+  // A result belongs to one composition.  Clearing the state drops our
+  // reference so an older UIA worker cannot supply a later editor's context.
+  std::shared_ptr<AccessibleContextState> accessible_context_;
   RECT candidate_anchor_{};
   bool candidate_anchor_available_ = false;
   std::vector<Candidate> candidates_;
@@ -124,6 +162,7 @@ class TextService final : public ITfTextInputProcessorEx,
   uint32_t context_preview_limit_ = 32;
   uint32_t page_size_ = 9;
   bool candidate_fetch_complete_ = false;
+  bool last_fetch_failed_ = false;
   bool schema_reset_pending_ = false;
   bool cancel_pending_ = false;
   bool last_edit_pending_ = false;

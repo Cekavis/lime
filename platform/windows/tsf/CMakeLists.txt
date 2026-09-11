@@ -35,7 +35,7 @@ if (MSVC)
 endif()
 set_target_properties(lime_tsf PROPERTIES OUTPUT_NAME "lime-tsf")
 
-target_link_libraries(lime_tsf PRIVATE ole32 advapi32 user32 shlwapi)
+target_link_libraries(lime_tsf PRIVATE ole32 advapi32 user32 shlwapi uiautomationcore)
 
 if (NOT EXISTS "${LIME_WEASEL_UI_DIR}/src/WeaselUI.cpp")
   message(FATAL_ERROR "third_party/weasel-ui is required to build lime_tsf")
@@ -76,3 +76,27 @@ target_include_directories(lime_tsf PRIVATE
     "${LIME_WEASEL_UI_DIR}/include"
     "${LIME_WEASEL_UI_DIR}/src")
 target_link_libraries(lime_tsf PRIVATE lime_weasel_ui)
+
+include(CTest)
+if (BUILD_TESTING)
+  add_executable(lime_tsf_contract_tests
+      tests/tsf_contracts.cpp
+      lime_tsf.cpp
+      lime_tsf.h
+      weasel_ui_adapter.cpp
+      weasel_ui_adapter.h)
+  target_compile_features(lime_tsf_contract_tests PRIVATE cxx_std_20)
+  target_compile_definitions(lime_tsf_contract_tests PRIVATE
+      UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX LIME_TSF_TESTS)
+  target_include_directories(lime_tsf_contract_tests PRIVATE
+      "${LIME_WEASEL_UI_DIR}/include"
+      "${LIME_WEASEL_UI_DIR}/src")
+  if (MSVC)
+    set_property(TARGET lime_tsf_contract_tests PROPERTY
+      MSVC_RUNTIME_LIBRARY "${LIME_MSVC_RUNTIME_LIBRARY}")
+    target_compile_options(lime_tsf_contract_tests PRIVATE /utf-8)
+  endif()
+  target_link_libraries(lime_tsf_contract_tests PRIVATE
+      lime_weasel_ui ole32 advapi32 user32 shlwapi uiautomationcore)
+  add_test(NAME lime_tsf_contracts COMMAND lime_tsf_contract_tests)
+endif()

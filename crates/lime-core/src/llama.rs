@@ -908,59 +908,18 @@ impl LlamaRuntime {
         let candidate_indices = plans.iter().enumerate().collect::<Vec<_>>();
         let mut chunk_start = 0;
         while chunk_start < candidate_indices.len() {
-            let mut chunk_end = chunk_start;
-            let mut longest_prefix = 0_usize;
-            let mut active_prefix_count = 0_usize;
-            while chunk_end < candidate_indices.len()
-                && chunk_end - chunk_start < self.sequence_count
-            {
-                let candidate_prefix = candidate_indices[chunk_end]
-                    .1
-                    .score_ids
-                    .len()
-                    .saturating_sub(1);
-                let next_longest = longest_prefix.max(candidate_prefix);
-                if next_longest >= context_limit {
-                    return Err(format!(
-                        "candidate requires {} decoded prefix tokens, context limit is {context_limit}",
-                        next_longest
-                    ));
-                }
-                let next_active_prefix_count =
-                    active_prefix_count.saturating_add(usize::from(candidate_prefix > 0));
-                let continuation_budget = next_longest.saturating_mul(next_active_prefix_count);
-                if continuation_budget >= context_limit {
-                    return Err(format!(
-                        "candidate continuation batch requires {continuation_budget} tokens, context limit is {context_limit}"
-                    ));
-                }
-                let base_budget = context_limit - continuation_budget;
-                let decoded_base_tokens = if base_ids.is_empty() {
-                    1 // score_batch supplies BOS for an empty user context
-                } else {
-                    base_ids.len().min(base_budget)
-                };
-                let next_batch_tokens = decoded_base_tokens.saturating_add(continuation_budget);
-                if next_batch_tokens > context_limit {
-                    if chunk_end == chunk_start {
-                        return Err(format!(
-                            "candidate decode requires {next_batch_tokens} tokens, context limit is {context_limit}"
-                        ));
-                    }
-                    break;
-                }
-                longest_prefix = next_longest;
-                active_prefix_count = next_active_prefix_count;
-                chunk_end += 1;
+            let (chunk_len, base_budget) = plan_candidate_chunk(
+                &plans[chunk_start..],
+                self.sequence_count,
+                context_limit,
+                base_ids.len(),
+            )?;
+            if chunk_len == 0 {
+                return Err("candidate chunk planner produced an empty chunk".to_owned());
             }
+            let chunk_end = chunk_start + chunk_len;
 
             let chunk = &candidate_indices[chunk_start..chunk_end];
-            let active_prefix_count = chunk
-                .iter()
-                .filter(|(_, plan)| plan.score_ids.len() > 1)
-                .count();
-            let base_budget =
-                context_limit.saturating_sub(longest_prefix.saturating_mul(active_prefix_count));
             let base_start = base_ids.len().saturating_sub(base_budget);
             let decode_base = base_ids[base_start..].to_vec();
             let sequences = chunk
@@ -1034,6 +993,62 @@ impl LlamaRuntime {
 struct CandidatePlan {
     score_ids: Vec<llama_token>,
     mismatch: bool,
+}
+
+/// Choose the largest first chunk that fits llama.cpp's padded continuation
+/// budget. A candidate that fits by itself may still force the current chunk
+/// to split because every active sequence is padded to the longest suffix.
+fn plan_candidate_chunk(
+    plans: &[CandidatePlan],
+    sequence_count: usize,
+    context_limit: usize,
+    base_token_count: usize,
+) -> Result<(usize, usize), String> {
+    if sequence_count == 0 {
+        return Err("llama sequence capacity is zero".to_owned());
+    }
+    let mut chunk_len = 0_usize;
+    let mut longest_prefix = 0_usize;
+    let mut active_prefix_count = 0_usize;
+    for plan in plans.iter().take(sequence_count) {
+        let candidate_prefix = plan.score_ids.len().saturating_sub(1);
+        let next_longest = longest_prefix.max(candidate_prefix);
+        if next_longest >= context_limit {
+            return Err(format!(
+                "candidate requires {} decoded prefix tokens, context limit is {context_limit}",
+                next_longest
+            ));
+        }
+        let next_active_prefix_count =
+            active_prefix_count.saturating_add(usize::from(candidate_prefix > 0));
+        let continuation_budget = next_longest.saturating_mul(next_active_prefix_count);
+        if continuation_budget >= context_limit {
+            // The candidate fits individually, but adding it would overfill
+            // this padded batch. Leave it for the next chunk.
+            break;
+        }
+        let base_budget = context_limit - continuation_budget;
+        let decoded_base_tokens = if base_token_count == 0 {
+            1 // score_batch supplies BOS for an empty user context
+        } else {
+            base_token_count.min(base_budget)
+        };
+        let next_batch_tokens = decoded_base_tokens.saturating_add(continuation_budget);
+        if next_batch_tokens > context_limit {
+            if chunk_len == 0 {
+                return Err(format!(
+                    "candidate decode requires {next_batch_tokens} tokens, context limit is {context_limit}"
+                ));
+            }
+            break;
+        }
+        longest_prefix = next_longest;
+        active_prefix_count = next_active_prefix_count;
+        chunk_len += 1;
+    }
+    let base_budget =
+        context_limit.saturating_sub(longest_prefix.saturating_mul(active_prefix_count));
+    Ok((chunk_len, base_budget))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1567,6 +1582,26 @@ mod tests {
         let error = resolve_runtime_library(&directory).unwrap_err();
         assert!(error.contains("no llama.cpp library found"));
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn candidate_chunk_planner_splits_padded_continuation_budget() {
+        let plans = (0..32)
+            .map(|_| CandidatePlan {
+                score_ids: vec![1; 8],
+                mismatch: false,
+            })
+            .collect::<Vec<_>>();
+
+        let (first_len, first_base_budget) = plan_candidate_chunk(&plans, 32, 128, 2).unwrap();
+        assert_eq!(first_len, 18);
+        assert_eq!(first_base_budget, 2);
+
+        let (second_len, second_base_budget) =
+            plan_candidate_chunk(&plans[first_len..], 32, 128, 2).unwrap();
+        assert_eq!(second_len, 14);
+        assert_eq!(second_base_budget, 30);
+        assert_eq!(first_len + second_len, plans.len());
     }
 
     #[test]

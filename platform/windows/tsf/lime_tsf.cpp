@@ -1,7 +1,9 @@
 #include "lime_tsf.h"
 
 #include <windows.h>
+#include <UIAutomation.h>
 #include <inputscope.h>
+#include <ctffunc.h>
 #include <objbase.h>
 #include <shlwapi.h>
 
@@ -11,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <thread>
 
 #include "weasel_ui_adapter.h"
 
@@ -24,7 +27,332 @@ const LANGID kLanguageId = MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED);
 HINSTANCE g_instance = nullptr;
 std::atomic<long> g_module_references{0};
 
+struct AccessibleContextState {
+  std::mutex mutex;
+  HWND window = nullptr;
+  bool pending = false;
+  bool ready = false;
+  std::wstring text;
+};
+
+constexpr GUID kDisplayAttributeInput = {
+    0xc2adb175, 0x7e45, 0x4477, {0x9c, 0xf9, 0x6e, 0x89, 0xec, 0x19, 0xb6, 0xcd}};
+
+// Keep the same display-attribute contract as Weasel.  Some TSF hosts render
+// a composition only when its GUID_PROP_ATTRIBUTE value can be resolved through
+// ITfDisplayAttributeProvider; without it the text is accepted but appears as
+// ordinary host text with no composition underline.
+class DisplayAttributeInfo final : public ITfDisplayAttributeInfo {
+ public:
+  DisplayAttributeInfo() : references_(1) { ++g_module_references; }
+  ~DisplayAttributeInfo() { --g_module_references; }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+    if (!object) return E_POINTER;
+    *object = nullptr;
+    if (iid == IID_IUnknown || iid == IID_ITfDisplayAttributeInfo) {
+      *object = static_cast<ITfDisplayAttributeInfo*>(this);
+      AddRef();
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG value = --references_;
+    if (!value) delete this;
+    return value;
+  }
+  HRESULT STDMETHODCALLTYPE GetGUID(GUID* guid) override {
+    if (!guid) return E_POINTER;
+    *guid = kDisplayAttributeInput;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE GetDescription(BSTR* description) override {
+    if (!description) return E_POINTER;
+    *description = SysAllocString(L"Lime Display Attribute Input");
+    return *description ? S_OK : E_OUTOFMEMORY;
+  }
+  HRESULT STDMETHODCALLTYPE GetAttributeInfo(TF_DISPLAYATTRIBUTE* attribute) override {
+    if (!attribute) return E_POINTER;
+    *attribute = TF_DISPLAYATTRIBUTE{
+        {TF_CT_NONE, 0},  // text color: use the host's color
+        {TF_CT_NONE, 0},  // background color: use the host's color
+        TF_LS_DOT,        // match Weasel's dotted composition underline
+        FALSE,
+        {TF_CT_NONE, 0},
+        TF_ATTR_INPUT};
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE SetAttributeInfo(
+      const TF_DISPLAYATTRIBUTE*) override {
+    return E_NOTIMPL;
+  }
+  HRESULT STDMETHODCALLTYPE Reset() override { return S_OK; }
+
+ private:
+  std::atomic<ULONG> references_;
+};
+
+class DisplayAttributeEnumerator final : public IEnumTfDisplayAttributeInfo {
+ public:
+  DisplayAttributeEnumerator() : references_(1) { ++g_module_references; }
+  ~DisplayAttributeEnumerator() { --g_module_references; }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+    if (!object) return E_POINTER;
+    *object = nullptr;
+    if (iid == IID_IUnknown || iid == IID_IEnumTfDisplayAttributeInfo) {
+      *object = static_cast<IEnumTfDisplayAttributeInfo*>(this);
+      AddRef();
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG value = --references_;
+    if (!value) delete this;
+    return value;
+  }
+  HRESULT STDMETHODCALLTYPE Clone(IEnumTfDisplayAttributeInfo** enumerator) override {
+    if (!enumerator) return E_POINTER;
+    *enumerator = nullptr;
+    auto* clone = new (std::nothrow) DisplayAttributeEnumerator();
+    if (!clone) return E_OUTOFMEMORY;
+    clone->index_ = index_;
+    *enumerator = clone;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE Next(ULONG count, ITfDisplayAttributeInfo** values,
+                                  ULONG* fetched) override {
+    if (!values || !fetched) return E_POINTER;
+    *fetched = 0;
+    if (count == 0) return S_OK;
+    if (index_ != 0) return S_FALSE;
+    auto* info = new (std::nothrow) DisplayAttributeInfo();
+    if (!info) return E_OUTOFMEMORY;
+    values[0] = info;
+    *fetched = 1;
+    index_ = 1;
+    return count == 1 ? S_OK : S_FALSE;
+  }
+  HRESULT STDMETHODCALLTYPE Reset() override {
+    index_ = 0;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE Skip(ULONG count) override {
+    if (count == 0) return S_OK;
+    if (index_ == 0 && count == 1) {
+      index_ = 1;
+      return S_OK;
+    }
+    index_ = 1;
+    return S_FALSE;
+  }
+
+ private:
+  std::atomic<ULONG> references_;
+  ULONG index_ = 0;
+};
+
+// UWP/immersive text controls consume candidate lists through TSF's UI
+// element manager instead of allowing an out-of-process popup to cover their
+// surface.  Keep a small data-only element alongside WeaselUI so those hosts
+// can render the same candidates natively.  Desktop hosts normally request
+// pbShow=TRUE, in which case TextService continues to use the Weasel popup.
+class CandidateUiElement final : public ITfIntegratableCandidateListUIElement,
+                                 public ITfCandidateListUIElementBehavior {
+ public:
+  explicit CandidateUiElement(TextService* owner) : owner_(owner) {
+    ++g_module_references;
+  }
+  ~CandidateUiElement() { --g_module_references; }
+  void DetachOwner() { owner_ = nullptr; }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+    if (!object) return E_POINTER;
+    *object = nullptr;
+    if (iid == IID_IUnknown || iid == IID_ITfIntegratableCandidateListUIElement) {
+      *object = static_cast<ITfIntegratableCandidateListUIElement*>(this);
+    } else if (iid == IID_ITfUIElement || iid == IID_ITfCandidateListUIElement ||
+               iid == IID_ITfCandidateListUIElementBehavior) {
+      *object = static_cast<ITfCandidateListUIElementBehavior*>(this);
+    } else {
+      return E_NOINTERFACE;
+    }
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG value = --references_;
+    if (!value) delete this;
+    return value;
+  }
+
+  HRESULT STDMETHODCALLTYPE GetDescription(BSTR* description) override {
+    if (!description) return E_POINTER;
+    *description = SysAllocString(L"Lime Candidate List");
+    return *description ? S_OK : E_OUTOFMEMORY;
+  }
+  HRESULT STDMETHODCALLTYPE GetGUID(GUID* guid) override {
+    if (!guid) return E_POINTER;
+    *guid = {0x05c2b076, 0x35ed, 0x4401,
+             {0xb4, 0x1c, 0x38, 0x96, 0x54, 0x9e, 0x9a, 0x5f}};
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE Show(BOOL show) override {
+    shown_ = show != FALSE;
+    // The UI element manager may call Show while it is synchronizing the
+    // element.  This is only the element's visibility state; it must not
+    // overwrite the pbShow policy returned by BeginUIElement.  Weasel keeps
+    // those two states separate as well.
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE IsShown(BOOL* show) override {
+    if (!show) return E_POINTER;
+    *show = shown_ ? TRUE : FALSE;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE GetUpdatedFlags(DWORD* flags) override {
+    if (!flags) return E_POINTER;
+    *flags = TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION |
+             TF_CLUIE_STRING | TF_CLUIE_CURRENTPAGE;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE GetDocumentMgr(ITfDocumentMgr** manager) override {
+    if (!manager) return E_POINTER;
+    *manager = nullptr;
+    if (!owner_ || !owner_->thread_manager_) return E_FAIL;
+    return owner_->thread_manager_->GetFocus(manager);
+  }
+  HRESULT STDMETHODCALLTYPE GetCount(UINT* count) override {
+    if (!count) return E_POINTER;
+    *count = static_cast<UINT>(candidates_.size());
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE GetSelection(UINT* index) override {
+    if (!index) return E_POINTER;
+    *index = static_cast<UINT>(selected_);
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE GetString(UINT index, BSTR* value) override {
+    if (!value) return E_POINTER;
+    *value = nullptr;
+    if (index >= candidates_.size()) return E_INVALIDARG;
+    *value = SysAllocStringLen(candidates_[index].c_str(),
+                               static_cast<UINT>(candidates_[index].size()));
+    return *value ? S_OK : E_OUTOFMEMORY;
+  }
+  HRESULT STDMETHODCALLTYPE GetPageIndex(UINT* indices, UINT size,
+                                          UINT* page_count) override {
+    if (!page_count) return E_POINTER;
+    *page_count = candidates_.empty() ? 0 : 1;
+    if (!indices) return S_OK;
+    if (size < 1 || *page_count != 1) return E_INVALIDARG;
+    indices[0] = 0;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE SetPageIndex(UINT* indices, UINT page_count) override {
+    if (!indices && page_count != 0) return E_POINTER;
+    if (page_count == 0) return S_OK;
+    return page_count == 1 && indices[0] == 0 ? S_OK : E_INVALIDARG;
+  }
+  HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT* page) override {
+    if (!page) return E_POINTER;
+    // Like Weasel, expose the current page as a single native page.  The
+    // popup itself owns paging; integrated hosts see only this page snapshot.
+    *page = 0;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE SetSelection(UINT index) override {
+    if (!owner_ || candidates_.empty()) return E_INVALIDARG;
+    if (index >= candidates_.size()) return E_INVALIDARG;
+    const size_t absolute = candidate_begin_ + index;
+    owner_->selected_candidate_ = absolute;
+    selected_ = index;
+    owner_->UpdateCandidateUi();
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE Finalize() override {
+    if (!owner_ || candidates_.empty()) return E_FAIL;
+    ITfContext* context = owner_->active_context_.Get();
+    return owner_->SelectCandidate(context, candidate_begin_ + selected_) ? S_OK : E_FAIL;
+  }
+  HRESULT STDMETHODCALLTYPE Abort() override {
+    if (!owner_) return E_FAIL;
+    return owner_->CancelComposition(owner_->active_context_.Get()) ? S_OK : E_FAIL;
+  }
+
+  HRESULT STDMETHODCALLTYPE SetIntegrationStyle(GUID) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE GetSelectionStyle(
+      TfIntegratableCandidateListSelectionStyle* style) override {
+    if (!style) return E_POINTER;
+    *style = STYLE_ACTIVE_SELECTION;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE OnKeyDown(WPARAM wParam, LPARAM, BOOL* eaten) override {
+    if (!eaten) return E_POINTER;
+    *eaten = FALSE;
+    if (owner_ && owner_->active_context_) {
+      // Integrated hosts send navigation through the UI element instead of
+      // the key sink.  Reuse the same key path so number selection, paging,
+      // commit and cancel retain identical behavior.
+      *eaten = owner_->HandleKey(owner_->active_context_.Get(), wParam) ? TRUE : FALSE;
+    }
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE ShowCandidateNumbers(BOOL* show) override {
+    if (!show) return E_POINTER;
+    *show = TRUE;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE FinalizeExactCompositionString() override {
+    return E_NOTIMPL;
+  }
+
+  void SetSnapshot(const std::vector<TextService::Candidate>& candidates,
+                   size_t page, size_t selected, size_t page_size) {
+    candidates_.clear();
+    page_size_ = std::max<size_t>(1, page_size);
+    candidate_begin_ = candidates.empty()
+                           ? 0
+                           : (std::min)(page * page_size_, candidates.size() - 1);
+    const size_t end = (std::min)(candidates.size(), candidate_begin_ + page_size_);
+    candidates_.reserve(end - candidate_begin_);
+    for (size_t index = candidate_begin_; index < end; ++index)
+      candidates_.push_back(candidates[index].display);
+    selected_ = selected >= candidate_begin_ && selected < end
+                    ? selected - candidate_begin_
+                    : 0;
+  }
+
+  bool started() const { return started_; }
+  void SetShown(bool shown) { shown_ = shown; }
+  void set_started(bool value, DWORD id = 0) {
+    started_ = value;
+    ui_id_ = id;
+  }
+  DWORD ui_id() const { return ui_id_; }
+  bool external_show() const { return external_show_; }
+  void set_external_show(bool value) { external_show_ = value; }
+
+ private:
+  std::atomic<ULONG> references_{1};
+  TextService* owner_ = nullptr;
+  std::vector<std::wstring> candidates_;
+  size_t candidate_begin_ = 0;
+  size_t selected_ = 0;
+  size_t page_size_ = 9;
+  DWORD ui_id_ = 0;
+  bool started_ = false;
+  bool shown_ = false;
+  bool external_show_ = true;
+};
+
 namespace {
+
 constexpr wchar_t kDescription[] = L"Lime Chinese Input";
 constexpr UINT kMaxFrame = 16u * 1024u * 1024u;
 constexpr UINT kDefaultContextLimit = 128;
@@ -563,6 +891,57 @@ struct CompositionSession final : ITfEditSession {
   HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override;
 };
 
+}  // namespace
+
+struct CandidateAnchorSession final : ITfEditSession {
+  std::atomic<ULONG> references{1};
+  TextService* owner;
+  ComPtr<ITfContext> context;
+  uint64_t generation;
+  uint8_t attempt;
+  CandidateAnchorSession(TextService* service, ITfContext* ctx, uint64_t gen,
+                         uint8_t refresh_attempt)
+      : owner(service), context(ctx), generation(gen), attempt(refresh_attempt) {
+    owner->AddRef();
+  }
+  ~CandidateAnchorSession() { owner->Release(); }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (iid != IID_IUnknown && iid != IID_ITfEditSession) return E_NOINTERFACE;
+    *out = static_cast<ITfEditSession*>(this);
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG value = --references;
+    if (!value) delete this;
+    return value;
+  }
+  HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
+    if (!owner->IsEditCurrent(generation) ||
+        owner->composition_context_.Get() != context.Get()) return S_OK;
+    const bool refreshed = owner->RefreshCandidateAnchor(cookie);
+    // The first read can run before the host has laid out the newly extended
+    // composition.  Give the view one more read-only edit session before
+    // publishing the popup.  If the retry cannot be queued, retain a valid
+    // first result and fall back only when both reads failed.
+    if (attempt == 0 &&
+        owner->QueueCandidateAnchorRefresh(context.Get(), generation, 1)) {
+      return S_OK;
+    }
+    if (!refreshed) {
+      owner->candidate_anchor_ = {};
+      owner->candidate_anchor_available_ = false;
+    }
+    owner->ShowCandidates(context.Get());
+    return S_OK;
+  }
+};
+
+namespace {
+
 bool ReadPrecedingRange(ITfContext* context, TfEditCookie cookie, uint32_t limit,
                         std::wstring& text, ITfRange* composition_range = nullptr) {
   text.clear();
@@ -580,6 +959,29 @@ bool ReadPrecedingRange(ITfContext* context, TfEditCookie cookie, uint32_t limit
   ComPtr<ITfRange> before;
   if (FAILED(range->Clone(&before))) return false;
   if (FAILED(before->Collapse(cookie, TF_ANCHOR_START))) return false;
+
+  // Use the provider-neutral TSF range operation first.  It preserves the
+  // host's document model and is the path used by the stock TSF
+  // implementations.  ACP is retained only for older controls that do not
+  // implement ShiftStart.
+  LONG moved = 0;
+  if (SUCCEEDED(before->ShiftStart(cookie, -static_cast<LONG>(limit), &moved,
+                                   nullptr))) {
+    const ULONG count = static_cast<ULONG>(std::max<LONG>(0, -moved));
+    if (count != 0 || limit == 0) {
+      std::vector<wchar_t> buffer(count);
+      ULONG read = 0;
+      if (count &&
+          FAILED(before->GetText(cookie, 0, buffer.data(), count, &read))) {
+        return false;
+      }
+      if (read) text.assign(buffer.data(), read);
+      return true;
+    }
+  }
+
+  // Some legacy controls do not implement ShiftStart but do expose ACP
+  // ranges.  Keep that compatibility fallback after the generic path.
   ComPtr<ITfRangeACP> acp;
   LONG start = 0, length = 0;
   if (SUCCEEDED(before.As(&acp)) && SUCCEEDED(acp->GetExtent(&start, &length))) {
@@ -590,19 +992,245 @@ bool ReadPrecedingRange(ITfContext* context, TfEditCookie cookie, uint32_t limit
     if (read) text.assign(buffer.data(), read);
     return true;
   }
-  LONG moved = 0;
-  if (FAILED(before->ShiftStart(cookie, -static_cast<LONG>(limit), &moved, nullptr))) return false;
-  const ULONG count = static_cast<ULONG>(std::max<LONG>(0, -moved));
-  std::vector<wchar_t> buffer(count); ULONG read = 0;
-  if (count && FAILED(before->GetText(cookie, 0, buffer.data(), count, &read))) return false;
-  if (read) text.assign(buffer.data(), read);
+  return false;
+}
+
+// Qt's Windows TSF bridge can expose an empty ITfRange while its accessibility
+// provider still exposes the focused QTextEdit's bounded prefix.  Query the
+// provider asynchronously on a COM MTA after the edit session returns.  This
+// avoids IMR_RECONVERTSTRING, which changes the selection, and never requests
+// a document range or any UI outside the focused editor.
+bool ReadUiAutomationPrecedingOnWorker(HWND view_window, uint32_t limit,
+                                       std::wstring& text) {
+  text.clear();
+  if (!view_window || !IsWindow(view_window)) return false;
+  DWORD view_process = 0;
+  GetWindowThreadProcessId(view_window, &view_process);
+  if (!view_process) return false;
+
+  ComPtr<IUIAutomation> automation;
+  if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
+                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) ||
+      !automation) {
+    return false;
+  }
+  ComPtr<IUIAutomation2> automation2;
+  if (SUCCEEDED(automation.As(&automation2)) && automation2) {
+    automation2->put_ConnectionTimeout(75);
+    automation2->put_TransactionTimeout(75);
+  }
+  // GetFocusedElement is substantially cheaper than walking every descendant
+  // of Telegram's top-level Qt window.  The focused element is still checked
+  // below for process, root-window, framework, control-type and text-pattern
+  // identity before it is trusted.
+  ComPtr<IUIAutomationElement> focused;
+  automation->GetFocusedElement(&focused);
+  if (!focused) {
+    ComPtr<IUIAutomationElement> root;
+    if (SUCCEEDED(automation->ElementFromHandle(view_window, &root)) && root) {
+      VARIANT focus_value{};
+      focus_value.vt = VT_BOOL;
+      focus_value.boolVal = VARIANT_TRUE;
+      ComPtr<IUIAutomationCondition> focus_condition;
+      if (SUCCEEDED(automation->CreatePropertyCondition(
+              UIA_HasKeyboardFocusPropertyId, focus_value,
+              &focus_condition)) &&
+          focus_condition) {
+        VARIANT pattern_value{};
+        pattern_value.vt = VT_BOOL;
+        pattern_value.boolVal = VARIANT_TRUE;
+        ComPtr<IUIAutomationCondition> pattern_condition;
+        ComPtr<IUIAutomationCondition> combined_condition;
+        if (SUCCEEDED(automation->CreatePropertyCondition(
+                UIA_IsTextPattern2AvailablePropertyId, pattern_value,
+                &pattern_condition)) &&
+            pattern_condition &&
+            SUCCEEDED(automation->CreateAndCondition(
+                focus_condition.Get(), pattern_condition.Get(),
+                &combined_condition)) &&
+            combined_condition) {
+          root->FindFirst(
+              static_cast<TreeScope>(TreeScope_Element | TreeScope_Descendants),
+              combined_condition.Get(), &focused);
+        }
+        VariantClear(&pattern_value);
+      }
+      VariantClear(&focus_value);
+    }
+  }
+  if (!focused) return false;
+
+  VARIANT value{};
+  if (FAILED(focused->GetCurrentPropertyValue(UIA_ProcessIdPropertyId, &value)) ||
+      value.vt != VT_I4 || static_cast<DWORD>(value.lVal) != view_process) {
+    VariantClear(&value);
+    return false;
+  }
+  VariantClear(&value);
+  if (SUCCEEDED(focused->GetCurrentPropertyValue(
+          UIA_NativeWindowHandlePropertyId, &value)) &&
+      value.vt == VT_I4 && value.lVal != 0) {
+    HWND focused_window = reinterpret_cast<HWND>(static_cast<INT_PTR>(value.lVal));
+    if (!focused_window ||
+        GetAncestor(focused_window, GA_ROOT) != GetAncestor(view_window, GA_ROOT)) {
+      VariantClear(&value);
+      return false;
+    }
+  }
+  VariantClear(&value);
+  if (FAILED(focused->GetCurrentPropertyValue(UIA_HasKeyboardFocusPropertyId,
+                                              &value)) ||
+      value.vt != VT_BOOL || value.boolVal == VARIANT_FALSE) {
+    VariantClear(&value);
+    return false;
+  }
+  VariantClear(&value);
+  if (FAILED(focused->GetCurrentPropertyValue(UIA_IsPasswordPropertyId,
+                                              &value)) ||
+      value.vt != VT_BOOL || value.boolVal != VARIANT_FALSE) {
+    VariantClear(&value);
+    return false;
+  }
+  VariantClear(&value);
+
+  if (SUCCEEDED(focused->GetCurrentPropertyValue(UIA_FrameworkIdPropertyId,
+                                                 &value)) &&
+      value.vt == VT_BSTR && value.bstrVal) {
+    const std::wstring framework(value.bstrVal, SysStringLen(value.bstrVal));
+    const bool is_qt = framework.size() >= 2 &&
+                       (framework[0] == L'Q' || framework[0] == L'q') &&
+                       (framework[1] == L'T' || framework[1] == L't');
+    VariantClear(&value);
+    if (!is_qt) return false;
+  } else {
+    VariantClear(&value);
+    return false;
+  }
+
+  if (FAILED(focused->GetCurrentPropertyValue(UIA_ControlTypePropertyId,
+                                              &value)) ||
+      value.vt != VT_I4 ||
+      (value.lVal != UIA_EditControlTypeId &&
+       value.lVal != UIA_DocumentControlTypeId)) {
+    VariantClear(&value);
+    return false;
+  }
+  VariantClear(&value);
+
+  ComPtr<IUIAutomationTextPattern2> pattern;
+  if (FAILED(focused->GetCurrentPatternAs(UIA_TextPattern2Id,
+                                          IID_PPV_ARGS(&pattern))) ||
+      !pattern) {
+    return false;
+  }
+  BOOL active = FALSE;
+  ComPtr<IUIAutomationTextRange> caret;
+  if (FAILED(pattern->GetCaretRange(&active, &caret)) || !active || !caret) {
+    return false;
+  }
+  const int move_limit = static_cast<int>((std::min)(
+      limit, static_cast<uint32_t>(std::numeric_limits<int>::max())));
+  int moved = 0;
+  if (move_limit > 0 &&
+      FAILED(caret->MoveEndpointByUnit(TextPatternRangeEndpoint_Start,
+                                        TextUnit_Character, -move_limit,
+                                        &moved))) {
+    return false;
+  }
+  BSTR value_text = nullptr;
+  if (FAILED(caret->GetText(-1, &value_text)) || !value_text) return false;
+  text.assign(value_text, SysStringLen(value_text));
+  SysFreeString(value_text);
   return true;
+}
+
+std::atomic_flag g_ui_automation_busy = ATOMIC_FLAG_INIT;
+
+bool ReadUiAutomationPreceding(std::shared_ptr<AccessibleContextState> state,
+                               HWND view_window, uint32_t limit,
+                               std::wstring& text) {
+  text.clear();
+  if (!view_window || !IsWindow(view_window)) return false;
+  wchar_t class_name[64]{};
+  const int class_length = GetClassNameW(view_window, class_name,
+                                         ARRAYSIZE(class_name));
+  if (class_length < 2 ||
+      (class_name[0] != L'Q' && class_name[0] != L'q') ||
+      (class_name[1] != L'T' && class_name[1] != L't')) {
+    return false;
+  }
+  {
+    std::lock_guard lock(state->mutex);
+    if (state->window == view_window) {
+      if (state->ready) {
+        text = state->text;
+        return true;
+      }
+      if (state->pending) return false;
+    }
+  }
+  if (g_ui_automation_busy.test_and_set(std::memory_order_acquire)) return false;
+
+  {
+    std::lock_guard lock(state->mutex);
+    state->window = view_window;
+    state->pending = true;
+    state->ready = false;
+    state->text.clear();
+  }
+
+  ++g_module_references;
+  try {
+    std::thread([state, view_window, limit] {
+      const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      std::wstring value;
+      bool success = false;
+      try {
+        if (SUCCEEDED(init)) {
+          success = ReadUiAutomationPrecedingOnWorker(view_window, limit, value);
+        }
+      } catch (...) {
+        success = false;
+      }
+      {
+        std::lock_guard lock(state->mutex);
+        state->window = view_window;
+        state->pending = false;
+        state->ready = success;
+        if (success) {
+          state->text = std::move(value);
+        } else {
+          state->text.clear();
+        }
+      }
+      g_ui_automation_busy.clear(std::memory_order_release);
+      if (SUCCEEDED(init)) CoUninitialize();
+      --g_module_references;
+    }).detach();
+  } catch (...) {
+    {
+      std::lock_guard lock(state->mutex);
+      state->pending = false;
+      state->ready = false;
+      state->text.clear();
+    }
+    g_ui_automation_busy.clear(std::memory_order_release);
+    --g_module_references;
+    return false;
+  }
+  return false;
+}
+
+void PrimeUiAutomationPreceding(std::shared_ptr<AccessibleContextState> state,
+                                HWND view_window, uint32_t limit) {
+  std::wstring ignored;
+  (void)ReadUiAutomationPreceding(std::move(state), view_window, limit, ignored);
 }
 
 // Match Weasel's TSF positioning path: resolve the composition/selection
 // start inside the edit session and ask the active view for its screen-space
 // text extent.  A GUI-thread caret rectangle can lag behind an asynchronous
-// composition update and may place the popup over the host's text.
+// composition update, so it is only used by the UI adapter as a fallback.
 bool ReadInputPosition(ITfContext* context, TfEditCookie cookie,
                        ITfRange* composition_range, RECT& rect) {
   rect = {};
@@ -619,13 +1247,60 @@ bool ReadInputPosition(ITfContext* context, TfEditCookie cookie,
     if (FAILED(hr) || fetched != 1 || !selection.range) return false;
     range.Attach(selection.range);
   }
-  if (FAILED(range->Collapse(cookie, TF_ANCHOR_START))) return false;
-
   ComPtr<ITfContextView> view;
   if (FAILED(context->GetActiveView(&view)) || !view) return false;
-  BOOL clipped = FALSE;
-  const HRESULT hr = view->GetTextExt(cookie, range.Get(), &rect, &clipped);
-  return SUCCEEDED(hr) && rect.bottom > rect.top;
+  auto read_extent = [&](TfAnchor anchor, RECT& result) {
+    ComPtr<ITfRange> collapsed;
+    if (FAILED(range->Clone(&collapsed)) || !collapsed) return false;
+    if (FAILED(collapsed->Collapse(cookie, anchor))) return false;
+    BOOL clipped = FALSE;
+    const HRESULT hr = view->GetTextExt(cookie, collapsed.Get(), &result, &clipped);
+    return SUCCEEDED(hr) && !(result.left == 0 && result.top == 0);
+  };
+
+  RECT start_rect{};
+  if (!read_extent(TF_ANCHOR_START, start_rect)) return false;
+
+  // Qt's TSF bridge can return the whole first composition glyph, or the
+  // editor window origin, when the newly-created range has not reached its
+  // final layout yet.  A collapsed end range is the caret position in that
+  // case and is stable once the host has accepted the composition.
+  const LONG start_width = start_rect.right - start_rect.left;
+  const LONG start_height = start_rect.bottom - start_rect.top;
+  const bool start_looks_like_caret = start_height > 0 && start_width >= 0 &&
+                                      start_width <= 4;
+  rect = start_rect;
+  if (!start_looks_like_caret && composition_range) {
+    RECT end_rect{};
+    if (read_extent(TF_ANCHOR_END, end_rect)) {
+      const LONG end_width = end_rect.right - end_rect.left;
+      const LONG end_height = end_rect.bottom - end_rect.top;
+      if (end_height > 0 && end_width >= 0 && end_width <= 4) rect = end_rect;
+    }
+  }
+  if (rect.bottom <= rect.top) return false;
+
+  // Match Weasel's enhanced-position correction.  A few controls return a
+  // valid rectangle in their own client coordinate space during the first
+  // composition layout.  When it falls outside the foreground window, use
+  // the current caret origin to translate it into screen coordinates.
+  HWND foreground = GetForegroundWindow();
+  RECT foreground_rect{};
+  if (foreground && GetWindowRect(foreground, &foreground_rect) &&
+      (rect.left < foreground_rect.left || rect.left > foreground_rect.right ||
+       rect.top < foreground_rect.top || rect.top > foreground_rect.bottom)) {
+    POINT caret{};
+    const bool has_caret = GetCaretPos(&caret) != FALSE;
+    const LONG offset_x = foreground_rect.left - rect.left +
+                          (has_caret ? caret.x : 0);
+    const LONG offset_y = foreground_rect.top - rect.top +
+                          (has_caret ? caret.y : 0);
+    rect.left += offset_x;
+    rect.right += offset_x;
+    rect.top += offset_y;
+    rect.bottom += offset_y;
+  }
+  return true;
 }
 
 class CandidateWindow {
@@ -692,18 +1367,129 @@ HRESULT CompositionSession::DoEditSession(TfEditCookie cookie) {
 }
 
 TextService::TextService() { ++g_module_references; }
-TextService::~TextService() { Deactivate(); --g_module_references; }
+TextService::~TextService() {
+  Deactivate();
+  if (candidate_ui_) candidate_ui_->DetachOwner();
+  --g_module_references;
+}
 
 HRESULT TextService::QueryInterface(REFIID iid, void** object) {
   if (!object) return E_POINTER; *object = nullptr;
   if (iid == IID_IUnknown || iid == IID_ITfTextInputProcessor || iid == IID_ITfTextInputProcessorEx) *object = static_cast<ITfTextInputProcessorEx*>(this);
   else if (iid == IID_ITfKeyEventSink) *object = static_cast<ITfKeyEventSink*>(this);
   else if (iid == IID_ITfCompositionSink) *object = static_cast<ITfCompositionSink*>(this);
+  else if (iid == IID_ITfDisplayAttributeProvider) *object = static_cast<ITfDisplayAttributeProvider*>(this);
+  else if (iid == IID_ITfTextLayoutSink) *object = static_cast<ITfTextLayoutSink*>(this);
   else return E_NOINTERFACE;
   AddRef(); return S_OK;
 }
 ULONG TextService::AddRef() { return ++references_; }
 ULONG TextService::Release() { const ULONG v = --references_; if (!v) delete this; return v; }
+
+HRESULT TextService::EnumDisplayAttributeInfo(
+    IEnumTfDisplayAttributeInfo** enumerator) {
+  if (!enumerator) return E_POINTER;
+  *enumerator = new (std::nothrow) DisplayAttributeEnumerator();
+  return *enumerator ? S_OK : E_OUTOFMEMORY;
+}
+
+HRESULT TextService::GetDisplayAttributeInfo(REFGUID guid,
+                                             ITfDisplayAttributeInfo** info) {
+  if (!info) return E_POINTER;
+  *info = nullptr;
+  if (!IsEqualGUID(guid, kDisplayAttributeInput)) return E_INVALIDARG;
+  *info = new (std::nothrow) DisplayAttributeInfo();
+  return *info ? S_OK : E_OUTOFMEMORY;
+}
+
+void TextService::InitializeDisplayAttribute() {
+  if (display_attribute_atom_ != TF_INVALID_GUIDATOM) return;
+  ComPtr<ITfCategoryMgr> categories;
+  if (FAILED(CoCreateInstance(CLSID_TF_CategoryMgr, nullptr,
+                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&categories))) ||
+      !categories) {
+    return;
+  }
+  TfGuidAtom atom = TF_INVALID_GUIDATOM;
+  if (SUCCEEDED(categories->RegisterGUID(kDisplayAttributeInput, &atom))) {
+    display_attribute_atom_ = atom;
+  }
+}
+
+bool TextService::BeginCandidateUi() {
+  if (!thread_manager_) return false;
+  if (!candidate_ui_) candidate_ui_.Attach(new (std::nothrow) CandidateUiElement(this));
+  if (!candidate_ui_) return false;
+  if (candidate_ui_->started()) return true;
+  // BeginUIElement may synchronously query the element.  Publish the current
+  // page before entering the manager so those callbacks never observe the
+  // previous composition's candidates.
+  candidate_ui_->SetSnapshot(candidates_, candidate_page_, selected_candidate_,
+                             page_size_);
+
+  ComPtr<ITfUIElementMgr> manager;
+  if (FAILED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager))) ||
+      !manager) {
+    return false;
+  }
+  BOOL show = TRUE;
+  DWORD id = 0;
+  const HRESULT hr = manager->BeginUIElement(candidate_ui_.Get(), &show, &id);
+  if (FAILED(hr)) {
+    return false;
+  }
+  candidate_ui_->set_started(true, id);
+  candidate_ui_->set_external_show(show != FALSE);
+  candidate_ui_external_ = show != FALSE;
+  return true;
+}
+
+void TextService::UpdateCandidateUi() {
+  ITfContext* context = active_context_.Get();
+  if (composition_context_) context = composition_context_.Get();
+  const bool should_show = context != nullptr && !candidates_.empty();
+  if (!candidates_.empty() && (!candidate_ui_ || !candidate_ui_->started())) {
+    BeginCandidateUi();
+  }
+  if (candidate_ui_ && candidate_ui_->started()) {
+    candidate_ui_->SetSnapshot(candidates_, candidate_page_, selected_candidate_,
+                               page_size_);
+    // UIElement hosts query IsShown synchronously from UpdateUIElement.  Set
+    // this before the manager call; publishing it afterwards leaves hosts
+    // such as Windows Settings with a valid composition but no popup.
+    candidate_ui_->SetShown(should_show);
+    ComPtr<ITfUIElementMgr> manager;
+    if (thread_manager_ &&
+        SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager))) &&
+        manager) {
+      manager->UpdateUIElement(candidate_ui_->ui_id());
+    }
+  }
+  if (!should_show ||
+      (candidate_ui_ && candidate_ui_->started() && !candidate_ui_external_)) {
+    g_candidates.Hide();
+    return;
+  }
+  g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
+                    page_size_, {}, preceding_preview_, CandidateAnchor());
+}
+
+void TextService::ShowCandidates(ITfContext* context) {
+  if (context) active_context_ = context;
+  UpdateCandidateUi();
+}
+
+void TextService::EndCandidateUi() {
+  if (candidate_ui_ && candidate_ui_->started() && thread_manager_) {
+    ComPtr<ITfUIElementMgr> manager;
+    if (SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager))) &&
+        manager) {
+      manager->EndUIElement(candidate_ui_->ui_id());
+    }
+  }
+  if (candidate_ui_) candidate_ui_->set_started(false);
+  candidate_ui_external_ = true;
+}
 
 HRESULT TextService::Activate(ITfThreadMgr* manager, TfClientId client_id) { return ActivateEx(manager, client_id, 0); }
 HRESULT TextService::ActivateEx(ITfThreadMgr* manager, TfClientId client_id, DWORD flags) {
@@ -713,6 +1499,7 @@ HRESULT TextService::ActivateEx(ITfThreadMgr* manager, TfClientId client_id, DWO
   thread_manager_ = manager; client_id_ = client_id; activation_flags_ = flags;
   HRESULT hr = manager->QueryInterface(IID_PPV_ARGS(&keystroke_manager_)); if (FAILED(hr)) return hr;
   hr = keystroke_manager_->AdviseKeyEventSink(client_id_, this, TRUE); if (FAILED(hr)) { keystroke_manager_.Reset(); return hr; }
+  InitializeDisplayAttribute();
   RefreshConfigRevision();
   return S_OK;
 }
@@ -753,7 +1540,10 @@ HRESULT TextService::Deactivate() {
   keystroke_manager_.Reset(); thread_manager_.Reset(); client_id_ = TF_CLIENTID_NULL; activation_flags_ = 0; return S_OK;
 }
 HRESULT TextService::OnSetFocus(BOOL foreground) {
-  if (foreground) return S_OK;
+  if (foreground) {
+    PrimeFocusedUiAutomation();
+    return S_OK;
+  }
   shift_down_mask_ = 0;
   shift_pending_mask_ = 0;
   left_shift_down_tick_ = 0;
@@ -794,6 +1584,7 @@ HRESULT TextService::OnCompositionTerminated(TfEditCookie, ITfComposition* compo
   ++edit_generation_;
   terminal_edit_pending_ = false;
   terminal_edit_generation_ = 0;
+  UnadviseLayoutSink();
   composition_.Reset();
   composition_context_.Reset();
   ClearCompositionState();
@@ -801,17 +1592,43 @@ HRESULT TextService::OnCompositionTerminated(TfEditCookie, ITfComposition* compo
   return S_OK;
 }
 
+HRESULT TextService::OnLayoutChange(ITfContext* context, TfLayoutCode code,
+                                    ITfContextView*) {
+  const bool matching = composition_ && composition_context_.Get() == context;
+  if (!matching || code != TF_LC_CHANGE || candidates_.empty()) return S_OK;
+  QueueCandidateAnchorRefresh(context, edit_generation_);
+  return S_OK;
+}
+
 void TextService::CompleteEditSession(Action action, uint64_t generation,
                                       bool succeeded) {
   if (!IsEditCurrent(generation)) return;
   last_edit_pending_ = false;
+  if (action == Action::Update) {
+    ITfContext* context = composition_context_.Get();
+    if (!succeeded) {
+      HideCandidates();
+      return;
+    }
+    // SetText can leave GetTextExt temporarily without layout.  Like Weasel,
+    // request a separate read session after the write so the first key uses
+    // the new composition's position.  Never publish the pre-write caret.
+    candidate_anchor_ = {};
+    candidate_anchor_available_ = false;
+    if (!context || candidates_.empty()) {
+      HideCandidates();
+    } else if (!QueueCandidateAnchorRefresh(context, generation)) {
+      ShowCandidates(context);
+    }
+    return;
+  }
+  EndCandidateUi();
   if (action == Action::CommitPartial && partial_edit_generation_ == generation) {
     ITfContext* context = composition_context_.Get();
     if (!succeeded) {
       ClearPendingPartialSelection();
       if (context) {
-        g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                          page_size_, {}, preceding_preview_, CandidateAnchor());
+        ShowCandidates(context);
       }
       return;
     }
@@ -827,14 +1644,14 @@ void TextService::CompleteEditSession(Action action, uint64_t generation,
     candidate_fetch_complete_ = pending_partial_fetch_complete_;
     candidate_page_ = 0;
     selected_candidate_ = 0;
+    accessible_context_.reset();
     ClearPendingPartialSelection();
 
     if (!pinyin.empty()) LearnCandidate(pinyin, commit);
     if (!context || candidates_.empty()) {
       HideCandidates();
     } else {
-      g_candidates.Show(context, candidates_, 0, 0, page_size_, {},
-                        preceding_preview_, CandidateAnchor());
+      ShowCandidates(context);
     }
     return;
   }
@@ -975,6 +1792,21 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
       return S_OK;
     }
     if (context) active_context_ = context;
+    // Telegram's Qt TSF bridge exposes the preceding text through UIA.  Start
+    // that MTA query during the key probe so a completed result can be consumed
+    // by a later real input request without blocking this key.
+    if (context && IsPreeditKey(key)) {
+      ComPtr<ITfContextView> active_view;
+      HWND view_window = nullptr;
+      if (SUCCEEDED(context->GetActiveView(&active_view)) && active_view)
+        active_view->GetWnd(&view_window);
+      if (view_window) {
+        if (!accessible_context_)
+          accessible_context_ = std::make_shared<AccessibleContextState>();
+        PrimeUiAutomationPreceding(accessible_context_, view_window,
+                                    ContextLimit());
+      }
+    }
     // OnTestKeyDown is only a probe.  Do not open a read edit session or call
     // the service here: some hosts keep the probe inside their own TSF lock,
     // which makes the real write session in OnKeyDown return TF_E_LOCKED.
@@ -1302,9 +2134,11 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       // the failure visible. Only fall back to English when the service path
       // itself is unavailable.
       if (connected_) {
-        const std::wstring reason = last_edit_error_ == S_OK
-                                        ? L"编辑器拒绝组合串"
-                                        : EditErrorText(last_edit_error_);
+        const std::wstring reason =
+            last_fetch_failed_
+                ? L"候选获取失败"
+                : (last_edit_error_ == S_OK ? L"编辑器拒绝组合串"
+                                            : EditErrorText(last_edit_error_));
         g_candidates.ShowStatus(context, std::wstring(L"Lime：") + reason);
         return true;
       }
@@ -1361,8 +2195,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       // The probe already told the host that this key belongs to Lime.  Keep
       // it consumed when TSF rejects the edit; forwarding it would insert a
       // digit into the host while the old composition is still active.
-      g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                        page_size_, {}, preceding_preview_, CandidateAnchor());
+      ShowCandidates(context);
       return true;
     }
     return true;
@@ -1390,8 +2223,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       const size_t index = std::min(selected_candidate_, candidates_.size() - 1);
       selected_candidate_ = index;
       if (!SelectCandidate(context, index)) {
-        g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                          page_size_, {}, preceding_preview_, CandidateAnchor());
+        ShowCandidates(context);
         return true;
       }
       return true;
@@ -1433,8 +2265,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
     if (previous_page && candidate_page_ > 0) {
       --candidate_page_;
       selected_candidate_ = candidate_page_ * page_size_;
-      g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                        page_size_, {}, preceding_preview_, CandidateAnchor());
+      ShowCandidates(context);
     } else if (next_page) {
       const size_t next_begin = (candidate_page_ + 1) * page_size_;
       if (next_begin >= candidates_.size()) {
@@ -1443,8 +2274,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       if (next_begin < candidates_.size()) {
         ++candidate_page_;
         selected_candidate_ = candidate_page_ * page_size_;
-        g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                          page_size_, {}, preceding_preview_, CandidateAnchor());
+        ShowCandidates(context);
       }
     }
     // Page keys are owned by the candidate window even at the ends; treating
@@ -1481,8 +2311,7 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
         selected_candidate_ = candidate_page_ * page_size_;
       }
     }
-    g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
-                      page_size_, {}, preceding_preview_, CandidateAnchor());
+    ShowCandidates(context);
     return true;
   }
   if (IsChinesePunctuationKey(key)) {
@@ -1543,6 +2372,14 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
   context_available = false;
   anchor = {};
   anchor_available = false;
+  if ((composition_context_ && composition_context_.Get() != context) ||
+      (!composition_context_ && active_context_ && active_context_.Get() != context)) {
+    accessible_context_.reset();
+  }
+  HWND view_window = nullptr;
+  ComPtr<ITfContextView> active_view;
+  if (SUCCEEDED(context->GetActiveView(&active_view)) && active_view)
+    active_view->GetWnd(&view_window);
   // Read context in a read-only edit session, then synchronously ask the local service.
   class ReadSession final : public ITfEditSession {
    public:
@@ -1601,6 +2438,14 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
     anchor = {};
     anchor_available = false;
   }
+  if (preceding.empty() || !context_available) {
+    if (!accessible_context_)
+      accessible_context_ = std::make_shared<AccessibleContextState>();
+    if (ReadUiAutomationPreceding(accessible_context_, view_window,
+                                  ContextLimit(), preceding)) {
+      context_available = true;
+    }
+  }
   if (context_available && !preceding_suffix.empty()) {
     preceding.append(preceding_suffix);
     if (preceding.size() > ContextLimit()) {
@@ -1626,42 +2471,48 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
                            ",\"candidate_limit\":" + std::to_string(requested_limit) +
                            extension_field +
                            "}}";
-   if (!g_pipe.Request(json, body)) { connected_ = false; return false; }
-   if (body.find("\"kind\":\"error\"") != std::string::npos) { RefreshConfigRevision(context); return false; }
-    std::string service_state;
-    if (!JsonField(body, "service_state", service_state) ||
-        (service_state != "ready" && service_state != "rime_only")) {
-      connected_ = false;
-      return false;
+  if (!g_pipe.Request(json, body)) {
+    connected_ = false;
+    return false;
+  }
+  if (body.find("\"kind\":\"error\"") != std::string::npos) {
+    RefreshConfigRevision(context);
+    return false;
+  }
+  std::string service_state;
+  if (!JsonField(body, "service_state", service_state) ||
+      (service_state != "ready" && service_state != "rime_only")) {
+    connected_ = false;
+    return false;
+  }
+  connected_ = true;
+  passthrough_notified_ = false;
+  const std::string candidates_needle = "\"candidates\":[";
+  const size_t array = body.find(candidates_needle);
+  if (array == std::string::npos) return false;
+  const size_t array_end = JsonArrayEnd(body, array + candidates_needle.size() - 1);
+  if (array_end == std::string::npos) return false;
+  const std::vector<std::optional<std::string>> remainders =
+      JsonOptionalStringArray(body, "candidate_remainders");
+  size_t pos = array + candidates_needle.size();
+  size_t candidate_index = 0;
+  while (pos < array_end) {
+    const size_t d = body.find("\"display_text\":\"", pos);
+    if (d == std::string::npos) break;
+    const size_t c = body.find("\"commit_text\":\"", d);
+    if (c == std::string::npos) break;
+    if (d >= array_end || c >= array_end) break;
+    Candidate candidate;
+    candidate.display = Wide(JsonString(body, d + 16));
+    candidate.commit = Wide(JsonString(body, c + 15));
+    if (candidate_index < remainders.size() && remainders[candidate_index]) {
+      candidate.remainder = Wide(*remainders[candidate_index]);
+      candidate.remainder_available = true;
     }
-   connected_ = true;
-   passthrough_notified_ = false;
-   const std::string candidates_needle = "\"candidates\":[";
-   const size_t array = body.find(candidates_needle);
-   if (array == std::string::npos) return false;
-   const size_t array_end = JsonArrayEnd(body, array + candidates_needle.size() - 1);
-   if (array_end == std::string::npos) return false;
-   const std::vector<std::optional<std::string>> remainders =
-       JsonOptionalStringArray(body, "candidate_remainders");
-   size_t pos = array + candidates_needle.size();
-   size_t candidate_index = 0;
-   while (pos < array_end) {
-     const size_t d = body.find("\"display_text\":\"", pos);
-     if (d == std::string::npos) break;
-     const size_t c = body.find("\"commit_text\":\"", d);
-     if (c == std::string::npos) break;
-     if (d >= array_end || c >= array_end) break;
-     Candidate candidate;
-     candidate.display = Wide(JsonString(body, d + 16));
-     candidate.commit = Wide(JsonString(body, c + 15));
-     if (candidate_index < remainders.size() && remainders[candidate_index]) {
-       candidate.remainder = Wide(*remainders[candidate_index]);
-       candidate.remainder_available = true;
-     }
-     result_candidates.push_back(std::move(candidate));
-     ++candidate_index;
-     pos = c + 15;
-   }
+    result_candidates.push_back(std::move(candidate));
+    ++candidate_index;
+    pos = c + 15;
+  }
   return true;
 }
 
@@ -1693,12 +2544,14 @@ bool TextService::LoadMoreCandidates(ITfContext* context, size_t required_count)
 bool TextService::UpdateCandidates(ITfContext* context) {
   if (!context) return false;
   candidate_fetch_complete_ = false;
+  last_fetch_failed_ = false;
   std::wstring preceding;
   bool context_available = false;
   RECT anchor{};
   bool anchor_available = false;
   if (!FetchCandidates(context, preedit_, candidates_, preceding, context_available,
                        anchor, anchor_available, page_size_)) {
+    last_fetch_failed_ = true;
     candidates_.clear();
     preceding_preview_.clear();
     candidate_anchor_ = {};
@@ -1708,6 +2561,9 @@ bool TextService::UpdateCandidates(ITfContext* context) {
   }
   candidate_anchor_ = anchor;
   candidate_anchor_available_ = anchor_available;
+  preceding_preview_ = PreviewText(preceding, context_preview_limit_);
+  candidate_page_ = 0;
+  selected_candidate_ = 0;
   if (!RequestEdit(context, Action::Update, preedit_)) {
     candidates_.clear();
     preceding_preview_.clear();
@@ -1717,15 +2573,9 @@ bool TextService::UpdateCandidates(ITfContext* context) {
     return false;
   }
   active_input_request_id_ = request_id_;
-  preceding_preview_ = PreviewText(preceding, context_preview_limit_);
-  candidate_page_ = 0;
-  selected_candidate_ = 0;
-  if (candidates_.empty()) {
-    HideCandidates();
-  } else {
-    g_candidates.Show(context, candidates_, 0, 0, page_size_, {},
-                      preceding_preview_, CandidateAnchor());
-  }
+  // The popup is published from CompleteEditSession after the composition
+  // range has been created and its screen extent can be read.  Showing it
+  // here would position the first-key popup from the previous caret.
   return true;
 }
 
@@ -1768,6 +2618,24 @@ void TextService::RefreshConfigRevision(ITfContext* context) {
     // dedicated 10+ selection gesture is added.
     page_size_ = static_cast<uint32_t>(std::clamp<uint64_t>(page_size, 1, 9));
   }
+}
+
+void TextService::PrimeFocusedUiAutomation() {
+  if (!thread_manager_) return;
+  ComPtr<ITfDocumentMgr> document_manager;
+  ComPtr<ITfContext> context;
+  ComPtr<ITfContextView> view;
+  HWND view_window = nullptr;
+  if (FAILED(thread_manager_->GetFocus(&document_manager)) ||
+      !document_manager ||
+      FAILED(document_manager->GetTop(&context)) || !context ||
+      FAILED(context->GetActiveView(&view)) || !view ||
+      FAILED(view->GetWnd(&view_window)) || !view_window) {
+    return;
+  }
+  if (!accessible_context_)
+    accessible_context_ = std::make_shared<AccessibleContextState>();
+  PrimeUiAutomationPreceding(accessible_context_, view_window, ContextLimit());
 }
 
 bool TextService::ResetCompositionForSchemaChange(ITfContext* context) {
@@ -1919,7 +2787,9 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
     if (action == Action::Cancel) cancel_pending_ = true;
     return true;
   }
-  if (SUCCEEDED(result)) return true;
+  if (SUCCEEDED(result)) {
+    return true;
+  }
   last_edit_error_ = result;
   if (action == Action::Cancel) cancel_pending_ = true;
   if (action == Action::CommitPartial) ClearPendingPartialSelection();
@@ -1927,6 +2797,32 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
   terminal_edit_generation_ = 0;
   return false;
 }
+
+void TextService::AdviseLayoutSink(ITfContext* context) {
+  UnadviseLayoutSink();
+  if (!context) return;
+  ComPtr<ITfSource> source;
+  if (FAILED(context->QueryInterface(IID_PPV_ARGS(&source))) || !source) {
+    return;
+  }
+  DWORD cookie = TF_INVALID_COOKIE;
+  const HRESULT hr = source->AdviseSink(IID_ITfTextLayoutSink,
+                                        static_cast<ITfTextLayoutSink*>(this),
+                                        &cookie);
+  if (SUCCEEDED(hr)) {
+    layout_source_ = std::move(source);
+    layout_sink_cookie_ = cookie;
+  }
+}
+
+void TextService::UnadviseLayoutSink() {
+  if (layout_source_ && layout_sink_cookie_ != TF_INVALID_COOKIE) {
+    layout_source_->UnadviseSink(layout_sink_cookie_);
+  }
+  layout_source_.Reset();
+  layout_sink_cookie_ = TF_INVALID_COOKIE;
+}
+
 bool TextService::EnsureComposition(ITfContext* context, TfEditCookie cookie) {
   if (composition_) return true;
   ComPtr<ITfContextComposition> composition_context;
@@ -1969,12 +2865,14 @@ bool TextService::EnsureComposition(ITfContext* context, TfEditCookie cookie) {
     return false;
   }
   composition_context_ = context;
+  AdviseLayoutSink(context);
   if (!SetSelectionToCompositionEnd(cookie)) {
     // Do not leave a live composition behind if the host cannot place the
     // caret at its end.  EndComposition is best-effort here; the original
     // edit error is retained for the caller.
     const HRESULT selection_error = last_edit_error_;
     composition_->EndComposition(cookie);
+    UnadviseLayoutSink();
     composition_.Reset();
     composition_context_.Reset();
     last_edit_error_ = selection_error;
@@ -1993,9 +2891,15 @@ bool TextService::SetCompositionText(TfEditCookie cookie, const std::wstring& te
     last_edit_error_ = FAILED(hr) ? hr : TF_E_NOOBJECT;
     return false;
   }
+  ClearCompositionDisplayAttribute(cookie);
   hr = range->SetText(cookie, 0, text.c_str(), static_cast<LONG>(text.size()));
-  if (FAILED(hr)) last_edit_error_ = hr;
-  if (FAILED(hr)) return false;
+  if (FAILED(hr)) {
+    last_edit_error_ = hr;
+    return false;
+  }
+  if (!SetCompositionDisplayAttribute(cookie)) {
+    return false;
+  }
   return SetSelectionToCompositionEnd(cookie);
 }
 bool TextService::CommitComposition(TfEditCookie cookie, const std::wstring& text) {
@@ -2032,6 +2936,10 @@ bool TextService::CommitPartialComposition(TfEditCookie cookie,
 
   const std::wstring original = preedit_;
   const std::wstring combined = commit + remainder;
+  // The composition range is about to shrink past the committed prefix.
+  // Clear the old property first so the committed text cannot retain Lime's
+  // input underline.
+  ClearCompositionDisplayAttribute(cookie);
   hr = range->SetText(cookie, 0, combined.c_str(), static_cast<LONG>(combined.size()));
   if (FAILED(hr)) {
     last_edit_error_ = hr;
@@ -2071,17 +2979,59 @@ bool TextService::CommitPartialComposition(TfEditCookie cookie,
     last_edit_error_ = error;
     return false;
   }
+  if (!SetCompositionDisplayAttribute(cookie)) return false;
   return true;
 }
 bool TextService::EndComposition(TfEditCookie cookie) {
   if (!composition_) return true;
+  ClearCompositionDisplayAttribute(cookie);
   const HRESULT result = composition_->EndComposition(cookie);
   if (SUCCEEDED(result)) {
+    UnadviseLayoutSink();
     composition_.Reset();
     composition_context_.Reset();
   }
   if (FAILED(result)) last_edit_error_ = result;
   return SUCCEEDED(result);
+}
+
+bool TextService::SetCompositionDisplayAttribute(TfEditCookie cookie) {
+  if (!composition_ || display_attribute_atom_ == TF_INVALID_GUIDATOM ||
+      !composition_context_) {
+    // A host may not expose GUID_PROP_ATTRIBUTE.  Composition text itself is
+    // still valid, so treat the optional visual hint as best effort.
+    return true;
+  }
+  ComPtr<ITfRange> range;
+  if (FAILED(composition_->GetRange(&range)) || !range) return false;
+  ComPtr<ITfProperty> property;
+  if (FAILED(composition_context_->GetProperty(GUID_PROP_ATTRIBUTE, &property)) ||
+      !property) {
+    return true;
+  }
+  VARIANT value{};
+  value.vt = VT_I4;
+  value.lVal = static_cast<LONG>(display_attribute_atom_);
+  const HRESULT hr = property->SetValue(cookie, range.Get(), &value);
+  if (FAILED(hr)) {
+    // Display attributes are a host-side decoration.  Do not turn a valid
+    // composition update into a rejected key merely because this context does
+    // not accept the optional property.
+    return true;
+  }
+  return true;
+}
+
+void TextService::ClearCompositionDisplayAttribute(TfEditCookie cookie) {
+  if (!composition_ || !composition_context_) return;
+  ComPtr<ITfRange> range;
+  if (FAILED(composition_->GetRange(&range)) || !range) return;
+  ComPtr<ITfProperty> property;
+  if (SUCCEEDED(composition_context_->GetProperty(GUID_PROP_ATTRIBUTE,
+                                                  &property)) &&
+      property) {
+    property->Clear(cookie, range.Get());
+  }
 }
 bool TextService::CancelComposition(ITfContext* context) {
   if (!composition_) {
@@ -2124,7 +3074,35 @@ bool TextService::SetSelectionToCompositionEnd(TfEditCookie cookie) {
   if (FAILED(hr)) last_edit_error_ = hr;
   return SUCCEEDED(hr);
 }
+
+bool TextService::RefreshCandidateAnchor(TfEditCookie cookie) {
+  if (!composition_ || !composition_context_) return false;
+  ComPtr<ITfRange> range;
+  if (FAILED(composition_->GetRange(&range)) || !range) return false;
+  RECT anchor{};
+  if (!ReadInputPosition(composition_context_.Get(), cookie, range.Get(), anchor)) {
+    return false;
+  }
+  candidate_anchor_ = anchor;
+  candidate_anchor_available_ = true;
+  return true;
+}
+
+bool TextService::QueueCandidateAnchorRefresh(ITfContext* context,
+                                              uint64_t generation,
+                                              uint8_t attempt) {
+  auto* session = new (std::nothrow)
+      CandidateAnchorSession(this, context, generation, attempt);
+  if (!session) return false;
+  HRESULT result = E_FAIL;
+  const HRESULT request = context->RequestEditSession(
+      client_id_, session, TF_ES_READ | TF_ES_ASYNCDONTCARE, &result);
+  session->Release();
+  return SUCCEEDED(request) && SUCCEEDED(result);
+}
+
 void TextService::ClearCompositionState() {
+  accessible_context_.reset();
   cancel_pending_ = false;
   last_edit_pending_ = false;
   ClearPendingPartialSelection();
@@ -2139,9 +3117,13 @@ void TextService::ClearCompositionState() {
   active_input_request_id_ = 0;
   candidate_page_ = 0;
   selected_candidate_ = 0;
+  EndCandidateUi();
   HideCandidates();
 }
-void TextService::HideCandidates() { g_candidates.Hide(); }
+void TextService::HideCandidates() {
+  if (candidate_ui_) candidate_ui_->SetShown(false);
+  g_candidates.Hide();
+}
 
 class ClassFactory final : public IClassFactory {
  public:
@@ -2255,7 +3237,10 @@ HRESULT RegisterTsfProfile() {
   record(hr);
   const GUID required[] = {GUID_TFCAT_TIP_KEYBOARD,
                            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-                           GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT};
+                           GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+                           GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+                           GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
+                           GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY};
   if (SUCCEEDED(hr)) {
     for (const auto& category : required) {
       record(categories->RegisterCategory(kClsid, category, kClsid), true);
@@ -2264,7 +3249,32 @@ HRESULT RegisterTsfProfile() {
   if (SUCCEEDED(init)) CoUninitialize();
   return result;
 }
-HRESULT UnregisterTsfProfile() { const HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED); if(FAILED(init)&&init!=RPC_E_CHANGED_MODE)return init; ComPtr<ITfCategoryMgr> categories; if(SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&categories)))){const GUID required[]={GUID_TFCAT_TIP_KEYBOARD,GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT};for(const auto& category:required)categories->UnregisterCategory(kClsid,category,kClsid);} ComPtr<ITfInputProcessorProfiles> profiles; if(SUCCEEDED(CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&profiles)))){profiles->RemoveLanguageProfile(kClsid,kLanguageId,kProfileGuid);profiles->Unregister(kClsid);} if(SUCCEEDED(init))CoUninitialize(); return S_OK; }
+HRESULT UnregisterTsfProfile() {
+  const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  if (FAILED(init) && init != RPC_E_CHANGED_MODE) return init;
+  ComPtr<ITfCategoryMgr> categories;
+  if (SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr, nullptr,
+                                 CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&categories))) &&
+      categories) {
+    const GUID required[] = {GUID_TFCAT_TIP_KEYBOARD,
+                             GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+                             GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+                             GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+                             GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
+                             GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY};
+    for (const auto& category : required)
+      categories->UnregisterCategory(kClsid, category, kClsid);
+  }
+  ComPtr<ITfInputProcessorProfiles> profiles;
+  if (SUCCEEDED(CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr,
+                                 CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&profiles))) &&
+      profiles) {
+    profiles->RemoveLanguageProfile(kClsid, kLanguageId, kProfileGuid);
+    profiles->Unregister(kClsid);
+  }
+  if (SUCCEEDED(init)) CoUninitialize();
+  return S_OK;
+}
 HRESULT CreateClassFactory(REFIID iid, void** object) { auto* factory=new(std::nothrow) ClassFactory(); if(!factory)return E_OUTOFMEMORY; const HRESULT hr=factory->QueryInterface(iid,object);factory->Release();return hr; }
 
 }  // namespace lime::tsf

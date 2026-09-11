@@ -66,6 +66,7 @@ class WeaselUiAdapter final {
   void Stop();
   void UiThread();
   void Render();
+  bool EnsureUiCreated(HWND parent);
   static LRESULT CALLBACK HostProc(HWND hwnd, UINT message, WPARAM wparam,
                                    LPARAM lparam);
 
@@ -81,6 +82,8 @@ class WeaselUiAdapter final {
   std::condition_variable ready_cv_;
   bool ready_ = false;
   bool stopped_ = false;
+  bool ui_created_ = false;
+  HWND ui_parent_ = nullptr;
 
   weasel::UI ui_;
 };

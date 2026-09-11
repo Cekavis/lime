@@ -29,7 +29,11 @@ TSF DLL 和静态链接进来的 WeaselUI 使用 MSVC 静态运行库：Release 
 
 候选窗口由独立 Win32 UI 线程维护；TSF 在只读 edit session 中获取组合串起点的 `GetTextExt` 屏幕矩形（无可用 layout 时回退到 GUI caret），再按小狼毫的输入位置规则在下方留出 6px 间距。候选窗口只使用固定版本的 WeaselUI（GPLv3），复用 Weasel 的布局、DPI、字体、颜色、圆角、阴影和自定义主题语义；项目不再保留第二套内置绘制器。宿主编辑器负责显示未确认拼音，候选窗不再绘制第二行拼音。TSF 读取的光标前文通过 WeaselUI auxiliary row 显示在候选区域上方，不改变 Weasel 的 Context 序列化布局。安装包同时携带 `licenses/WeaselUI-GPL-3.0.txt` 和对应源码快照。
 
-`OnTestKeyDown` 只做轻量探测，不在探测阶段打开 edit session 或请求服务；部分宿主会在探测回调期间持有 TSF 锁，提前读取上下文会让随后的写会话返回 `TF_E_LOCKED`。候选读取和组合更新统一在 `OnKeyDown` 中执行。
+组合串使用与小狼毫兼容的 TSF display attribute（点状下划线），并在组合串真正创建后再刷新候选窗口位置；适配层同时监听宿主的 TSF layout change，在首字符完成布局后重新读取组合串末端的位置，避免首个字母沿用上一次位置。读取光标前文优先使用通用 TSF range 移动接口，只有宿主不支持时才回退到 ACP 范围。
+
+Telegram 7.2.x 的输入框是 Qt `QTextEdit`。当 TSF range 返回空前文时，适配层在 edit session 结束后通过独立的 UI Automation MTA 查询当前获得焦点的 Qt 编辑控件，只读取 bounded `TextPattern2` caret 前缀；查询失败、密码框或焦点变化时保持 `context_available=false`，不会读取文档范围、聊天列表或预输入内容。Qt 的 `IMR_RECONVERTSTRING` 会改变选区，因此不用于前文读取。
+
+`OnTestKeyDown` 只做轻量探测，不在探测阶段打开 TSF edit session 或请求服务；Telegram 的 Qt 控件例外地会在这里预热一个不阻塞的 UIA MTA 查询，但不会读取文本或等待结果。UIA 结果完成后缓存，后续按键读取缓存；如果查询仍在进行，当前按键继续按无上文处理，不阻塞输入路径。部分宿主会在探测回调期间持有 TSF 锁，候选读取和组合更新仍统一在 `OnKeyDown` 中执行。
 
 TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使用 `TF_ES_READWRITE` 的 ASYNCDONTCARE 调度：宿主允许时同步执行，否则由 TSF 排队。`StartComposition` 即使返回 `S_OK` 也可能通过空的 `ppComposition` 表示宿主拒绝组合；适配层会检查这一点并显示明确错误。
 
