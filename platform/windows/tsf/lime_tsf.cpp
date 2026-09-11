@@ -7,16 +7,12 @@
 
 #include <algorithm>
 #include <cctype>
-#include <condition_variable>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
-#include <thread>
 
-#if defined(LIME_WITH_WEASEL_UI)
 #include "weasel_ui_adapter.h"
-#endif
 
 using Microsoft::WRL::ComPtr;
 
@@ -268,19 +264,6 @@ bool IsNextPageKey(WPARAM key) {
   if (HasNonTextModifier()) return false;
   const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
   return key == VK_NEXT || key == VK_ADD || (key == VK_OEM_PLUS && !shift);
-}
-
-void InjectNavigationKey(WORD key) {
-  INPUT inputs[2]{};
-  inputs[0].type = INPUT_KEYBOARD;
-  inputs[0].ki.wVk = key;
-  const bool extended = key == VK_PRIOR || key == VK_NEXT || key == VK_UP ||
-                        key == VK_DOWN;
-  inputs[0].ki.dwFlags = extended ? KEYEVENTF_EXTENDEDKEY : 0;
-  inputs[1] = inputs[0];
-  inputs[1].ki.dwFlags = KEYEVENTF_KEYUP |
-                         (extended ? KEYEVENTF_EXTENDEDKEY : 0);
-  SendInput(ARRAYSIZE(inputs), inputs, sizeof(INPUT));
 }
 
 std::wstring ServicePath() {
@@ -651,294 +634,20 @@ class CandidateWindow {
             size_t page, size_t selected, size_t page_size,
             std::wstring_view preedit = {}, std::wstring_view preview = {},
             const RECT* anchor = nullptr) {
-#if defined(LIME_WITH_WEASEL_UI)
     weasel_ui_.Show(context, candidates, page, selected, page_size, preedit,
                     preview, anchor);
-    return;
-#else
-    Snapshot snapshot;
-    snapshot.visible = true;
-    snapshot.anchor = anchor ? *anchor : Anchor(context);
-    snapshot.preview = std::wstring(preview);
-    const size_t begin = page * page_size;
-    for (size_t i = begin; i < std::min(candidates.size(), begin + page_size); ++i) {
-      Row row;
-      row.number = std::to_wstring(i - begin + 1);
-      row.text = candidates[i].display;
-      row.selected = i == selected;
-      snapshot.rows.push_back(std::move(row));
-    }
-    Update(std::move(snapshot));
-#endif
   }
   void ShowStatus(ITfContext* context, std::wstring_view message) {
-#if defined(LIME_WITH_WEASEL_UI)
     weasel_ui_.ShowStatus(context, message);
-    return;
-#else
-    Snapshot snapshot;
-    snapshot.visible = true;
-    snapshot.status = std::wstring(message);
-    snapshot.is_status = true;
-    snapshot.anchor = Anchor(context);
-    Update(std::move(snapshot));
-#endif
   }
   void Hide() {
-#if defined(LIME_WITH_WEASEL_UI)
     weasel_ui_.Hide();
-    return;
-#else
-    if (!thread_.joinable()) return;
-    Snapshot snapshot;
-    snapshot.visible = false;
-    Update(std::move(snapshot));
-#endif
   }
 
-  ~CandidateWindow() { Stop(); }
+  ~CandidateWindow() = default;
 
  private:
-  struct Row {
-    std::wstring number;
-    std::wstring text;
-    bool selected = false;
-  };
-  struct Snapshot {
-    RECT anchor{200, 200, 200, 220};
-    std::vector<Row> rows;
-    std::wstring preview;
-    std::wstring status;
-    bool visible = false;
-    bool is_status = false;
-  };
-
-  static constexpr UINT kUpdateMessage = WM_APP + 41;
-
-  RECT Anchor(ITfContext* context) const {
-    GUITHREADINFO info{};
-    info.cbSize = sizeof(info);
-    HWND foreground = GetForegroundWindow();
-    const DWORD thread_id = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
-    if (thread_id && GetGUIThreadInfo(thread_id, &info) && info.hwndCaret &&
-        info.rcCaret.bottom > info.rcCaret.top) {
-      // rcCaret is relative to hwndCaret.  The popup renderer consumes screen
-      // coordinates, so translate both corners before handing it the anchor.
-      POINT top_left{info.rcCaret.left, info.rcCaret.top};
-      POINT bottom_right{info.rcCaret.right, info.rcCaret.bottom};
-      if (ClientToScreen(info.hwndCaret, &top_left) &&
-          ClientToScreen(info.hwndCaret, &bottom_right)) {
-        return RECT{top_left.x, top_left.y, bottom_right.x, bottom_right.y};
-      }
-    }
-    ComPtr<ITfContextView> view;
-    HWND hwnd = nullptr;
-    if (context && SUCCEEDED(context->GetActiveView(&view)) && view) view->GetWnd(&hwnd);
-    RECT rect{200, 200, 200, 220};
-    if (hwnd && GetWindowRect(hwnd, &rect)) {
-      rect.left += 16;
-      rect.right = rect.left + 1;
-      rect.top += 32;
-      rect.bottom = rect.top + 20;
-    }
-    return rect;
-  }
-
-  void Update(Snapshot snapshot) {
-    Ensure();
-    HWND hwnd = nullptr;
-    {
-      std::lock_guard lock(state_mutex_);
-      snapshot_ = std::move(snapshot);
-      hwnd = window_;
-    }
-    if (hwnd) PostMessageW(hwnd, kUpdateMessage, 0, 0);
-  }
-
-  void Ensure() {
-    std::call_once(start_once_, [this] {
-      thread_ = std::thread([this] { UiThread(); });
-      std::unique_lock lock(ready_mutex_);
-      ready_cv_.wait(lock, [this] { return ready_; });
-    });
-  }
-
-  void Stop() {
-    if (!thread_.joinable()) return;
-    HWND hwnd = nullptr;
-    {
-      std::lock_guard lock(state_mutex_);
-      hwnd = window_;
-    }
-    if (hwnd) PostMessageW(hwnd, WM_CLOSE, 0, 0);
-    thread_.join();
-  }
-
-  void UiThread() {
-    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    WNDCLASSW wc{};
-    wc.style = CS_DROPSHADOW;
-    wc.lpfnWndProc = &CandidateWindow::Proc;
-    wc.hInstance = g_instance;
-    wc.lpszClassName = L"LimeCandidateWindowV2";
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;
-    RegisterClassW(&wc);
-    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-                                wc.lpszClassName, L"Lime", WS_POPUP,
-                                0, 0, 460, 120, nullptr, nullptr, g_instance, this);
-    {
-      std::lock_guard lock(state_mutex_);
-      window_ = hwnd;
-    }
-    {
-      std::lock_guard lock(ready_mutex_);
-      ready_ = true;
-    }
-    ready_cv_.notify_all();
-    if (!hwnd) return;
-    MSG msg{};
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-      TranslateMessage(&msg);
-      DispatchMessageW(&msg);
-    }
-    {
-      std::lock_guard lock(state_mutex_);
-      window_ = nullptr;
-    }
-  }
-
-  void Render(HWND hwnd) {
-    Snapshot snapshot;
-    {
-      std::lock_guard lock(state_mutex_);
-      snapshot = snapshot_;
-    }
-    if (!snapshot.visible) {
-      KillTimer(hwnd, 1);
-      ShowWindow(hwnd, SW_HIDE);
-      return;
-    }
-    const UINT dpi = std::max<UINT>(96, GetDpiForWindow(hwnd));
-    const int scale = static_cast<int>(dpi) / 96;
-    const int width = 460 * scale;
-    const int row_height = 36 * scale;
-    const int header_height = snapshot.preview.empty() ? 12 * scale : 40 * scale;
-    const int content_rows = snapshot.is_status ? 1 : static_cast<int>(snapshot.rows.size());
-    const int height = std::max(54 * scale, header_height + content_rows * row_height + 12 * scale);
-    const int x = snapshot.anchor.left;
-    // Keep the same gap used by WeaselPanel::MoveTo so the popup does not
-    // touch the host's composition text when the vendored UI is disabled.
-    const int y = snapshot.anchor.bottom + 6 * scale;
-    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 14 * scale, 14 * scale);
-    if (region) SetWindowRgn(hwnd, region, TRUE);
-    if (snapshot.is_status) SetTimer(hwnd, 1, 1800, nullptr); else KillTimer(hwnd, 1);
-    InvalidateRect(hwnd, nullptr, TRUE);
-  }
-
-  void Paint(HWND hwnd, HDC dc) {
-    Snapshot snapshot;
-    {
-      std::lock_guard lock(state_mutex_);
-      snapshot = snapshot_;
-    }
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    const UINT dpi = std::max<UINT>(96, GetDpiForWindow(hwnd));
-    const int scale = static_cast<int>(dpi) / 96;
-    HBRUSH background = CreateSolidBrush(RGB(255, 255, 255));
-    FillRect(dc, &client, background);
-    DeleteObject(background);
-    SetBkMode(dc, TRANSPARENT);
-    HFONT font = CreateFontW(-16 * scale, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HFONT old_font = static_cast<HFONT>(SelectObject(dc, font));
-    int y = 8 * scale;
-    if (snapshot.is_status) {
-      SetTextColor(dc, RGB(180, 55, 55));
-      RECT text_rect{16 * scale, y, client.right - 16 * scale, client.bottom - 8 * scale};
-      DrawTextW(dc, snapshot.status.c_str(), -1, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-    } else {
-      if (!snapshot.preview.empty()) {
-        SetTextColor(dc, RGB(110, 118, 130));
-        RECT preview_rect{16 * scale, y, client.right - 16 * scale, y + 24 * scale};
-        DrawTextW(dc, snapshot.preview.c_str(), -1, &preview_rect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        y += 34 * scale;
-      }
-      for (const Row& row : snapshot.rows) {
-        RECT row_rect{8 * scale, y, client.right - 8 * scale, y + 32 * scale};
-        if (row.selected) {
-          HBRUSH selected = CreateSolidBrush(RGB(37, 99, 235));
-          FillRect(dc, &row_rect, selected);
-          DeleteObject(selected);
-          SetTextColor(dc, RGB(255, 255, 255));
-        } else {
-          SetTextColor(dc, RGB(30, 35, 45));
-        }
-        RECT number_rect{18 * scale, y, 46 * scale, y + 32 * scale};
-        DrawTextW(dc, row.number.c_str(), -1, &number_rect, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
-        RECT text_rect{58 * scale, y, client.right - 18 * scale, y + 32 * scale};
-        DrawTextW(dc, row.text.c_str(), -1, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        y += 36 * scale;
-      }
-    }
-    SelectObject(dc, old_font);
-    DeleteObject(font);
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, scale), RGB(224, 228, 235));
-    HGDIOBJ old_pen = SelectObject(dc, pen);
-    HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Rectangle(dc, 0, 0, client.right, client.bottom);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(pen);
-  }
-
-  static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    auto* self = reinterpret_cast<CandidateWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (msg == WM_NCCREATE) {
-      self = static_cast<CandidateWindow*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-      SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    }
-    if (msg == kUpdateMessage && self) { self->Render(hwnd); return 0; }
-    if (msg == WM_PAINT && self) {
-      PAINTSTRUCT ps{};
-      HDC dc = BeginPaint(hwnd, &ps);
-      self->Paint(hwnd, dc);
-      EndPaint(hwnd, &ps);
-      return 0;
-    }
-    if (msg == WM_TIMER && self) { KillTimer(hwnd, 1); ShowWindow(hwnd, SW_HIDE); return 0; }
-    if (msg == WM_MOUSEWHEEL && self) {
-      Snapshot snapshot;
-      {
-        std::lock_guard lock(self->state_mutex_);
-        snapshot = self->snapshot_;
-      }
-      if (snapshot.visible && !snapshot.is_status && !snapshot.rows.empty()) {
-        const bool next = GET_WHEEL_DELTA_WPARAM(wp) < 0;
-        InjectNavigationKey(next ? VK_NEXT : VK_PRIOR);
-      }
-      return 0;
-    }
-    if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
-    if (msg == WM_ERASEBKGND) return 1;
-    if (msg == WM_CLOSE) { DestroyWindow(hwnd); return 0; }
-    if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-  }
-  HWND window_ = nullptr;
-  Snapshot snapshot_;
-  std::mutex state_mutex_;
-  std::once_flag start_once_;
-  std::thread thread_;
-  std::mutex ready_mutex_;
-  std::condition_variable ready_cv_;
-  bool ready_ = false;
-#if defined(LIME_WITH_WEASEL_UI)
   WeaselUiAdapter weasel_ui_;
-#endif
 };
 
 CandidateWindow g_candidates;

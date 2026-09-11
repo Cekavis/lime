@@ -84,23 +84,18 @@ VOID CALLBACK UIImpl::OnTimer(_In_ HWND hwnd,
 }
 
 bool UI::Create(HWND parent) {
-  if (pimpl_) {
-    pimpl_->panel.Create(
-        parent, 0, 0, WS_POPUP,
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-        0U, 0);
-    return true;
+  if (!pimpl_) {
+    pimpl_ = new UIImpl(*this);
+    if (!pimpl_) return false;
   }
 
-  pimpl_ = new UIImpl(*this);
-  if (!pimpl_)
-    return false;
-
-  pimpl_->panel.Create(
+  if (!pimpl_->panel.Create(
       parent, 0, 0, WS_POPUP,
       WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-      0U, 0);
-  return true;
+      0U, 0)) {
+    return false;
+  }
+  return pimpl_->panel.IsWindow();
 }
 
 void UI::Destroy(bool full) {

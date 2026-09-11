@@ -21,7 +21,7 @@ Write-Host "Building Rust service..."
 Invoke-Checked "cargo" @("build", "--release", "--locked", "-p", "lime-service")
 
 Write-Host "Building Windows TSF..."
-Invoke-Checked $cmake @("-S", "platform/windows/tsf", "-B", $cmakeRoot, "-A", "x64", "-DLIME_WITH_WEASEL_UI=ON", "-DLIME_WEASEL_UI_OPENMP=OFF")
+Invoke-Checked $cmake @("-S", "platform/windows/tsf", "-B", $cmakeRoot, "-A", "x64", "-DLIME_WEASEL_UI_OPENMP=OFF")
 Invoke-Checked $cmake @("--build", $cmakeRoot, "--config", "Release")
 
 Write-Host "Preparing pinned third-party sources..."

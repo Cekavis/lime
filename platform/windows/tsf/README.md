@@ -27,7 +27,7 @@ TSF DLL 和静态链接进来的 WeaselUI 使用 MSVC 静态运行库：Release 
 
 发布安装器使用 `perMachine`，以管理员权限将 TSF profile 注册到系统，并在当前用户 profile 下显式启用 Lime。服务端 Named Pipe 采用兼容优先 ACL，允许开始菜单、系统设置等 packaged/AppContainer 宿主连接；当前版本不做调用方身份校验或用户隔离。卸载时会撤销 profile 与 COM 注册。
 
-候选窗口由独立 Win32 UI 线程维护；TSF 在只读 edit session 中获取组合串起点的 `GetTextExt` 屏幕矩形（无可用 layout 时回退到 GUI caret），再按小狼毫的输入位置规则在下方留出 6px 间距。默认使用固定版本的 WeaselUI（GPLv3），复用 Weasel 的布局、DPI、字体、颜色、圆角、阴影和自定义主题语义；宿主编辑器负责显示未确认拼音，候选窗不再绘制第二行拼音。TSF 读取的光标前文通过 WeaselUI auxiliary row 显示在候选区域上方，不改变 Weasel 的 Context 序列化布局。安装包同时携带 `licenses/WeaselUI-GPL-3.0.txt` 和对应源码快照。
+候选窗口由独立 Win32 UI 线程维护；TSF 在只读 edit session 中获取组合串起点的 `GetTextExt` 屏幕矩形（无可用 layout 时回退到 GUI caret），再按小狼毫的输入位置规则在下方留出 6px 间距。候选窗口只使用固定版本的 WeaselUI（GPLv3），复用 Weasel 的布局、DPI、字体、颜色、圆角、阴影和自定义主题语义；项目不再保留第二套内置绘制器。宿主编辑器负责显示未确认拼音，候选窗不再绘制第二行拼音。TSF 读取的光标前文通过 WeaselUI auxiliary row 显示在候选区域上方，不改变 Weasel 的 Context 序列化布局。安装包同时携带 `licenses/WeaselUI-GPL-3.0.txt` 和对应源码快照。
 
 `OnTestKeyDown` 只做轻量探测，不在探测阶段打开 edit session 或请求服务；部分宿主会在探测回调期间持有 TSF 锁，提前读取上下文会让随后的写会话返回 `TF_E_LOCKED`。候选读取和组合更新统一在 `OnKeyDown` 中执行。
 
@@ -37,4 +37,4 @@ TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使�
 
 候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。翻页超出已加载的 Rime 候选时只追加 Rime 候选，不重新调用 LLM，也不产生新的历史记录。F1–F12 等功能键由宿主处理，不参与 Lime 输入。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；取消完成前继续吞键，避免按键进入宿主文本。
 
-若构建环境暂时没有 `third_party/weasel-ui`，可用 `-DLIME_WITH_WEASEL_UI=OFF` 构建内置回退窗口；发布构建默认启用 WeaselUI。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。
+`third_party/weasel-ui` 是 Windows TSF 构建的必需依赖；缺少源码时 CMake 直接失败，不再切换到另一套候选窗口。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。

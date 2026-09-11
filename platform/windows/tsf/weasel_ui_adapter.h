@@ -11,9 +11,7 @@
 #include <thread>
 #include <vector>
 
-#if defined(LIME_WITH_WEASEL_UI)
 #include <WeaselUI.h>
-#endif
 
 namespace lime::tsf {
 
@@ -71,9 +69,7 @@ class WeaselUiAdapter final {
   static LRESULT CALLBACK HostProc(HWND hwnd, UINT message, WPARAM wparam,
                                    LPARAM lparam);
 
-#if defined(LIME_WITH_WEASEL_UI)
   void ConfigureStyle();
-#endif
 
   HWND host_window_ = nullptr;
   DWORD ui_thread_id_ = 0;
@@ -86,9 +82,7 @@ class WeaselUiAdapter final {
   bool ready_ = false;
   bool stopped_ = false;
 
-#if defined(LIME_WITH_WEASEL_UI)
   weasel::UI ui_;
-#endif
 };
 
 }  // namespace lime::tsf

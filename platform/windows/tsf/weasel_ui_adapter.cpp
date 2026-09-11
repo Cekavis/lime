@@ -1,7 +1,5 @@
 #include "weasel_ui_adapter.h"
 
-#if defined(LIME_WITH_WEASEL_UI)
-
 #include <windows.h>
 
 #include <algorithm>
@@ -914,16 +912,3 @@ void WeaselUiAdapter::ConfigureStyle() {
 }
 
 }  // namespace lime::tsf
-
-#else
-
-namespace lime::tsf {
-WeaselUiAdapter::~WeaselUiAdapter() = default;
-void WeaselUiAdapter::Show(ITfContext*, const std::vector<TextService::Candidate>&,
-                           size_t, size_t, size_t, std::wstring_view,
-                           std::wstring_view, const RECT*) {}
-void WeaselUiAdapter::ShowStatus(ITfContext*, std::wstring_view) {}
-void WeaselUiAdapter::Hide() {}
-}  // namespace lime::tsf
-
-#endif

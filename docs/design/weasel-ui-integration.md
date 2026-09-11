@@ -4,7 +4,7 @@ Windows 候选窗口由 TSF 原生层负责。Lime 只复用 vendored `third_par
 
 当前边界：
 
-- CMake 默认启用 WeaselUI；`LIME_WITH_WEASEL_UI=OFF` 保留内置 Win32 回退窗口。
+- Windows TSF 只使用 vendored WeaselUI；`third_party/weasel-ui` 缺失时 CMake 直接失败，不保留第二套候选窗口实现。
 - WeaselUI 只接收候选快照、服务状态和输入位置，不读取 TSF context，不直接提交文本或访问 Rust IPC。
 - 前文预览作为视觉层的辅助信息显示；未确认拼音继续由宿主文本控件渲染。
 - `third_party/weasel-ui` 保留固定源码快照、GPLv3 许可证和上游提交信息，发布包同时提供对应许可证文本。
