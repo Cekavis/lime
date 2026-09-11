@@ -61,6 +61,7 @@ mod tests {
                 display_text: "你好".into(),
                 commit_text: "你好".into(),
             }],
+            candidate_remainders: vec![Some(String::new())],
             context_used: true,
             service_state: ServiceState::RimeOnly,
             diagnostics: Vec::new(),
@@ -76,6 +77,7 @@ mod tests {
         assert!(json.contains(r#""end_to_end_duration_ms":29"#));
         assert!(json.contains(r#""rime_duration_ms":13"#));
         assert!(json.contains(r#""llm_performance":{"total_ms":17"#));
+        assert!(json.contains(r#""candidate_remainders":[""]"#));
         assert!(!json.contains(r#""score":"#));
     }
 

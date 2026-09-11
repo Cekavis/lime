@@ -1,6 +1,7 @@
 {
   "request_id": 1,
   "candidates": [{ "display_text": "你好", "commit_text": "你好" }],
+  "candidate_remainders": [""],
   "context_used": true,
   "service_state": "rime_only",
   "diagnostics": [{

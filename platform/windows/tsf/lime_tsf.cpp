@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <thread>
 
@@ -68,6 +69,14 @@ std::wstring PreviewText(std::wstring_view text, uint32_t limit) {
   };
   if (start > 0 && is_low(text[start]) && is_high(text[start - 1])) --start;
   return std::wstring(text.substr(start));
+}
+
+std::wstring ConsumedPinyin(std::wstring_view preedit, std::wstring_view remainder) {
+  if (remainder.size() > preedit.size() ||
+      preedit.substr(preedit.size() - remainder.size()) != remainder) {
+    return {};
+  }
+  return std::wstring(preedit.substr(0, preedit.size() - remainder.size()));
 }
 
 bool UppercaseLetterActive() {
@@ -427,6 +436,53 @@ size_t JsonArrayEnd(std::string_view value, size_t start) {
   return std::string_view::npos;
 }
 
+size_t JsonStringEnd(std::string_view value, size_t start) {
+  bool escaped = false;
+  for (size_t i = start; i < value.size(); ++i) {
+    const char ch = value[i];
+    if (escaped) {
+      escaped = false;
+    } else if (ch == '\\') {
+      escaped = true;
+    } else if (ch == '"') {
+      return i + 1;
+    }
+  }
+  return std::string_view::npos;
+}
+
+std::vector<std::optional<std::string>> JsonOptionalStringArray(
+    std::string_view value, std::string_view key) {
+  const std::string needle = "\"" + std::string(key) + "\":[";
+  const size_t array = value.find(needle);
+  if (array == std::string_view::npos) return {};
+  const size_t array_end = JsonArrayEnd(value, array + needle.size() - 1);
+  if (array_end == std::string_view::npos) return {};
+
+  std::vector<std::optional<std::string>> result;
+  size_t pos = array + needle.size();
+  while (pos < array_end - 1) {
+    while (pos < array_end - 1 &&
+           (value[pos] == ',' || std::isspace(static_cast<unsigned char>(value[pos])))) {
+      ++pos;
+    }
+    if (pos >= array_end - 1) break;
+    if (value.compare(pos, 4, "null") == 0) {
+      result.emplace_back(std::nullopt);
+      pos += 4;
+    } else if (value[pos] == '"') {
+      const size_t string_end = JsonStringEnd(value, pos + 1);
+      if (string_end == std::string_view::npos || string_end > array_end) return {};
+      result.emplace_back(JsonString(value, pos + 1));
+      pos = string_end;
+    } else {
+      return {};
+    }
+    while (pos < array_end - 1 && value[pos] != ',') ++pos;
+  }
+  return result;
+}
+
 class PipeClient {
  public:
   bool Request(const std::string& request, std::string& response) {
@@ -501,10 +557,16 @@ struct CompositionSession final : ITfEditSession {
   ComPtr<ITfContext> context;
   TextService::Action action;
   std::wstring text;
+  std::wstring remainder;
   uint64_t generation;
   CompositionSession(TextService* o, ITfContext* c, TextService::Action a,
-                     std::wstring t, uint64_t g)
-      : owner(o), context(c), action(a), text(std::move(t)), generation(g) {
+                     std::wstring t, uint64_t g, std::wstring r)
+      : owner(o),
+        context(c),
+        action(a),
+        text(std::move(t)),
+        remainder(std::move(r)),
+        generation(g) {
     owner->AddRef();
   }
   ~CompositionSession() { owner->Release(); }
@@ -911,6 +973,8 @@ HRESULT CompositionSession::DoEditSession(TfEditCookie cookie) {
   }
   if (action == TextService::Action::Update) {
     succeeded = owner->SetCompositionText(cookie, text);
+  } else if (action == TextService::Action::CommitPartial) {
+    succeeded = owner->CommitPartialComposition(cookie, text, remainder);
   } else {
     succeeded = owner->CommitComposition(cookie, text);
   }
@@ -1032,6 +1096,39 @@ void TextService::CompleteEditSession(Action action, uint64_t generation,
                                       bool succeeded) {
   if (!IsEditCurrent(generation)) return;
   last_edit_pending_ = false;
+  if (action == Action::CommitPartial && partial_edit_generation_ == generation) {
+    ITfContext* context = composition_context_.Get();
+    if (!succeeded) {
+      ClearPendingPartialSelection();
+      if (context) {
+        g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
+                          page_size_, {}, preceding_preview_, CandidateAnchor());
+      }
+      return;
+    }
+
+    const std::wstring pinyin = pending_partial_pinyin_;
+    const std::wstring commit = pending_partial_commit_;
+    preedit_ = std::move(pending_partial_remainder_);
+    candidates_ = std::move(pending_partial_candidates_);
+    preceding_preview_ =
+        PreviewText(pending_partial_preceding_, context_preview_limit_);
+    candidate_anchor_ = pending_partial_anchor_;
+    candidate_anchor_available_ = pending_partial_anchor_available_;
+    candidate_fetch_complete_ = pending_partial_fetch_complete_;
+    candidate_page_ = 0;
+    selected_candidate_ = 0;
+    ClearPendingPartialSelection();
+
+    if (!pinyin.empty()) LearnCandidate(pinyin, commit);
+    if (!context || candidates_.empty()) {
+      HideCandidates();
+    } else {
+      g_candidates.Show(context, candidates_, 0, 0, page_size_, {},
+                        preceding_preview_, CandidateAnchor());
+    }
+    return;
+  }
   if (terminal_edit_pending_ && terminal_edit_generation_ == generation) {
     terminal_edit_pending_ = false;
     terminal_edit_generation_ = 0;
@@ -1154,6 +1251,12 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
       *eaten = TRUE;
       return S_OK;
     }
+    if (partial_edit_pending_ && key != VK_ESCAPE) {
+      // A partial candidate selection also owns the composition until its
+      // callback has shifted the range and installed the recomposed suffix.
+      *eaten = TRUE;
+      return S_OK;
+    }
     if (IsShiftKey(key)) {
       const uint8_t bit = ShiftKeyBit(key, lparam);
       // Shift is a switch key only when no Ctrl/Alt/Win modifier participates
@@ -1172,7 +1275,8 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
     // the same here instead of synthesizing a second TSF edit session.
     if (ascii_mode_ &&
         !(key == VK_ESCAPE &&
-          (composition_ || !preedit_.empty() || terminal_edit_pending_))) {
+          (composition_ || !preedit_.empty() || terminal_edit_pending_ ||
+           partial_edit_pending_))) {
       *eaten = FALSE;
       return S_OK;
     }
@@ -1211,7 +1315,8 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
   } else if (IsPreeditKey(key)) {
     *eaten = connected_ ? TRUE : FALSE;
   } else if (key == VK_ESCAPE &&
-             (composition_ || !preedit_.empty() || terminal_edit_pending_)) {
+             (composition_ || !preedit_.empty() || terminal_edit_pending_ ||
+              partial_edit_pending_)) {
     // The host must never see Esc while a TSF composition is still alive,
     // even if the service connection has dropped or a prior commit was
     // accepted asynchronously.  OnKeyDown will clear the range (or keep the
@@ -1273,7 +1378,8 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
           // second Shift held alongside the first also shares the original
           // tap, preventing a double toggle when both keys are released.
           if (first_shift && !HasNonTextModifier() && !cancel_pending_ &&
-              !terminal_edit_pending_ && !IsKeyRepeat(lparam)) {
+              !terminal_edit_pending_ && !partial_edit_pending_ &&
+              !IsKeyRepeat(lparam)) {
             shift_pending_mask_ |= bit;
           } else {
             // A second Shift key is a chord, not a second tap.  Clear the
@@ -1291,6 +1397,10 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
         *eaten = TRUE;
         return S_OK;
       }
+      if (partial_edit_pending_) {
+        *eaten = TRUE;
+        return S_OK;
+      }
       *eaten = HasNonTextModifier() ? FALSE : TRUE;
       return S_OK;
     }
@@ -1302,6 +1412,10 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
       return S_OK;
     }
     if (terminal_edit_pending_ && key != VK_ESCAPE) {
+      *eaten = TRUE;
+      return S_OK;
+    }
+    if (partial_edit_pending_ && key != VK_ESCAPE) {
       *eaten = TRUE;
       return S_OK;
     }
@@ -1393,13 +1507,66 @@ bool TextService::ToggleAsciiMode(ITfContext* context) {
   return true;
 }
 
+bool TextService::SelectCandidate(ITfContext* context, size_t index) {
+  if (!context || index >= candidates_.size()) return false;
+
+  const Candidate candidate = candidates_[index];
+  const std::wstring pinyin = preedit_;
+  if (candidate.remainder_available && !candidate.remainder.empty()) {
+    std::vector<Candidate> next_candidates;
+    std::wstring next_preceding;
+    bool next_context_available = false;
+    RECT next_anchor{};
+    bool next_anchor_available = false;
+    const bool fetched = FetchCandidates(
+        context, candidate.remainder, next_candidates, next_preceding,
+        next_context_available, next_anchor, next_anchor_available, page_size_,
+        candidate.commit);
+
+    pending_partial_pinyin_ = ConsumedPinyin(pinyin, candidate.remainder);
+    pending_partial_commit_ = candidate.commit;
+    pending_partial_remainder_ = candidate.remainder;
+    pending_partial_candidates_ = std::move(next_candidates);
+    pending_partial_preceding_ = std::move(next_preceding);
+    pending_partial_anchor_ = next_anchor;
+    pending_partial_anchor_available_ = next_anchor_available;
+    pending_partial_fetch_complete_ =
+        fetched && pending_partial_candidates_.size() < page_size_;
+
+    // Keep the unconsumed Rime input in the same TSF composition.  The
+    // prefix is made ordinary text by moving the composition start forward;
+    // this is the TSF equivalent of Weasel committing a selected segment and
+    // recomposing the remaining raw pinyin.
+    if (!RequestEdit(context, Action::CommitPartial, candidate.commit, false,
+                     candidate.remainder)) {
+      return false;
+    }
+    active_input_request_id_ = request_id_;
+    if (partial_edit_pending_) HideCandidates();
+    return true;
+  }
+
+  if (!RequestEdit(context, Action::Commit, candidate.commit)) return false;
+  LearnCandidate(pinyin, candidate.commit);
+  if (terminal_edit_pending_) {
+    // Keep the local snapshot until the asynchronous commit callback has
+    // actually ended the TSF composition, but remove the stale popup and
+    // consume subsequent keys in OnTestKeyDown.
+    HideCandidates();
+  } else {
+    ClearCompositionState();
+  }
+  return true;
+}
+
 bool TextService::HandleKey(ITfContext* context, WPARAM key) {
   // Persistent ASCII mode deliberately leaves ordinary keys to the host, as
   // Weasel does when its ascii_composer has no active composition.  This
   // preserves the user's Windows keyboard layout and all half-width symbols.
   if (ascii_mode_ &&
       !(key == VK_ESCAPE &&
-        (composition_ || !preedit_.empty() || terminal_edit_pending_))) {
+        (composition_ || !preedit_.empty() || terminal_edit_pending_ ||
+         partial_edit_pending_))) {
     return false;
   }
 
@@ -1481,24 +1648,13 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
     const size_t index = candidate_page_ * page_size_ + (key - '1');
     if (index >= candidates_.size()) return true;
     selected_candidate_ = index;
-    const std::wstring pinyin = preedit_;
-    const std::wstring commit = candidates_[index].commit;
-    if (!RequestEdit(context, Action::Commit, commit)) {
+    if (!SelectCandidate(context, index)) {
       // The probe already told the host that this key belongs to Lime.  Keep
       // it consumed when TSF rejects the edit; forwarding it would insert a
       // digit into the host while the old composition is still active.
       g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
                         page_size_, {}, preceding_preview_, CandidateAnchor());
       return true;
-    }
-    LearnCandidate(pinyin, commit);
-    if (terminal_edit_pending_) {
-      // Keep the local snapshot until the asynchronous commit callback has
-      // actually ended the TSF composition, but remove the stale popup and
-      // consume subsequent keys in OnTestKeyDown.
-      HideCandidates();
-    } else {
-      ClearCompositionState();
     }
     return true;
   }
@@ -1523,18 +1679,11 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
   if (key == VK_SPACE) {
     if (!candidates_.empty()) {
       const size_t index = std::min(selected_candidate_, candidates_.size() - 1);
-      const std::wstring pinyin = preedit_;
-      const std::wstring commit = candidates_[index].commit;
-      if (!RequestEdit(context, Action::Commit, commit)) {
+      selected_candidate_ = index;
+      if (!SelectCandidate(context, index)) {
         g_candidates.Show(context, candidates_, candidate_page_, selected_candidate_,
                           page_size_, {}, preceding_preview_, CandidateAnchor());
         return true;
-      }
-      LearnCandidate(pinyin, commit);
-      if (terminal_edit_pending_) {
-        HideCandidates();
-      } else {
-        ClearCompositionState();
       }
       return true;
     }
@@ -1676,7 +1825,9 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
                                    std::vector<Candidate>& result_candidates,
                                    std::wstring& preceding, bool& context_available,
                                    RECT& anchor, bool& anchor_available,
-                                   size_t candidate_limit) {
+                                   size_t candidate_limit,
+                                   std::wstring_view preceding_suffix,
+                                   uint64_t candidate_extension_of) {
   if (!context) return false;
   result_candidates.clear();
   preceding.clear();
@@ -1741,18 +1892,30 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
     anchor = {};
     anchor_available = false;
   }
+  if (context_available && !preceding_suffix.empty()) {
+    preceding.append(preceding_suffix);
+    if (preceding.size() > ContextLimit()) {
+      preceding.erase(0, preceding.size() - ContextLimit());
+    }
+  }
   const uint64_t requested_limit = (std::min)(
       static_cast<uint64_t>(candidate_limit),
       static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+  const uint64_t request_id = ++request_id_;
+  const std::string extension_field =
+      candidate_extension_of == 0
+          ? std::string()
+          : ",\"candidate_extension_of\":" + std::to_string(candidate_extension_of);
   std::string body;
   const std::string json = "{\"kind\":\"input\",\"payload\":{\"request_id\":" +
-                           std::to_string(++request_id_) +
+                           std::to_string(request_id) +
                            ",\"preedit\":\"" + JsonEscape(preedit) +
                            "\",\"preceding_text\":\"" + JsonEscape(preceding) +
                            "\",\"context_available\":" +
                            (context_available ? "true" : "false") +
                            ",\"config_revision\":" + std::to_string(config_revision_) +
                            ",\"candidate_limit\":" + std::to_string(requested_limit) +
+                           extension_field +
                            "}}";
    if (!g_pipe.Request(json, body)) { connected_ = false; return false; }
    if (body.find("\"kind\":\"error\"") != std::string::npos) { RefreshConfigRevision(context); return false; }
@@ -1762,20 +1925,39 @@ bool TextService::FetchCandidates(ITfContext* context, const std::wstring& preed
       connected_ = false;
       return false;
     }
-    connected_ = true; passthrough_notified_ = false; const std::string candidates_needle = "\"candidates\":["; const size_t array = body.find(candidates_needle); if (array == std::string::npos) return false;
-   const size_t array_end = JsonArrayEnd(body, array + candidates_needle.size() - 1); if (array_end == std::string::npos) return false;
+   connected_ = true;
+   passthrough_notified_ = false;
+   const std::string candidates_needle = "\"candidates\":[";
+   const size_t array = body.find(candidates_needle);
+   if (array == std::string::npos) return false;
+   const size_t array_end = JsonArrayEnd(body, array + candidates_needle.size() - 1);
+   if (array_end == std::string::npos) return false;
+   const std::vector<std::optional<std::string>> remainders =
+       JsonOptionalStringArray(body, "candidate_remainders");
    size_t pos = array + candidates_needle.size();
+   size_t candidate_index = 0;
    while (pos < array_end) {
-     const size_t d = body.find("\"display_text\":\"", pos); if (d == std::string::npos) break;
-     const size_t c = body.find("\"commit_text\":\"", d); if (c == std::string::npos) break;
+     const size_t d = body.find("\"display_text\":\"", pos);
+     if (d == std::string::npos) break;
+     const size_t c = body.find("\"commit_text\":\"", d);
+     if (c == std::string::npos) break;
      if (d >= array_end || c >= array_end) break;
-     Candidate candidate; candidate.display = Wide(JsonString(body, d + 16)); candidate.commit = Wide(JsonString(body, c + 15)); result_candidates.push_back(std::move(candidate)); pos = c + 15;
-  }
+     Candidate candidate;
+     candidate.display = Wide(JsonString(body, d + 16));
+     candidate.commit = Wide(JsonString(body, c + 15));
+     if (candidate_index < remainders.size() && remainders[candidate_index]) {
+       candidate.remainder = Wide(*remainders[candidate_index]);
+       candidate.remainder_available = true;
+     }
+     result_candidates.push_back(std::move(candidate));
+     ++candidate_index;
+     pos = c + 15;
+   }
   return true;
 }
 
 bool TextService::LoadMoreCandidates(ITfContext* context, size_t required_count) {
-  if (candidate_fetch_complete_) return false;
+  if (candidate_fetch_complete_ || active_input_request_id_ == 0) return false;
 
   std::vector<Candidate> fetched;
   std::wstring preceding;
@@ -1783,7 +1965,7 @@ bool TextService::LoadMoreCandidates(ITfContext* context, size_t required_count)
   RECT anchor{};
   bool anchor_available = false;
   if (!FetchCandidates(context, preedit_, fetched, preceding, context_available, anchor,
-                       anchor_available, required_count)) {
+                       anchor_available, required_count, {}, active_input_request_id_)) {
     return false;
   }
   if (fetched.size() <= candidates_.size()) {
@@ -1825,6 +2007,7 @@ bool TextService::UpdateCandidates(ITfContext* context) {
     HideCandidates();
     return false;
   }
+  active_input_request_id_ = request_id_;
   preceding_preview_ = PreviewText(preceding, context_preview_limit_);
   candidate_page_ = 0;
   selected_candidate_ = 0;
@@ -1904,6 +2087,19 @@ void TextService::LearnCandidate(std::wstring_view pinyin, std::wstring_view tex
   if (!g_pipe.Request(json, body)) connected_ = false;
 }
 
+void TextService::ClearPendingPartialSelection() {
+  partial_edit_pending_ = false;
+  partial_edit_generation_ = 0;
+  pending_partial_pinyin_.clear();
+  pending_partial_commit_.clear();
+  pending_partial_remainder_.clear();
+  pending_partial_candidates_.clear();
+  pending_partial_preceding_.clear();
+  pending_partial_anchor_ = {};
+  pending_partial_anchor_available_ = false;
+  pending_partial_fetch_complete_ = false;
+}
+
 bool TextService::ResolvePendingCancellation() {
   if (!cancel_pending_) return true;
   if (terminal_edit_pending_ && terminal_edit_action_ == Action::Cancel) {
@@ -1929,15 +2125,26 @@ bool TextService::ResolvePendingCancellation() {
 }
 
 bool TextService::RequestEdit(ITfContext* context, Action action, const std::wstring& text,
-                              bool synchronous) {
+                              bool synchronous, const std::wstring& remainder) {
   last_edit_pending_ = false;
-  if (terminal_edit_pending_ && action == Action::Update) {
+  if (partial_edit_pending_ && action != Action::CommitPartial &&
+      action != Action::Cancel) {
+    last_edit_error_ = TF_E_LOCKED;
+    return false;
+  }
+  if (partial_edit_pending_ && action == Action::CommitPartial) {
+    last_edit_error_ = TF_E_LOCKED;
+    return false;
+  }
+  if (terminal_edit_pending_ &&
+      (action == Action::Update || action == Action::CommitPartial)) {
     // Do not enqueue a new composition update behind a pending commit/cancel;
     // doing so could resurrect text after the terminal edit has completed.
     last_edit_error_ = TF_E_LOCKED;
     return false;
   }
   const uint64_t generation = ++edit_generation_;
+  if (action == Action::Cancel) ClearPendingPartialSelection();
   // A newer terminal request (normally Esc after an accepted commit) makes an
   // older queued terminal callback stale through the generation check.
   terminal_edit_pending_ = false;
@@ -1946,19 +2153,24 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
     terminal_edit_pending_ = true;
     terminal_edit_action_ = action;
     terminal_edit_generation_ = generation;
+  } else if (action == Action::CommitPartial) {
+    partial_edit_pending_ = true;
+    partial_edit_generation_ = generation;
   }
   if (!context) {
     last_edit_error_ = E_POINTER;
     if (action == Action::Cancel) cancel_pending_ = true;
+    if (action == Action::CommitPartial) ClearPendingPartialSelection();
     terminal_edit_pending_ = false;
     terminal_edit_generation_ = 0;
     return false;
   }
   auto* session = new (std::nothrow)
-      CompositionSession(this, context, action, text, generation);
+      CompositionSession(this, context, action, text, generation, remainder);
   if (!session) {
     last_edit_error_ = E_OUTOFMEMORY;
     if (action == Action::Cancel) cancel_pending_ = true;
+    if (action == Action::CommitPartial) ClearPendingPartialSelection();
     terminal_edit_pending_ = false;
     terminal_edit_generation_ = 0;
     return false;
@@ -1974,6 +2186,7 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
   if (FAILED(request)) {
     last_edit_error_ = request;
     if (action == Action::Cancel) cancel_pending_ = true;
+    if (action == Action::CommitPartial) ClearPendingPartialSelection();
     terminal_edit_pending_ = false;
     terminal_edit_generation_ = 0;
     return false;
@@ -1990,6 +2203,7 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
       last_edit_error_ = TF_E_SYNCHRONOUS;
       terminal_edit_pending_ = false;
       terminal_edit_generation_ = 0;
+      if (action == Action::CommitPartial) ClearPendingPartialSelection();
       return false;
     }
     last_edit_pending_ = true;
@@ -1999,6 +2213,7 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
   if (SUCCEEDED(result)) return true;
   last_edit_error_ = result;
   if (action == Action::Cancel) cancel_pending_ = true;
+  if (action == Action::CommitPartial) ClearPendingPartialSelection();
   terminal_edit_pending_ = false;
   terminal_edit_generation_ = 0;
   return false;
@@ -2078,6 +2293,77 @@ bool TextService::CommitComposition(TfEditCookie cookie, const std::wstring& tex
   if (!SetCompositionText(cookie, text)) return false;
   return EndComposition(cookie);
 }
+bool TextService::CommitPartialComposition(TfEditCookie cookie,
+                                            const std::wstring& commit,
+                                            const std::wstring& remainder) {
+  if (!composition_) {
+    last_edit_error_ = TF_E_COMPOSITION_REJECTED;
+    return false;
+  }
+  if (commit.size() > static_cast<size_t>(std::numeric_limits<LONG>::max()) ||
+      remainder.size() > static_cast<size_t>(std::numeric_limits<LONG>::max()) -
+                              commit.size()) {
+    last_edit_error_ = E_INVALIDARG;
+    return false;
+  }
+
+  ComPtr<ITfRange> range;
+  HRESULT hr = composition_->GetRange(&range);
+  if (FAILED(hr) || !range) {
+    last_edit_error_ = FAILED(hr) ? hr : TF_E_NOOBJECT;
+    return false;
+  }
+  ComPtr<ITfRange> original_start;
+  hr = range->Clone(&original_start);
+  if (FAILED(hr) || !original_start ||
+      FAILED(hr = original_start->Collapse(cookie, TF_ANCHOR_START))) {
+    last_edit_error_ = FAILED(hr) ? hr : TF_E_NOOBJECT;
+    return false;
+  }
+
+  const std::wstring original = preedit_;
+  const std::wstring combined = commit + remainder;
+  hr = range->SetText(cookie, 0, combined.c_str(), static_cast<LONG>(combined.size()));
+  if (FAILED(hr)) {
+    last_edit_error_ = hr;
+    return false;
+  }
+
+  ComPtr<ITfRange> new_start;
+  hr = range->Clone(&new_start);
+  if (FAILED(hr) || !new_start ||
+      FAILED(hr = new_start->Collapse(cookie, TF_ANCHOR_START))) {
+    const HRESULT error = FAILED(hr) ? hr : TF_E_NOOBJECT;
+    SetCompositionText(cookie, original);
+    last_edit_error_ = error;
+    return false;
+  }
+  LONG moved = 0;
+  hr = new_start->ShiftStart(cookie, static_cast<LONG>(commit.size()), &moved, nullptr);
+  if (FAILED(hr) || moved != static_cast<LONG>(commit.size())) {
+    const HRESULT error = FAILED(hr) ? hr : E_FAIL;
+    SetCompositionText(cookie, original);
+    last_edit_error_ = error;
+    return false;
+  }
+
+  hr = composition_->ShiftStart(cookie, new_start.Get());
+  if (FAILED(hr)) {
+    SetCompositionText(cookie, original);
+    last_edit_error_ = hr;
+    return false;
+  }
+  if (!SetSelectionToCompositionEnd(cookie)) {
+    const HRESULT error = last_edit_error_;
+    // Restore the old composition when the host rejects the caret update so
+    // the caller can safely keep the old local preedit and retry.
+    composition_->ShiftStart(cookie, original_start.Get());
+    SetCompositionText(cookie, original);
+    last_edit_error_ = error;
+    return false;
+  }
+  return true;
+}
 bool TextService::EndComposition(TfEditCookie cookie) {
   if (!composition_) return true;
   const HRESULT result = composition_->EndComposition(cookie);
@@ -2132,6 +2418,7 @@ bool TextService::SetSelectionToCompositionEnd(TfEditCookie cookie) {
 void TextService::ClearCompositionState() {
   cancel_pending_ = false;
   last_edit_pending_ = false;
+  ClearPendingPartialSelection();
   terminal_edit_pending_ = false;
   terminal_edit_generation_ = 0;
   preedit_.clear();
@@ -2140,6 +2427,7 @@ void TextService::ClearCompositionState() {
   candidate_anchor_available_ = false;
   candidates_.clear();
   candidate_fetch_complete_ = false;
+  active_input_request_id_ = 0;
   candidate_page_ = 0;
   selected_candidate_ = 0;
   HideCandidates();

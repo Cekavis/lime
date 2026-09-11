@@ -1,6 +1,6 @@
 use crate::{
     config::ConfigStore,
-    engine::{CandidateEngine, RimeEngine},
+    engine::{CandidateBatch, CandidateEngine, RimeEngine},
     logging::PrivacyLogger,
     ranking::{try_rerank_selected_candidates_with_preedit, GenerationTracker, LlamaRuntime},
 };
@@ -346,17 +346,19 @@ impl CoreService {
         let input_started = Instant::now();
         let snapshot = self.config_snapshot();
         if request.config_revision != snapshot.revision {
-            self.record_input_history(InputHistoryRecord {
-                request: &request,
-                rime_candidates: Vec::new(),
-                final_candidates: Vec::new(),
-                diagnostics: Vec::new(),
-                service_state: self.current_service_state(),
-                model_name: None,
-                rime_duration_ms: None,
-                llm_performance: None,
-                end_to_end_duration_ms: Some(elapsed_ms(input_started.elapsed())),
-            });
+            if request.candidate_extension_of.is_none() {
+                self.record_input_history(InputHistoryRecord {
+                    request: &request,
+                    rime_candidates: Vec::new(),
+                    final_candidates: Vec::new(),
+                    diagnostics: Vec::new(),
+                    service_state: self.current_service_state(),
+                    model_name: None,
+                    rime_duration_ms: None,
+                    llm_performance: None,
+                    end_to_end_duration_ms: Some(elapsed_ms(input_started.elapsed())),
+                });
+            }
             return Err(ErrorCode::RequestCancelled);
         }
         let generation = self.generation.next();
@@ -391,28 +393,53 @@ impl CoreService {
         let rime_batch = match rime_result {
             Ok(batch) => batch,
             Err(code) => {
-                self.record_input_history(InputHistoryRecord {
-                    request: &request,
-                    rime_candidates: Vec::new(),
-                    final_candidates: Vec::new(),
-                    diagnostics: Vec::new(),
-                    service_state,
-                    model_name: model_name.clone(),
-                    rime_duration_ms,
-                    llm_performance: None,
-                    end_to_end_duration_ms: Some(elapsed_ms(input_started.elapsed())),
-                });
+                if request.candidate_extension_of.is_none() {
+                    self.record_input_history(InputHistoryRecord {
+                        request: &request,
+                        rime_candidates: Vec::new(),
+                        final_candidates: Vec::new(),
+                        diagnostics: Vec::new(),
+                        service_state,
+                        model_name: model_name.clone(),
+                        rime_duration_ms,
+                        llm_performance: None,
+                        end_to_end_duration_ms: Some(elapsed_ms(input_started.elapsed())),
+                    });
+                }
                 return Err(code);
             }
         };
-        let rime_candidates = rime_batch.candidates;
+        let CandidateBatch {
+            candidates: rime_candidates,
+            complete_candidate_indices,
+            candidate_remainders: rime_candidate_remainders,
+        } = rime_batch;
+        if let Some(original_request_id) = request.candidate_extension_of {
+            let candidates = rime_candidates;
+            let candidate_remainders = rime_candidate_remainders;
+            self.append_candidate_history(original_request_id, &request, &candidates);
+            if !self.generation.is_current(generation) {
+                return Err(ErrorCode::RequestCancelled);
+            }
+            return Ok(InputResponse {
+                request_id: request.request_id,
+                candidates,
+                candidate_remainders,
+                context_used: request.context_available && !request.preceding_text.is_empty(),
+                service_state,
+                diagnostics: Vec::new(),
+                end_to_end_duration_ms: None,
+                rime_duration_ms: None,
+                llm_performance: None,
+            });
+        }
         let preceding_text = truncate_chars(
             &request.preceding_text,
             config.preceding_text_char_limit as usize,
         );
         let ranking = match try_rerank_selected_candidates_with_preedit(
             &rime_candidates,
-            &rime_batch.complete_candidate_indices,
+            &complete_candidate_indices,
             &request.preedit,
             &preceding_text,
             runtime,
@@ -429,6 +456,16 @@ impl CoreService {
         };
         let llm_performance = ranking.llm_performance.clone();
         let candidates = ranking.result.candidates;
+        let candidate_remainders = ranking
+            .candidate_indices
+            .iter()
+            .map(|index| {
+                rime_candidate_remainders
+                    .get(*index)
+                    .cloned()
+                    .unwrap_or(None)
+            })
+            .collect::<Vec<_>>();
         let diagnostics = ranking.result.diagnostics;
         let end_to_end_duration_ms = Some(elapsed_ms(input_started.elapsed()));
         self.record_input_history(InputHistoryRecord {
@@ -448,6 +485,7 @@ impl CoreService {
         Ok(InputResponse {
             request_id: request.request_id,
             candidates,
+            candidate_remainders,
             context_used: request.context_available && !request.preceding_text.is_empty(),
             service_state,
             diagnostics,
@@ -897,6 +935,56 @@ impl CoreService {
         self.bump_history_revision();
     }
 
+    fn append_candidate_history(
+        &self,
+        original_request_id: u64,
+        request: &InputRequest,
+        candidates: &[lime_protocol::Candidate],
+    ) {
+        let changed = {
+            let mut history = self.history.lock().expect("history mutex poisoned");
+            let Some(entry) = history.iter_mut().rev().find(|entry| {
+                entry.request_id == original_request_id
+                    && entry.preedit == request.preedit
+                    && entry.preceding_text == request.preceding_text
+            }) else {
+                return;
+            };
+            let rime_start = entry.rime_candidates.len();
+            if candidates.len() <= rime_start {
+                false
+            } else {
+                entry
+                    .rime_candidates
+                    .extend(candidates[rime_start..].iter().cloned());
+
+                let final_start = entry.final_candidates.len().min(candidates.len());
+                entry
+                    .final_candidates
+                    .extend(candidates[final_start..].iter().cloned());
+
+                let diagnostic_start = entry.diagnostics.len().min(candidates.len());
+                entry
+                    .diagnostics
+                    .extend(candidates[diagnostic_start..].iter().enumerate().map(
+                        |(offset, candidate)| CandidateDiagnostic {
+                            rank: (diagnostic_start + offset + 1) as u32,
+                            rime_candidate: Some(candidate.clone()),
+                            llm_candidate: None,
+                            logprob: 0.0,
+                            logprobs: Vec::new(),
+                            mismatch: false,
+                            display_candidate: Some(candidate.clone()),
+                        },
+                    ));
+                true
+            }
+        };
+        if changed {
+            self.bump_history_revision();
+        }
+    }
+
     fn next_timestamp_ms(&self) -> u64 {
         let now = now_unix_ms();
         let mut previous = self.history_clock.load(Ordering::Acquire);
@@ -1025,6 +1113,7 @@ mod tests {
             preceding_text: String::new(),
             context_available: false,
             config_revision: 0,
+            candidate_extension_of: None,
             candidate_limit: 0,
         }));
         assert_eq!(
@@ -1055,6 +1144,7 @@ mod tests {
             preceding_text: "上文".into(),
             context_available: true,
             config_revision: 0,
+            candidate_extension_of: None,
             candidate_limit: 0,
         };
         service.record_input_history(InputHistoryRecord {
@@ -1083,6 +1173,101 @@ mod tests {
     }
 
     #[test]
+    fn candidate_extension_appends_to_existing_history_without_new_row_or_performance() {
+        let service = CoreService::default();
+        let initial_request = InputRequest {
+            request_id: 7,
+            preedit: "nihao".into(),
+            preceding_text: "上文".into(),
+            context_available: true,
+            config_revision: 0,
+            candidate_extension_of: None,
+            candidate_limit: 32,
+        };
+        let first_candidates = vec![
+            lime_protocol::Candidate {
+                display_text: "你好".into(),
+                commit_text: "你好".into(),
+            },
+            lime_protocol::Candidate {
+                display_text: "拟好".into(),
+                commit_text: "拟好".into(),
+            },
+        ];
+        service.record_input_history(InputHistoryRecord {
+            request: &initial_request,
+            rime_candidates: first_candidates.clone(),
+            final_candidates: first_candidates.clone(),
+            diagnostics: first_candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| CandidateDiagnostic {
+                    rank: (index + 1) as u32,
+                    rime_candidate: Some(candidate.clone()),
+                    llm_candidate: None,
+                    logprob: 0.0,
+                    logprobs: Vec::new(),
+                    mismatch: false,
+                    display_candidate: Some(candidate.clone()),
+                })
+                .collect(),
+            service_state: ServiceState::Ready,
+            model_name: Some("demo.gguf".into()),
+            rime_duration_ms: Some(7),
+            llm_performance: Some(LlmPerformance {
+                total_ms: 11,
+                ..LlmPerformance::default()
+            }),
+            end_to_end_duration_ms: Some(23),
+        });
+
+        let extension_request = InputRequest {
+            request_id: 8,
+            preedit: initial_request.preedit.clone(),
+            preceding_text: initial_request.preceding_text.clone(),
+            context_available: true,
+            config_revision: 0,
+            candidate_extension_of: Some(initial_request.request_id),
+            candidate_limit: 64,
+        };
+        let mut all_candidates = first_candidates;
+        all_candidates.push(lime_protocol::Candidate {
+            display_text: "你号".into(),
+            commit_text: "你号".into(),
+        });
+        service.append_candidate_history(
+            initial_request.request_id,
+            &extension_request,
+            &all_candidates,
+        );
+
+        let history = match service.handle(Request::GetInputHistoryPage {
+            page: 1,
+            page_size: 100,
+        }) {
+            Response::InputHistoryPage(page) => page.items,
+            other => panic!("unexpected history response: {other:?}"),
+        };
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].request_id, initial_request.request_id);
+        assert_eq!(history[0].rime_candidates.len(), 3);
+        assert_eq!(history[0].final_candidates.len(), 3);
+        assert_eq!(history[0].diagnostics.len(), 3);
+        assert_eq!(history[0].rime_candidates[2].commit_text, "你号");
+        assert_eq!(
+            history[0]
+                .llm_performance
+                .as_ref()
+                .map(|value| value.total_ms),
+            Some(11)
+        );
+        assert_eq!(history[0].rime_duration_ms, Some(7));
+        assert_eq!(history[0].end_to_end_duration_ms, Some(23));
+        assert!(history[0].diagnostics[2].llm_candidate.is_none());
+        assert!(history[0].diagnostics[2].logprobs.is_empty());
+    }
+
+    #[test]
     fn history_is_newest_first_and_page_size_is_bounded_to_one_hundred() {
         let service = CoreService::default();
         for request_id in 1..=105 {
@@ -1092,6 +1277,7 @@ mod tests {
                 preceding_text: String::new(),
                 context_available: false,
                 config_revision: 0,
+                candidate_extension_of: None,
                 candidate_limit: 0,
             }));
             assert!(matches!(
@@ -1140,6 +1326,7 @@ mod tests {
             preceding_text: String::new(),
             context_available: false,
             config_revision: 0,
+            candidate_extension_of: None,
             candidate_limit: 0,
         }));
         assert_eq!(
@@ -1427,6 +1614,7 @@ mod tests {
             preceding_text: String::new(),
             context_available: false,
             config_revision: 0,
+            candidate_extension_of: None,
             candidate_limit: 0,
         }));
         assert_eq!(
@@ -1474,6 +1662,89 @@ mod tests {
     }
 
     #[test]
+    fn native_input_returns_candidate_remainders() {
+        let Ok(rime_dir) = std::env::var("LIME_TEST_RIME_DIR") else {
+            return;
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "lime-core-remainder-service-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let service =
+            CoreService::new_with_rime_dir(Some(directory.clone()), Some(PathBuf::from(rime_dir)));
+        let revision = service.config_snapshot().revision;
+        let response = service.handle(Request::Input(InputRequest {
+            request_id: 100,
+            preedit: "nihao".into(),
+            preceding_text: String::new(),
+            context_available: false,
+            config_revision: revision,
+            candidate_extension_of: None,
+            candidate_limit: 32,
+        }));
+        let response = match response {
+            Response::Input(response) => response,
+            other => panic!("unexpected input response: {other:?}"),
+        };
+        assert_eq!(
+            response.candidate_remainders.len(),
+            response.candidates.len()
+        );
+        let partial_index = response
+            .candidates
+            .iter()
+            .position(|candidate| candidate.commit_text == "你")
+            .expect("one-character candidate should be present");
+        assert_eq!(
+            response.candidate_remainders[partial_index].as_deref(),
+            Some("hao")
+        );
+        let complete_index = response
+            .candidates
+            .iter()
+            .position(|candidate| candidate.commit_text == "你好")
+            .expect("complete candidate should be present");
+        assert_eq!(
+            response.candidate_remainders[complete_index].as_deref(),
+            Some("")
+        );
+
+        let extension_response = service.handle(Request::Input(InputRequest {
+            request_id: 101,
+            preedit: "nihao".into(),
+            preceding_text: String::new(),
+            context_available: false,
+            config_revision: revision,
+            candidate_extension_of: Some(100),
+            candidate_limit: 64,
+        }));
+        let extension_response = match extension_response {
+            Response::Input(response) => response,
+            other => panic!("unexpected candidate extension response: {other:?}"),
+        };
+        assert!(extension_response.llm_performance.is_none());
+        let history = match service.handle(Request::GetInputHistoryPage {
+            page: 1,
+            page_size: 100,
+        }) {
+            Response::InputHistoryPage(page) => page,
+            other => panic!("unexpected history response: {other:?}"),
+        };
+        assert_eq!(history.total, 1);
+        assert_eq!(history.items[0].request_id, 100);
+        assert_eq!(
+            history.items[0].rime_candidates.len(),
+            extension_response.candidates.len()
+        );
+        assert_eq!(
+            history.items[0].final_candidates.len(),
+            extension_response.candidates.len()
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn native_schema_config_change_reloads_the_librime_session_when_requested() {
         let Ok(rime_dir) = std::env::var("LIME_TEST_RIME_DIR") else {
             return;
@@ -1501,6 +1772,7 @@ mod tests {
             preceding_text: String::new(),
             context_available: false,
             config_revision: revision,
+            candidate_extension_of: None,
             candidate_limit: 0,
         }));
         match response {

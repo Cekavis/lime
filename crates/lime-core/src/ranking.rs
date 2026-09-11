@@ -15,6 +15,8 @@ pub struct RerankResult {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RankingOutcome {
     pub result: RerankResult,
+    /// Original Rime index for each candidate in `result.candidates`.
+    pub(crate) candidate_indices: Vec<usize>,
     pub llm_performance: Option<LlmPerformance>,
 }
 
@@ -244,8 +246,11 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
         (Vec::new(), None)
     };
 
+    let (result, candidate_indices) =
+        build_rerank_result_with_indices(candidates, model_active, score_rows, effective_count);
     Ok(RankingOutcome {
-        result: build_rerank_result(candidates, model_active, score_rows, effective_count),
+        result,
+        candidate_indices,
         llm_performance,
     })
 }
@@ -273,12 +278,12 @@ fn selected_pool_indices(
         .collect()
 }
 
-fn build_rerank_result(
+fn build_rerank_result_with_indices(
     candidates: &[Candidate],
     model_active: bool,
     score_rows: Vec<(usize, Candidate, CandidateScore)>,
     effective_count: usize,
-) -> RerankResult {
+) -> (RerankResult, Vec<usize>) {
     let llm_order = score_rows
         .iter()
         .map(|(_, candidate, _)| candidate.clone())
@@ -293,6 +298,15 @@ fn build_rerank_result(
     } else {
         Vec::new()
     };
+    let mut final_indices = if model_active {
+        score_rows
+            .iter()
+            .take(effective_count.min(score_rows.len()))
+            .map(|(index, _, _)| *index)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let promoted_indices = score_rows
         .iter()
         .take(effective_count.min(score_rows.len()))
@@ -301,11 +315,13 @@ fn build_rerank_result(
     for (index, candidate) in candidates.iter().enumerate() {
         if !promoted_indices.contains(&index) {
             final_order.push(candidate.clone());
+            final_indices.push(index);
         }
     }
     if !model_active {
         // The no-model path must preserve the exact Rime order, including duplicate entries.
         final_order = candidates.to_vec();
+        final_indices = (0..candidates.len()).collect();
     }
 
     let row_count = candidates.len().max(llm_order.len()).max(final_order.len());
@@ -334,10 +350,13 @@ fn build_rerank_result(
         })
         .collect();
 
-    RerankResult {
-        candidates: final_order,
-        diagnostics,
-    }
+    (
+        RerankResult {
+            candidates: final_order,
+            diagnostics,
+        },
+        final_indices,
+    )
 }
 
 pub fn rerank_candidates(
@@ -595,7 +614,7 @@ mod tests {
             logprob: value,
             mismatch: false,
         };
-        let result = build_rerank_result(
+        let (result, _) = build_rerank_result_with_indices(
             &input,
             true,
             vec![
@@ -605,6 +624,17 @@ mod tests {
             ],
             2,
         );
+        let (_, indices) = build_rerank_result_with_indices(
+            &input,
+            true,
+            vec![
+                (3, input[3].clone(), score(-1.0)),
+                (1, input[1].clone(), score(-2.0)),
+                (2, input[2].clone(), score(-3.0)),
+            ],
+            2,
+        );
+        assert_eq!(indices, vec![3, 1, 0, 2]);
 
         assert_eq!(
             result

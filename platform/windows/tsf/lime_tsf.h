@@ -22,8 +22,13 @@ class TextService final : public ITfTextInputProcessorEx,
                           public ITfKeyEventSink,
                           public ITfCompositionSink {
  public:
-  struct Candidate { std::wstring display; std::wstring commit; };
-  enum class Action { Update, Commit, Cancel };
+  struct Candidate {
+    std::wstring display;
+    std::wstring commit;
+    std::wstring remainder;
+    bool remainder_available = false;
+  };
+  enum class Action { Update, Commit, CommitPartial, Cancel };
 
   TextService();
   ~TextService();
@@ -51,6 +56,8 @@ class TextService final : public ITfTextInputProcessorEx,
   bool EnsureComposition(ITfContext* context, TfEditCookie cookie);
   bool SetCompositionText(TfEditCookie cookie, const std::wstring& text);
   bool CommitComposition(TfEditCookie cookie, const std::wstring& text);
+  bool CommitPartialComposition(TfEditCookie cookie, const std::wstring& commit,
+                                const std::wstring& remainder);
   bool EndComposition(TfEditCookie cookie);
   bool IsEditCurrent(uint64_t generation) const { return generation == edit_generation_; }
   void CompleteEditSession(Action action, uint64_t generation, bool succeeded);
@@ -69,15 +76,20 @@ class TextService final : public ITfTextInputProcessorEx,
   bool FetchCandidates(ITfContext* context, const std::wstring& preedit,
                        std::vector<Candidate>& candidates, std::wstring& preceding,
                        bool& context_available, RECT& anchor,
-                       bool& anchor_available, size_t candidate_limit);
+                       bool& anchor_available, size_t candidate_limit,
+                       std::wstring_view preceding_suffix = {},
+                       uint64_t candidate_extension_of = 0);
   bool LoadMoreCandidates(ITfContext* context, size_t required_count);
   bool UpdateCandidates(ITfContext* context);
+  bool SelectCandidate(ITfContext* context, size_t index);
   void RefreshConfigRevision(ITfContext* context = nullptr);
   bool ResetCompositionForSchemaChange(ITfContext* context);
   void LearnCandidate(std::wstring_view pinyin, std::wstring_view text);
+  void ClearPendingPartialSelection();
   bool ResolvePendingCancellation();
   bool RequestEdit(ITfContext* context, Action action, const std::wstring& text,
-                   bool synchronous = false);
+                   bool synchronous = false,
+                   const std::wstring& remainder = {});
   bool CancelComposition(ITfContext* context);
   bool SetSelectionToCompositionEnd(TfEditCookie cookie);
   void ClearCompositionState();
@@ -107,6 +119,7 @@ class TextService final : public ITfTextInputProcessorEx,
   std::wstring schema_id_ = L"rime_ice";
   uint64_t config_revision_ = 0;
   uint64_t request_id_ = 0;
+  uint64_t active_input_request_id_ = 0;
   uint32_t context_limit_ = 128;
   uint32_t context_preview_limit_ = 32;
   uint32_t page_size_ = 9;
@@ -114,6 +127,16 @@ class TextService final : public ITfTextInputProcessorEx,
   bool schema_reset_pending_ = false;
   bool cancel_pending_ = false;
   bool last_edit_pending_ = false;
+  bool partial_edit_pending_ = false;
+  uint64_t partial_edit_generation_ = 0;
+  std::wstring pending_partial_pinyin_;
+  std::wstring pending_partial_commit_;
+  std::wstring pending_partial_remainder_;
+  std::vector<Candidate> pending_partial_candidates_;
+  std::wstring pending_partial_preceding_;
+  RECT pending_partial_anchor_{};
+  bool pending_partial_anchor_available_ = false;
+  bool pending_partial_fetch_complete_ = false;
   bool terminal_edit_pending_ = false;
   Action terminal_edit_action_ = Action::Update;
   uint64_t terminal_edit_generation_ = 0;

@@ -51,6 +51,11 @@ pub struct InputRequest {
     pub preceding_text: String,
     pub context_available: bool,
     pub config_revision: u64,
+    /// Identifies the original input request when this is only a lazy Rime
+    /// candidate extension. Extension requests do not invoke LLM ranking or
+    /// create a new history entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_extension_of: Option<u64>,
     /// Number of leading candidates requested by the client.
     ///
     /// Zero requests the full list for protocol clients that explicitly need it. The management
@@ -83,6 +88,12 @@ pub enum ServiceState {
 pub struct InputResponse {
     pub request_id: u64,
     pub candidates: Vec<Candidate>,
+    /// Remaining raw pinyin after selecting each candidate, aligned with `candidates`.
+    ///
+    /// A missing value means that the engine could not expose reliable selection metadata. An
+    /// empty string means that the candidate consumes the complete composition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_remainders: Vec<Option<String>>,
     pub context_used: bool,
     pub service_state: ServiceState,
     /// One row per candidate used by the management/test diagnostics table.

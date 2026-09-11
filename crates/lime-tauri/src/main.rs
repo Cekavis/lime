@@ -136,6 +136,7 @@ fn test_input(preceding_text: String, preedit: String) -> Result<lime_protocol::
         preceding_text,
         preedit,
         config_revision: config.revision,
+        candidate_extension_of: None,
         candidate_limit: config.config.page_size,
     }))? {
         Response::Input(value) => Ok(value),

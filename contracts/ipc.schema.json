@@ -51,6 +51,11 @@
           "type": "integer",
           "minimum": 0
         },
+        "candidate_extension_of": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Original request_id for a lazy Rime candidate extension; skips LLM ranking and history row creation."
+        },
         "candidate_limit": {
           "type": "integer",
           "minimum": 0,
@@ -79,6 +84,20 @@
           "items": {
             "$ref": "#/$defs/candidate"
           }
+        },
+        "candidate_remainders": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": "Remaining raw pinyin after selecting each candidate, aligned with candidates. Null means selection metadata is unavailable; an empty string means the candidate consumes the complete composition."
         },
         "context_used": {
           "type": "boolean"

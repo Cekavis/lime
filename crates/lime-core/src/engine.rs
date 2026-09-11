@@ -27,6 +27,9 @@ pub trait CandidateEngine: Send {
 pub(crate) struct CandidateBatch {
     pub candidates: Vec<Candidate>,
     pub complete_candidate_indices: Vec<usize>,
+    /// The raw input suffix left after selecting each candidate. `None` means librime could not
+    /// expose a reliable preview for that row; `Some("")` means the candidate consumes all input.
+    pub candidate_remainders: Vec<Option<String>>,
 }
 
 /// Result returned after librime processes one native key event.
@@ -752,31 +755,31 @@ mod native {
                 }
             }
             let mut complete_candidate_indices = Vec::new();
-            if rerank_count > 0 {
-                for (candidate_index, (candidate, source_index)) in
-                    out.iter().take(rerank_count).enumerate()
-                {
-                    if self.candidate_covers_complete_input(*source_index, candidate) {
-                        complete_candidate_indices.push(candidate_index);
-                    }
+            let mut candidate_remainders = Vec::with_capacity(out.len());
+            for (candidate_index, (candidate, source_index)) in out.iter().enumerate() {
+                let remainder = self.candidate_remainder(*source_index, candidate);
+                if candidate_index < rerank_count && remainder.as_deref() == Some("") {
+                    complete_candidate_indices.push(candidate_index);
                 }
-                if let Some(index) = original_highlight {
-                    unsafe {
-                        (self.api.highlight_candidate)(self.session, index);
-                    }
+                candidate_remainders.push(remainder);
+            }
+            if let Some(index) = original_highlight {
+                unsafe {
+                    (self.api.highlight_candidate)(self.session, index);
                 }
             }
             Ok(CandidateBatch {
                 candidates: out.into_iter().map(|(candidate, _)| candidate).collect(),
                 complete_candidate_indices,
+                candidate_remainders,
             })
         }
 
-        fn candidate_covers_complete_input(
+        fn candidate_remainder(
             &self,
             candidate_index: usize,
             candidate: &Candidate,
-        ) -> bool {
+        ) -> Option<String> {
             // librime returns false when the requested candidate is already highlighted. Read
             // the context in either case and verify the resulting global highlight index before
             // trusting the preview.
@@ -805,7 +808,7 @@ mod native {
                 select_labels: ptr::null_mut(),
             };
             if unsafe { (self.api.get_context)(self.session, &mut context) } == 0 {
-                return false;
+                return None;
             }
             let highlighted_index = context.menu.page_no.max(0) as usize
                 * context.menu.page_size.max(0) as usize
@@ -814,7 +817,12 @@ mod native {
             unsafe {
                 (self.api.free_context)(&mut context);
             }
-            highlighted_index == candidate_index && preview == candidate.commit_text
+            if highlighted_index != candidate_index {
+                return None;
+            }
+            preview
+                .strip_prefix(&candidate.commit_text)
+                .map(str::to_owned)
         }
 
         pub(super) fn learn(&mut self, pinyin: &str, text: &str) -> Result<(), CoreError> {
@@ -1564,6 +1572,19 @@ mod tests {
         assert!(complete.contains(&"你好"));
         assert!(complete.contains(&"👋"));
         assert!(!complete.contains(&"你"));
+        assert_eq!(batch.candidate_remainders.len(), batch.candidates.len());
+        let partial_index = batch
+            .candidates
+            .iter()
+            .position(|candidate| candidate.commit_text == "你")
+            .expect("one-character candidate should be present");
+        assert_eq!(
+            batch.candidate_remainders[partial_index].as_deref(),
+            Some("hao")
+        );
+        for index in &batch.complete_candidate_indices {
+            assert_eq!(batch.candidate_remainders[*index].as_deref(), Some(""));
+        }
         let _ = fs::remove_dir_all(user_dir);
     }
 

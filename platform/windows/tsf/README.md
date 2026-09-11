@@ -6,7 +6,7 @@
 
 TSF 根据服务状态中的 `rime_schema` 处理输入；通用方案路径按 Shift/CapsLock 保留字母大小写，
 并传递反引号和单引号编码，
-候选通过数字键或空格提交，回车则提交当前输入的英文原文；中文模式下独立空格始终提交半角 U+0020，其他标点使用雾凇拼音 `half_shape` 的首选映射。不会在 TSF 中伪造 `t9` 的数字处理；上游 `t9.schema`
+候选通过数字键或空格提交；候选只覆盖前缀时，已选文字上屏，剩余拼音保留为新的组合串并继续召回候选，行为对齐小狼毫。回车则提交当前输入的英文原文；中文模式下独立空格始终提交半角 U+0020，其他标点使用雾凇拼音 `half_shape` 的首选映射。不会在 TSF 中伪造 `t9` 的数字处理；上游 `t9.schema`
 依赖特定运行时提供的 `t9_processor`，当前官方 Windows librime DLL 未导出该处理器，
 因此 Windows 首期不把 t9 列为可选方案，但发布包仍原样保留上游 t9 文件。
 
@@ -35,6 +35,6 @@ TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使�
 
 中文模式下的独立标点（空格除外）即使没有现有拼音组合串，也会建立并立即结束一个短生命周期 TSF composition；独立空格同样复用该生命周期但写入半角 U+0020。不在按键回调中直接调用 `ITfInsertAtSelection` 修改宿主 selection，避免 Chromium/WebView2 等文本上下文的重入崩溃。
 
-候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。F1–F12 等功能键由宿主处理，不参与 Lime 输入。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；取消完成前继续吞键，避免按键进入宿主文本。
+候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。翻页超出已加载的 Rime 候选时只追加 Rime 候选，不重新调用 LLM，也不产生新的历史记录。F1–F12 等功能键由宿主处理，不参与 Lime 输入。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；取消完成前继续吞键，避免按键进入宿主文本。
 
 若构建环境暂时没有 `third_party/weasel-ui`，可用 `-DLIME_WITH_WEASEL_UI=OFF` 构建内置回退窗口；发布构建默认启用 WeaselUI。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。
