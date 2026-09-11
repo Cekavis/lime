@@ -1736,7 +1736,8 @@ std::wstring TextService::ChinesePunctuationText(WPARAM key) {
 }
 bool TextService::IsImeKey(WPARAM key) const {
   return IsPreeditKey(key) || key == VK_BACK || key == VK_RETURN ||
-         (key >= '1' && key <= '9') || key == VK_SPACE || key == VK_ESCAPE ||
+         ((key >= '1' && key <= '9') && !candidates_.empty()) ||
+         key == VK_SPACE || key == VK_ESCAPE ||
          IsPreviousPageKey(key) || IsNextPageKey(key) || key == VK_UP ||
          key == VK_DOWN;
 }
@@ -2146,23 +2147,11 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
       return false;
     }
     if (candidates_.empty()) {
-      // Rime has no match for this snapshot. Cancel the native composition so
-      // the host can receive the original printable key unchanged.
-      const bool canceled = CancelComposition(context);
-      if (canceled) {
-        ClearCompositionState();
-      } else {
-        // Do not forward the key while an asynchronous/rejected cancel can
-        // still leave the old composition range alive.  Resolve it before
-        // accepting the next key instead.
-        cancel_pending_ = true;
-        HideCandidates();
-      }
-      if (!passthrough_notified_) {
-        g_candidates.ShowStatus(context, L"Lime：无候选，英文透传");
-        passthrough_notified_ = true;
-      }
-      return canceled ? false : true;
+      // An empty Rime result is still a valid composition state. Keep the raw
+      // pinyin in the TSF composition, hide the candidate UI, and let Enter or
+      // Space commit it explicitly. Cancelling here would forward only the
+      // latest key to the host (for example, the final `a` in `uia`).
+      HideCandidates();
     }
     return true;
   }

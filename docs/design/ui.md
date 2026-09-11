@@ -12,7 +12,7 @@
 
 无拼音组合串时的独立标点（空格除外）仍通过一个立即结束的 TSF composition 提交；独立空格也复用同一生命周期但写入半角 U+0020，有候选时 Space 仍提交选中候选，Shift+Space 继续透传。按键回调不直接修改宿主 selection，避免 Chromium/WebView2 文本上下文在 `ITfInsertAtSelection` 中重入 Windows 文本输入框架。
 
-候选窗口使用独立的 Win32 UI 线程和消息循环，不依赖宿主程序（包括记事本、QQ）的 TSF 回调线程绘制。窗口采用 Weasel 的每监视器 DPI、圆角、选中态高亮、编号列和状态提示；服务不可用或没有候选时，状态提示明确显示“英文透传”，而不是留下不可见的组合状态。
+候选窗口使用独立的 Win32 UI 线程和消息循环，不依赖宿主程序（包括记事本、QQ）的 TSF 回调线程绘制。窗口采用 Weasel 的每监视器 DPI、圆角、选中态高亮、编号列和状态提示；服务不可用时才进入“英文透传”，服务可用但 Rime 返回空候选时保留未确认组合串并隐藏候选窗口，等待 Enter 或 Space 提交原始拼音。
 
 `OnTestKeyDown` 只负责判断按键归属，不读取上下文、不访问 IPC；候选读取和写入组合串在 `OnKeyDown` 的 edit session 中完成，避免宿主在 probe 回调期间持有锁而造成 `TF_E_LOCKED`。
 
