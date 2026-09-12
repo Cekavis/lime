@@ -208,6 +208,15 @@ mod tests {
         assert_eq!(json["payload"]["page"], 1);
         assert_eq!(json["payload"]["page_size"], DICTIONARY_PAGE_SIZE);
 
+        let rename = Request::RenameModelPreset {
+            name: "old".into(),
+            new_name: "new".into(),
+        };
+        let json = serde_json::to_value(&rename).expect("serialize rename request");
+        assert_eq!(json["kind"], "rename_model_preset");
+        assert_eq!(json["payload"]["name"], "old");
+        assert_eq!(json["payload"]["new_name"], "new");
+
         let response = Response::Error {
             code: ErrorCode::ModelNotFound,
         };

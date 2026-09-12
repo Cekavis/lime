@@ -74,6 +74,14 @@ fn save_model_preset(name: String, path: String) -> Result<ModelPreset, String> 
 }
 
 #[tauri::command]
+fn rename_model_preset(name: String, new_name: String) -> Result<ModelPreset, String> {
+    match ipc::call(Request::RenameModelPreset { name, new_name })? {
+        Response::ModelPreset(value) => Ok(value),
+        _ => Err("unexpected rename_model_preset response".to_owned()),
+    }
+}
+
+#[tauri::command]
 fn delete_model_preset(name: String) -> Result<(), String> {
     match ipc::call(Request::DeleteModelPreset { name })? {
         Response::Accepted => Ok(()),
@@ -185,6 +193,7 @@ fn main() {
             unload_model,
             list_model_presets,
             save_model_preset,
+            rename_model_preset,
             delete_model_preset,
             select_model_preset,
             export_dictionary,

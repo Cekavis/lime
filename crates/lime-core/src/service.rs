@@ -294,6 +294,9 @@ impl CoreService {
             Request::SaveModelPreset { name, path } => {
                 self.save_model_preset(&name, Path::new(&path))
             }
+            Request::RenameModelPreset { name, new_name } => {
+                self.rename_model_preset(&name, &new_name)
+            }
             Request::DeleteModelPreset { name } => self.delete_model_preset(&name),
             Request::SelectModelPreset { name } => self.select_model_preset(&name),
             Request::Learn { pinyin, text } => self.learn(&pinyin, &text),
@@ -724,6 +727,52 @@ impl CoreService {
             };
         }
         Response::Accepted
+    }
+
+    fn rename_model_preset(&self, name: &str, new_name: &str) -> Response {
+        let name = name.trim();
+        let new_name = new_name.trim();
+        if name.is_empty()
+            || new_name.is_empty()
+            || name.chars().count() > 128
+            || new_name.chars().count() > 128
+            || name.contains('\0')
+            || new_name.contains('\0')
+        {
+            return Response::Error {
+                code: ErrorCode::InvalidRequest,
+            };
+        }
+        let mut presets = self
+            .model_presets
+            .lock()
+            .expect("model presets mutex poisoned");
+        let Some(preset) = presets.get(name).cloned() else {
+            return Response::Error {
+                code: ErrorCode::ModelNotFound,
+            };
+        };
+        if name == new_name {
+            return Response::ModelPreset(preset);
+        }
+        if presets.contains_key(new_name) {
+            return Response::Error {
+                code: ErrorCode::InvalidRequest,
+            };
+        }
+
+        let mut renamed = preset.clone();
+        renamed.name = new_name.to_owned();
+        presets.remove(name);
+        presets.insert(new_name.to_owned(), renamed.clone());
+        if self.persist_model_presets_locked(&presets).is_err() {
+            presets.remove(new_name);
+            presets.insert(name.to_owned(), preset);
+            return Response::Error {
+                code: ErrorCode::Internal,
+            };
+        }
+        Response::ModelPreset(renamed)
     }
 
     fn select_model_preset(&self, name: &str) -> Response {
@@ -1388,12 +1437,56 @@ mod tests {
             service.handle(Request::ListModelPresets),
             Response::ModelPresets(presets) if presets.len() == 1
         ));
+        let renamed = match service.handle(Request::RenameModelPreset {
+            name: "demo".into(),
+            new_name: "renamed".into(),
+        }) {
+            Response::ModelPreset(preset) => preset,
+            other => panic!("unexpected rename response: {other:?}"),
+        };
+        assert_eq!(renamed.name, "renamed");
+        assert_eq!(renamed.path, updated.path);
+        assert_eq!(renamed.size_bytes, updated.size_bytes);
+        assert_eq!(renamed.sha256, updated.sha256);
+        assert_eq!(
+            service.handle(Request::RenameModelPreset {
+                name: "renamed".into(),
+                new_name: "renamed".into(),
+            }),
+            Response::ModelPreset(renamed.clone())
+        );
+        assert_eq!(
+            service.handle(Request::RenameModelPreset {
+                name: "no-such".into(),
+                new_name: "missing".into(),
+            }),
+            Response::Error {
+                code: ErrorCode::ModelNotFound
+            }
+        );
+        let duplicate = match service.handle(Request::SaveModelPreset {
+            name: "other".into(),
+            path: model_path.to_string_lossy().into_owned(),
+        }) {
+            Response::ModelPreset(preset) => preset,
+            other => panic!("unexpected duplicate setup response: {other:?}"),
+        };
+        assert_eq!(
+            service.handle(Request::RenameModelPreset {
+                name: "renamed".into(),
+                new_name: "other".into(),
+            }),
+            Response::Error {
+                code: ErrorCode::InvalidRequest
+            }
+        );
+        assert_eq!(duplicate.name, "other");
         // A four-byte test file is sufficient to exercise metadata persistence, but it is not a
         // loadable GGUF model.  Activation must therefore fail clearly and leave the current
         // model untouched instead of pretending that validation alone loaded the model.
         assert_eq!(
             service.handle(Request::SelectModelPreset {
-                name: "demo".into(),
+                name: "renamed".into(),
             }),
             Response::Error {
                 code: ErrorCode::ModelLoadFailed
@@ -1408,7 +1501,13 @@ mod tests {
         }
         assert_eq!(
             service.handle(Request::DeleteModelPreset {
-                name: "demo".into()
+                name: "renamed".into()
+            }),
+            Response::Accepted
+        );
+        assert_eq!(
+            service.handle(Request::DeleteModelPreset {
+                name: "other".into()
             }),
             Response::Accepted
         );

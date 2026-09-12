@@ -1005,7 +1005,7 @@ function renderModelPresets(presets: ModelPreset[], options: { force?: boolean }
     const key = escapeHtml(preset.id || preset.name);
     const loaded = preset.loaded ? " is-loaded" : "";
     const fullPath = preset.path || "—";
-    return '<article class="preset-item' + loaded + '"><div class="preset-info"><strong>' + escapeHtml(preset.name) + '</strong><span class="muted mono" title="' + escapeHtml(fullPath) + '">' + escapeHtml(fullPath === "—" ? fullPath : truncatePath(fullPath, 56)) + '</span></div><div class="preset-actions"><button class="button button-primary" type="button" data-preset-action="select" data-preset-key="' + key + '">切换</button><button class="button button-danger" type="button" data-preset-action="delete" data-preset-key="' + key + '">删除</button></div></article>';
+    return '<article class="preset-item' + loaded + '"><div class="preset-info"><strong>' + escapeHtml(preset.name) + '</strong><span class="muted mono" title="' + escapeHtml(fullPath) + '">' + escapeHtml(fullPath === "—" ? fullPath : truncatePath(fullPath, 56)) + '</span></div><div class="preset-actions"><button class="button button-primary" type="button" data-preset-action="select" data-preset-key="' + key + '">切换</button><button class="button" type="button" data-preset-action="rename" data-preset-key="' + key + '">重命名</button><button class="button button-danger" type="button" data-preset-action="delete" data-preset-key="' + key + '">删除</button></div></article>';
   }).join("");
   renderedPresetsKey = key;
 }
@@ -1344,6 +1344,13 @@ query<HTMLElement>("[data-model-presets]")?.addEventListener("click", async (eve
       await loadModelPresets({ force: true });
       setNotice("已切换到预设：" + preset.name, "success");
       recordOperation("模型预设已切换");
+    } else if (action === "rename") {
+      const newName = window.prompt("请输入新的模型预设名称", preset.name)?.trim();
+      if (!newName || newName === preset.name) return;
+      await invoke("rename_model_preset", { name: preset.name, newName });
+      await loadModelPresets({ force: true });
+      setNotice("模型预设已重命名", "success");
+      recordOperation("模型预设已重命名");
     } else if (action === "delete") {
       if (!window.confirm("确定删除模型预设“" + preset.name + "”吗？")) return;
       await invoke("delete_model_preset", { name: preset.name });

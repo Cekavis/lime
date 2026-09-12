@@ -104,12 +104,14 @@ LlmPerformance {
 
 Tauri 使用 `lime-ipc` 的同一 IPC 通道调用配置、模型、词库和输入诊断操作。除用户主动请求的历史接口外，管理响应不回传输入原文；详细信息写结构化日志。帧使用 4 字节 little-endian 长度前缀和 UTF-8 JSON，单帧上限 16 MiB；Windows 使用兼容优先的 Named Pipe ACL，Unix 使用 `LIME_SOCKET` 指定的 Unix socket，开发默认值为 `/tmp/lime-core.sock`，部署时应放在用户私有运行时目录并设为 `0600`。
 
-管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`list_model_presets`、`save_model_preset`、`delete_model_preset`、`select_model_preset`、`learn`、`export_dictionary`、`get_dictionary_page`、`import_dictionary`、`clear_dictionary`、`get_input_history_page`、`wait_for_input_history` 和 `clear_input_history`。`get_dictionary_page` 与 `get_input_history_page` 每次最多返回 100 条，管理窗口刷新和预览只使用分页接口；完整词库导出由管理窗口逐页读取后在本地拼接，避免单帧超过 16 MiB。`wait_for_input_history { revision }` 在历史 revision 变化前保持连接（最多 30 秒），响应 `input_history_revision`；管理窗口用它接收即时通知，不传输输入内容。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型；模型预设保存于服务数据目录的 `model-presets.json`，切换失败时保留当前模型。
+管理请求包括 `get_config`、`set_config`、`get_status`、`load_model`、`unload_model`、`list_model_presets`、`save_model_preset`、`rename_model_preset`、`delete_model_preset`、`select_model_preset`、`learn`、`export_dictionary`、`get_dictionary_page`、`import_dictionary`、`clear_dictionary`、`get_input_history_page`、`wait_for_input_history` 和 `clear_input_history`。`get_dictionary_page` 与 `get_input_history_page` 每次最多返回 100 条，管理窗口刷新和预览只使用分页接口；完整词库导出由管理窗口逐页读取后在本地拼接，避免单帧超过 16 MiB。`wait_for_input_history { revision }` 在历史 revision 变化前保持连接（最多 30 秒），响应 `input_history_revision`；管理窗口用它接收即时通知，不传输输入内容。模型导入仅接受本地 GGUF 文件，失败不会替换当前模型；模型预设保存于服务数据目录的 `model-presets.json`，切换失败时保留当前模型。
 
 `get_status.model` 返回当前模型的路径、文件大小、SHA-256 和加载状态。`initialization_memory` 是可选的 llama.cpp 初始化内存明细，包含 `model_bytes`、`context_bytes`、`compute_bytes`、`total_bytes`、`backend` 以及按设备/缓冲区分类的 `breakdown`（例如 `cuda0.model`、`cuda0.kv`、`cuda0.compute`、`cuda0.output`）；这些数值来自 llama.cpp 初始化日志，运行时无法提供日志回调时保持缺省/空值，客户端不得将空值解释为零，也不得从 GGUF 文件大小推断显存占用。
 
-模型预设命令按名称寻址：`save_model_preset` 使用 `{ name, path }`，`delete_model_preset`
-和 `select_model_preset` 使用 `{ name }`。`ModelPreset` 不定义独立的 `id` 或 `key` 字段。
+模型预设命令按名称寻址：`save_model_preset` 使用 `{ name, path }`，
+`rename_model_preset` 使用 `{ name, new_name }`，`delete_model_preset` 和
+`select_model_preset` 使用 `{ name }`。重命名只改变预设名称并保留路径和元数据；目标名称已存在时拒绝操作。
+`ModelPreset` 不定义独立的 `id` 或 `key` 字段。
 
 服务在同一份 `model-presets.json` 中额外保存最近一次成功激活的 `active_model_path`。直接加载模型和切换预设成功后更新该路径，卸载模型时清除；服务启动后 best-effort 恢复该路径，不阻塞 Named Pipe/Unix socket 监听和 Rime-only 路径。恢复期间 `get_status.state` 为 `reloading`；模型文件缺失或运行时不可用不会阻止服务启动。
 

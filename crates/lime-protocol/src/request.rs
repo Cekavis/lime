@@ -20,6 +20,7 @@ pub enum Request {
     UnloadModel,
     ListModelPresets,
     SaveModelPreset { name: String, path: String },
+    RenameModelPreset { name: String, new_name: String },
     DeleteModelPreset { name: String },
     SelectModelPreset { name: String },
     Learn { pinyin: String, text: String },
