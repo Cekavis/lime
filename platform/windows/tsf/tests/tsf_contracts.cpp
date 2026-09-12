@@ -1,4 +1,5 @@
 #include "../lime_tsf.h"
+#include "../weasel_ui_adapter.h"
 
 #include <windows.h>
 
@@ -45,6 +46,8 @@ int wmain() {
     const GUID unknown = {0x8f9e6b31, 0x4f38, 0x4a75,
                           {0x98, 0x0f, 0xf8, 0x6b, 0x41, 0x50, 0x2d, 0x11}};
     CHECK(provider->GetDisplayAttributeInfo(unknown, &info) == E_INVALIDARG);
+
+    CHECK(testing::WeaselColorSchemeFallbacksMatchUpstream());
   }
 
   if (SUCCEEDED(init)) CoUninitialize();

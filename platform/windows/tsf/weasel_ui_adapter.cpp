@@ -179,6 +179,40 @@ int Color(uint8_t r, uint8_t g, uint8_t b, uint8_t a = 0xff) {
                           (static_cast<uint32_t>(g) << 8) | r);
 }
 
+int BlendColors(int foreground, int background) {
+  const uint32_t fcolor = static_cast<uint32_t>(foreground);
+  const uint32_t bcolor = static_cast<uint32_t>(background);
+  const uint8_t f_alpha = static_cast<uint8_t>((fcolor >> 24) & 0xff);
+  const uint8_t f_blue = static_cast<uint8_t>((fcolor >> 16) & 0xff);
+  const uint8_t f_green = static_cast<uint8_t>((fcolor >> 8) & 0xff);
+  const uint8_t f_red = static_cast<uint8_t>(fcolor & 0xff);
+  const uint8_t b_alpha = static_cast<uint8_t>((bcolor >> 24) & 0xff);
+  const uint8_t b_blue = static_cast<uint8_t>((bcolor >> 16) & 0xff);
+  const uint8_t b_green = static_cast<uint8_t>((bcolor >> 8) & 0xff);
+  const uint8_t b_red = static_cast<uint8_t>(bcolor & 0xff);
+
+  const float f_alpha_normalized = f_alpha / 255.0f;
+  const float b_alpha_normalized = b_alpha / 255.0f;
+  const float result_alpha =
+      f_alpha_normalized + (1.0f - f_alpha_normalized) * b_alpha_normalized;
+  if (result_alpha <= 1e-6f) return background;
+
+  const auto mix = [&](uint8_t foreground_channel,
+                       uint8_t background_channel) -> uint8_t {
+    return static_cast<uint8_t>(
+        (foreground_channel * f_alpha_normalized +
+         background_channel * b_alpha_normalized *
+             (1.0f - f_alpha_normalized)) /
+        result_alpha);
+  };
+  const uint8_t result_red = mix(f_red, b_red);
+  const uint8_t result_green = mix(f_green, b_green);
+  const uint8_t result_blue = mix(f_blue, b_blue);
+  const uint8_t result_alpha_byte =
+      static_cast<uint8_t>(result_alpha * 255.0f);
+  return Color(result_red, result_green, result_blue, result_alpha_byte);
+}
+
 std::string NormalizePatchPath(std::string path) {
   path = Unquote(Trim(std::move(path)));
   std::string normalized;
@@ -270,25 +304,93 @@ void SetDefaultStyle(weasel::UIStyle& style) {
   style.border = 2;
   style.text_color = Color(32, 33, 36);
   style.candidate_text_color = Color(32, 33, 36);
-  style.candidate_back_color = Color(255, 255, 255);
-  style.candidate_border_color = Color(224, 228, 235);
-  style.label_text_color = Color(92, 99, 112);
-  style.comment_text_color = Color(110, 118, 130);
+  // Keep omitted scheme fields compatible with Weasel's color fallbacks:
+  // candidate backgrounds/borders are transparent and labels inherit from
+  // the candidate text instead of using a Lime-specific gray frame style.
+  style.candidate_back_color = 0;
+  style.candidate_border_color = 0;
+  style.label_text_color = Color(0, 0, 0);
+  style.comment_text_color = Color(0, 0, 0);
   style.back_color = Color(255, 255, 255);
-  style.border_color = Color(224, 228, 235);
+  style.border_color = Color(0, 0, 0);
   style.hilited_text_color = Color(255, 255, 255);
   style.hilited_back_color = Color(37, 99, 235);
   style.hilited_candidate_text_color = Color(255, 255, 255);
   style.hilited_candidate_back_color = Color(37, 99, 235);
-  style.hilited_candidate_border_color = Color(37, 99, 235);
+  style.hilited_candidate_border_color = 0;
   style.hilited_label_text_color = Color(255, 255, 255);
-  style.hilited_comment_text_color = Color(235, 238, 245);
-  style.shadow_color = Color(0, 0, 0, 0x30);
-  style.shadow_radius = 8;
-  style.shadow_offset_x = 2;
-  style.shadow_offset_y = 3;
+  style.hilited_comment_text_color = Color(255, 255, 255);
+  style.shadow_color = 0;
+  style.shadow_radius = 0;
+  style.shadow_offset_x = 0;
+  style.shadow_offset_y = 0;
   style.antialias_mode = weasel::UIStyle::DEFAULT;
   style.hover_type = weasel::UIStyle::NONE;
+}
+
+void ApplyColorScheme(weasel::UIStyle& style, const ThemeMap& scheme) {
+  std::string format = "abgr";
+  ParseString(scheme, "color_format", format);
+
+  auto color = [&](std::string_view key, int& target, int fallback) {
+    const auto it = scheme.find(std::string(key));
+    if (it == scheme.end()) {
+      target = fallback;
+      return;
+    }
+    uint32_t value = 0;
+    target = ParseColorValue(it->second, value) ? ToAbgr(value, format)
+                                                : fallback;
+  };
+  auto color_alias = [&](std::string_view primary, std::string_view fallback,
+                         int& target, int default_value) {
+    const auto primary_it = scheme.find(std::string(primary));
+    const auto it = primary_it == scheme.end()
+                        ? scheme.find(std::string(fallback))
+                        : primary_it;
+    if (it == scheme.end()) {
+      target = default_value;
+      return;
+    }
+    uint32_t value = 0;
+    target = ParseColorValue(it->second, value) ? ToAbgr(value, format)
+                                                : default_value;
+  };
+
+  // These fallbacks mirror Weasel's RimeWithWeasel::_UpdateUIStyleColor.
+  color("back_color", style.back_color, 0xffffffff);
+  color("shadow_color", style.shadow_color, 0);
+  color("prevpage_color", style.prevpage_color, 0);
+  color("nextpage_color", style.nextpage_color, 0);
+  color("text_color", style.text_color, 0xff000000);
+  color("candidate_text_color", style.candidate_text_color,
+        style.text_color);
+  color("candidate_back_color", style.candidate_back_color, 0);
+  color("border_color", style.border_color, style.text_color);
+  color("hilited_text_color", style.hilited_text_color, style.text_color);
+  color("hilited_back_color", style.hilited_back_color, style.back_color);
+  color("hilited_candidate_text_color", style.hilited_candidate_text_color,
+        style.hilited_text_color);
+  color("hilited_candidate_back_color", style.hilited_candidate_back_color,
+        style.hilited_back_color);
+  color("hilited_candidate_shadow_color", style.hilited_candidate_shadow_color,
+        0);
+  color("hilited_shadow_color", style.hilited_shadow_color, 0);
+  color("candidate_shadow_color", style.candidate_shadow_color, 0);
+  color("candidate_border_color", style.candidate_border_color, 0);
+  color("hilited_candidate_border_color", style.hilited_candidate_border_color,
+        0);
+  color("label_color", style.label_text_color,
+        BlendColors(style.candidate_text_color, style.candidate_back_color));
+  color_alias(
+      "hilited_candidate_label_color", "hilited_label_color",
+      style.hilited_label_text_color,
+      BlendColors(style.hilited_candidate_text_color,
+                  style.hilited_candidate_back_color));
+  color("comment_text_color", style.comment_text_color, style.label_text_color);
+  color("hilited_comment_text_color", style.hilited_comment_text_color,
+        style.hilited_label_text_color);
+  color("hilited_mark_color", style.hilited_mark_color, 0);
 }
 
 bool ReadThemeFile(const std::filesystem::path& path, ThemeDocument& document) {
@@ -556,46 +658,7 @@ void LoadTheme(weasel::UIStyle& style) {
   const auto scheme_it = document.schemes.find(scheme_name);
   if (scheme_it == document.schemes.end()) return;
   const ThemeMap& scheme = scheme_it->second;
-  std::string format = "abgr";
-  ParseString(scheme, "color_format", format);
-  auto color = [&](std::string_view key, int& target) {
-    const auto it = scheme.find(std::string(key));
-    if (it == scheme.end()) return;
-    uint32_t value = 0;
-    if (ParseColorValue(it->second, value)) target = ToAbgr(value, format);
-  };
-  auto color_alias = [&](std::string_view primary, std::string_view fallback,
-                         int& target) {
-    const auto primary_it = scheme.find(std::string(primary));
-    const auto it = primary_it == scheme.end() ? scheme.find(std::string(fallback))
-                                                : primary_it;
-    if (it == scheme.end()) return;
-    uint32_t value = 0;
-    if (ParseColorValue(it->second, value)) target = ToAbgr(value, format);
-  };
-  color("back_color", style.back_color);
-  color("shadow_color", style.shadow_color);
-  color("prevpage_color", style.prevpage_color);
-  color("nextpage_color", style.nextpage_color);
-  color("text_color", style.text_color);
-  color("candidate_text_color", style.candidate_text_color);
-  color("candidate_back_color", style.candidate_back_color);
-  color("candidate_shadow_color", style.candidate_shadow_color);
-  color("candidate_border_color", style.candidate_border_color);
-  color("label_color", style.label_text_color);
-  color("comment_text_color", style.comment_text_color);
-  color("border_color", style.border_color);
-  color("hilited_text_color", style.hilited_text_color);
-  color("hilited_back_color", style.hilited_back_color);
-  color("hilited_shadow_color", style.hilited_shadow_color);
-  color("hilited_candidate_text_color", style.hilited_candidate_text_color);
-  color("hilited_candidate_back_color", style.hilited_candidate_back_color);
-  color("hilited_candidate_shadow_color", style.hilited_candidate_shadow_color);
-  color("hilited_candidate_border_color", style.hilited_candidate_border_color);
-  color_alias("hilited_candidate_label_color", "hilited_label_color",
-              style.hilited_label_text_color);
-  color("hilited_comment_text_color", style.hilited_comment_text_color);
-  color("hilited_mark_color", style.hilited_mark_color);
+  ApplyColorScheme(style, scheme);
   } catch (...) {
     // A malformed or inaccessible user theme must not prevent the TSF UI
     // thread from starting.  Keep the known-good Weasel-compatible defaults.
@@ -604,6 +667,36 @@ void LoadTheme(weasel::UIStyle& style) {
 }
 
 }  // namespace
+
+#ifdef LIME_TSF_TESTS
+namespace testing {
+
+bool WeaselColorSchemeFallbacksMatchUpstream() {
+  weasel::UIStyle style;
+  SetDefaultStyle(style);
+  ThemeMap google{{"text_color", "0x666666"},
+                  {"candidate_text_color", "0x000000"},
+                  {"back_color", "0xffffff"},
+                  {"border_color", "0xe2e2e2"},
+                  {"hilited_text_color", "0x000000"},
+                  {"hilited_back_color", "0xffffff"},
+                  {"hilited_candidate_text_color", "0xffffff"},
+                  {"hilited_candidate_back_color", "0xce7539"}};
+  ApplyColorScheme(style, google);
+  const int black = Color(0, 0, 0);
+  const int white = Color(255, 255, 255);
+  const int google_highlight = ToAbgr(0xce7539, "abgr");
+  return style.candidate_border_color == 0 &&
+         style.hilited_candidate_border_color == 0 &&
+         style.candidate_back_color == 0 && style.label_text_color == black &&
+         style.comment_text_color == black &&
+         style.hilited_label_text_color == white &&
+         style.hilited_comment_text_color == white &&
+         style.hilited_candidate_back_color == google_highlight;
+}
+
+}  // namespace testing
+#endif
 
 WeaselUiAdapter::~WeaselUiAdapter() { Stop(); }
 

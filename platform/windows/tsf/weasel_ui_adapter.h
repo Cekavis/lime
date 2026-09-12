@@ -88,4 +88,12 @@ class WeaselUiAdapter final {
   weasel::UI ui_;
 };
 
+#ifdef LIME_TSF_TESTS
+namespace testing {
+
+bool WeaselColorSchemeFallbacksMatchUpstream();
+
+}  // namespace testing
+#endif
+
 }  // namespace lime::tsf
