@@ -27,7 +27,7 @@ pub use input::{
 };
 pub use management::{
     Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, ModelInfo, ModelMemoryInfo,
-    ModelPreset, ServiceStatus,
+    ModelPreset, ModelScoringPath, ServiceStatus,
 };
 pub use request::{Request, Response};
 
@@ -89,6 +89,7 @@ mod tests {
             size_bytes: Some(42),
             sha256: None,
             loaded: true,
+            scoring_path: Some(ModelScoringPath::Attention),
             initialization_memory: Some(ModelMemoryInfo {
                 model_bytes: Some(1),
                 context_bytes: Some(2),
@@ -99,6 +100,7 @@ mod tests {
             }),
         };
         let json = serde_json::to_string(&value).expect("serialize model status");
+        assert!(json.contains(r#""scoring_path":"attention""#));
         let decoded: ModelInfo = serde_json::from_str(&json).expect("deserialize model status");
         assert_eq!(decoded, value);
     }

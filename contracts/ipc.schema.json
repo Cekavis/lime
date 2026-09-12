@@ -632,6 +632,19 @@
         "loaded": {
           "type": "boolean"
         },
+        "scoring_path": {
+          "anyOf": [
+            {
+              "enum": [
+                "attention",
+                "recurrent"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "initialization_memory": {
           "anyOf": [
             {

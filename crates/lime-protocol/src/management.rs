@@ -56,12 +56,22 @@ pub struct ConfigSnapshot {
     pub config: Config,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelScoringPath {
+    Attention,
+    Recurrent,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub path: Option<String>,
     pub size_bytes: Option<u64>,
     pub sha256: Option<String>,
     pub loaded: bool,
+    /// Native candidate scoring path selected for the loaded model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoring_path: Option<ModelScoringPath>,
     /// Memory figures reported by llama.cpp while initializing the active model.
     ///
     /// This is optional because runtimes may not expose their initialization log hooks. Clients

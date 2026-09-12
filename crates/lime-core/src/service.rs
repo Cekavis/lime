@@ -11,7 +11,8 @@ mod persistence;
 use lime_protocol::{
     CandidateDiagnostic, ConfigSnapshot, DictionaryPage, ErrorCode, InputHistoryEntry,
     InputHistoryPage, InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelMemoryInfo,
-    ModelPreset, Request, Response, ServiceState, ServiceStatus, DICTIONARY_PAGE_SIZE,
+    ModelPreset, Request, Response, ServiceState, ServiceStatus,
+    DICTIONARY_PAGE_SIZE,
 };
 use llama_cpp_v3::BackendPreference;
 pub(crate) use persistence::{load_config, load_model_state};
@@ -856,6 +857,7 @@ impl CoreService {
                     size_bytes: Some(item.size_bytes),
                     sha256: Some(item.sha256.clone()),
                     loaded: true,
+                    scoring_path: Some(item.scoring_path()),
                     initialization_memory: item.initialization_memory.as_ref().map(|memory| {
                         let total_bytes = memory_breakdown_total(&memory.breakdown);
                         let mut breakdown = memory.breakdown.clone();
@@ -880,6 +882,7 @@ impl CoreService {
                     size_bytes: None,
                     sha256: None,
                     loaded: false,
+                    scoring_path: None,
                     initialization_memory: None,
                 }),
         }

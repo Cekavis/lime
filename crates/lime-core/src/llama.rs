@@ -4,7 +4,7 @@
 //! packaged llama.cpp runtime when a model is loaded, preferring CUDA and falling back to CPU while
 //! still making model-backed ranking use the real GGUF vocabulary and logits.
 
-use lime_protocol::{Candidate, LlmPerformance};
+use lime_protocol::{Candidate, LlmPerformance, ModelScoringPath};
 use llama_cpp_sys_v3::{
     ggml_backend_buffer_type, ggml_cgraph, ggml_context, ggml_tensor, llama_sampler,
     llama_sampler_data, llama_sampler_i, llama_token,
@@ -847,6 +847,13 @@ impl LlamaRuntime {
 
     pub fn vocab_size(&self) -> usize {
         self.vocab_size
+    }
+
+    pub fn scoring_path(&self) -> ModelScoringPath {
+        match self.scoring_path {
+            ScoringPath::PackedAttention => ModelScoringPath::Attention,
+            ScoringPath::PaddedRecurrent => ModelScoringPath::Recurrent,
+        }
     }
 
     /// Tokenize text with the exact vocabulary loaded from the GGUF model.

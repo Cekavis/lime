@@ -25,6 +25,7 @@ interface ModelInfo {
   size_bytes: number | null;
   sha256: string | null;
   loaded: boolean;
+  scoring_path: "attention" | "recurrent" | null;
   memory: Record<string, number>;
 }
 
@@ -191,7 +192,7 @@ app.innerHTML = [
   '        <div class="actions settings-actions"><button class="button button-primary" type="submit">保存设置</button></div>',
   '      </form>',
   '      <section class="settings-section model-status-section"><div class="section-heading"><h3>模型状态</h3><span class="status-dot" data-model-state>未加载</span></div>',
-  '        <div class="model-card"><dl class="status-list"><dt>路径</dt><dd class="model-path" data-model-path title="—">—</dd><dt>文件大小</dt><dd data-model-size>—</dd></dl><div class="model-memory" data-model-memory><p class="muted">未加载模型，暂无显存占用信息。</p></div></div>',
+  '        <div class="model-card"><dl class="status-list"><dt>路径</dt><dd class="model-path" data-model-path title="—">—</dd><dt>文件大小</dt><dd data-model-size>—</dd><dt>推理路径</dt><dd data-model-scoring-path>—</dd></dl><div class="model-memory" data-model-memory><p class="muted">未加载模型，暂无显存占用信息。</p></div></div>',
   '      </section>',
   '      <section class="settings-section preset-section"><div class="section-heading"><h3>模型预设</h3><div class="section-heading-actions"><span class="meta-badge" data-preset-count>0 个</span><button class="button button-danger" data-unload-model type="button">卸载模型</button></div></div>',
   '        <div class="actions model-add-actions"><button class="button" data-add-model type="button" aria-expanded="false">添加模型</button></div>',
@@ -553,6 +554,10 @@ function normalizeModel(value: unknown): ModelInfo {
     size_bytes: asNumber(firstValue(record, ["size_bytes", "sizeBytes"])),
     sha256: (firstValue(record, ["sha256", "sha_256"]) as string | null | undefined) ?? null,
     loaded: Boolean(firstValue(record, ["loaded", "is_loaded", "isLoaded"])),
+    scoring_path: (() => {
+      const value = asString(firstValue(record, ["scoring_path", "scoringPath"]));
+      return value === "attention" || value === "recurrent" ? value : null;
+    })(),
     memory,
   };
 }
@@ -702,6 +707,12 @@ function renderModel(model: ModelInfo | null) {
   }
   const size = query<HTMLElement>("[data-model-size]");
   if (size) size.textContent = model?.size_bytes == null ? "—" : formatBytes(model.size_bytes);
+  const scoringPath = query<HTMLElement>("[data-model-scoring-path]");
+  if (scoringPath) {
+    scoringPath.textContent = !loaded || model?.scoring_path == null
+      ? "—"
+      : model.scoring_path === "attention" ? "Attention" : "Recurrent";
+  }
   const memory = query<HTMLElement>("[data-model-memory]");
   if (memory) {
     const entries = loaded && model ? Object.entries(model.memory) : [];
