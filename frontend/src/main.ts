@@ -11,6 +11,7 @@ interface Config {
   llm_rerank_count: number;
   llm_effective_count: number;
   llm_context_token_limit: number;
+  llm_inference_count_limit: number;
   llm_backend: "cuda" | "cpu";
 }
 
@@ -66,6 +67,8 @@ interface LlmPerformance {
   contextTokenCount: number;
   decodeInputTokenCount: number;
   logprobOutputCount: number;
+  inferenceCountLimit: number | null;
+  omittedCandidateCount: number;
 }
 
 interface InputData {
@@ -131,6 +134,7 @@ const defaultConfig: Config = {
   llm_rerank_count: 32,
   llm_effective_count: 3,
   llm_context_token_limit: 1024,
+  llm_inference_count_limit: 1,
   llm_backend: "cuda",
 };
 
@@ -178,6 +182,7 @@ app.innerHTML = [
   '          <div class="form-grid">',
   '            <label class="field"><span>Rime 方案</span><select data-config="rime_schema"><option value="rime_ice">雾凇拼音（全拼）</option><option value="double_pinyin">自然码双拼</option><option value="double_pinyin_abc">智能 ABC 双拼</option><option value="double_pinyin_mspy">微软双拼</option><option value="double_pinyin_sogou">搜狗双拼</option><option value="double_pinyin_flypy">小鹤双拼</option><option value="double_pinyin_ziguang">紫光双拼</option><option value="double_pinyin_jiajia">拼音加加双拼</option></select></label>',
   '            <label class="field"><span>LLM 单次请求 token 数上限</span><input data-config="llm_context_token_limit" type="number" min="1" max="4096" required /></label>',
+  '            <label class="field"><span>LLM 单次输入推理次数上限</span><input data-config="llm_inference_count_limit" type="number" min="1" max="32" required /></label>',
   '            <label class="field"><span>LLM 重排输入候选词数</span><input data-config="llm_rerank_count" type="number" min="1" max="128" required /></label>',
   '            <label class="field"><span>LLM 重排采纳候选词数</span><input data-config="llm_effective_count" type="number" min="1" max="32" required /></label>',
   '            <label class="field"><span>LLM 后端</span><select data-config="llm_backend"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>',
@@ -391,6 +396,11 @@ function normalizeLlmPerformance(value: unknown): LlmPerformance | null {
     contextTokenCount: count(["context_token_count", "contextTokenCount"]),
     decodeInputTokenCount: count(["decode_input_token_count", "decodeInputTokenCount"]),
     logprobOutputCount: count(["logprob_output_count", "logprobOutputCount", "logits_output_count", "logitsOutputCount"]),
+    inferenceCountLimit: (() => {
+      const value = asNumber(firstValue(record, ["inference_count_limit", "inferenceCountLimit"]));
+      return value == null ? null : Math.max(0, Math.trunc(value));
+    })(),
+    omittedCandidateCount: count(["omitted_candidate_count", "omittedCandidateCount"]),
   };
 }
 
@@ -898,9 +908,12 @@ function llmPerformanceSummary(performance: LlmPerformance | null, rimeMs: numbe
   ];
   const splitAt = Math.ceil(rows.length / 2);
   const columns = [rows.slice(0, splitAt), rows.slice(splitAt)];
+  const omitted = performance && performance.omittedCandidateCount > 0
+    ? '<p class="muted history-inference-note">有 ' + performance.omittedCandidateCount + ' 个较长候选项由于单次输入推理次数上限没有被纳入排序。</p>'
+    : '';
   return '<div class="history-performance">' +
     columns.map((column) => '<dl class="status-list history-performance-column">' + column.join("") + '</dl>').join("") +
-    '</div>';
+    '</div>' + omitted;
 }
 
 function candidateCell(candidate: Candidate | null): string {
@@ -1192,6 +1205,7 @@ configForm?.addEventListener("submit", async (event) => {
   const reloadModel = Boolean(activeModelPath && (
     previousConfig.llm_context_token_limit !== nextConfig.llm_context_token_limit
     || previousConfig.llm_rerank_count !== nextConfig.llm_rerank_count
+    || previousConfig.llm_inference_count_limit !== nextConfig.llm_inference_count_limit
     || previousConfig.llm_backend !== nextConfig.llm_backend
   ));
   try {
@@ -1568,7 +1582,11 @@ function formatTimestamp(value: number | null): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("model_unsupported") || message.includes("LIME-0011")) {
+    return "模型不支持：仅支持 causal decoder；encoder、embedding 或 diffusion 模型不能用于候选排序";
+  }
+  return message;
 }
 
 window.addEventListener("beforeunload", () => { historyWatchStopped = true; });

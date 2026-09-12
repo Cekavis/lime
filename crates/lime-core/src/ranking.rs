@@ -5,6 +5,8 @@ use std::time::Instant;
 
 pub use crate::llama::{CandidateScore, LlamaRuntime, ModelMetadata, TokenInfo};
 
+const DEFAULT_INFERENCE_COUNT_LIMIT: usize = 1;
+
 /// Result of candidate ranking together with the rows consumed by the management UI.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RerankResult {
@@ -23,6 +25,7 @@ pub(crate) struct RankingOutcome {
 #[derive(Clone, Debug)]
 struct ScoringOutput {
     scores: Vec<CandidateScore>,
+    scored_indices: Vec<usize>,
     performance: LlmPerformance,
 }
 
@@ -53,7 +56,17 @@ trait CandidateScorer {
                 ..LlmPerformance::default()
             },
             scores,
+            scored_indices: (0..candidates.len()).collect(),
         })
+    }
+
+    fn score_candidates_with_performance_limit(
+        &self,
+        preceding_text: &str,
+        candidates: &[Candidate],
+        _inference_count_limit: usize,
+    ) -> Result<ScoringOutput, String> {
+        self.score_candidates_with_performance(preceding_text, candidates)
     }
 }
 
@@ -75,6 +88,26 @@ impl CandidateScorer for LlamaRuntime {
             LlamaRuntime::score_candidates_with_performance(self, preceding_text, candidates)?;
         Ok(ScoringOutput {
             scores: result.scores,
+            scored_indices: result.scored_indices,
+            performance: result.performance,
+        })
+    }
+
+    fn score_candidates_with_performance_limit(
+        &self,
+        preceding_text: &str,
+        candidates: &[Candidate],
+        inference_count_limit: usize,
+    ) -> Result<ScoringOutput, String> {
+        let result = LlamaRuntime::score_candidates_with_inference_limit(
+            self,
+            preceding_text,
+            candidates,
+            inference_count_limit,
+        )?;
+        Ok(ScoringOutput {
+            scores: result.scores,
+            scored_indices: result.scored_indices,
             performance: result.performance,
         })
     }
@@ -118,6 +151,7 @@ pub fn try_rerank_candidates_with_diagnostics(
         runtime,
         rerank_count,
         effective_count,
+        DEFAULT_INFERENCE_COUNT_LIMIT,
     )
 }
 
@@ -132,22 +166,26 @@ pub(crate) fn try_rerank_selected_candidates_with_diagnostics(
     runtime: Option<&LlamaRuntime>,
     rerank_count: usize,
     effective_count: usize,
+    inference_count_limit: usize,
 ) -> Result<RerankResult, String> {
-    try_rerank_selected_candidates_with_scorer(
+    try_rerank_selected_candidates_with_scorer_and_preedit_and_limit(
         candidates,
         candidate_indices,
+        None,
         preceding_text,
         runtime,
         rerank_count,
         effective_count,
+        inference_count_limit,
     )
+    .map(|outcome| outcome.result)
 }
 
 /// Production entry point that also applies the input-aware English-candidate policy.
 ///
 /// English candidates are useful only when Rime returns the exact pinyin text the user typed.
 /// Other English words remain available in the final Rime order, but are not sent to the model.
-pub(crate) fn try_rerank_selected_candidates_with_preedit(
+pub(crate) fn try_rerank_selected_candidates_with_preedit_and_limit(
     candidates: &[Candidate],
     candidate_indices: &[usize],
     preedit: &str,
@@ -155,8 +193,9 @@ pub(crate) fn try_rerank_selected_candidates_with_preedit(
     runtime: Option<&LlamaRuntime>,
     rerank_count: usize,
     effective_count: usize,
+    inference_count_limit: usize,
 ) -> Result<RankingOutcome, String> {
-    try_rerank_selected_candidates_with_scorer_and_preedit(
+    try_rerank_selected_candidates_with_scorer_and_preedit_and_limit(
         candidates,
         candidate_indices,
         Some(preedit),
@@ -164,9 +203,11 @@ pub(crate) fn try_rerank_selected_candidates_with_preedit(
         runtime,
         rerank_count,
         effective_count,
+        inference_count_limit,
     )
 }
 
+#[allow(dead_code)]
 fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
     candidates: &[Candidate],
     candidate_indices: &[usize],
@@ -175,7 +216,7 @@ fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
     rerank_count: usize,
     effective_count: usize,
 ) -> Result<RerankResult, String> {
-    try_rerank_selected_candidates_with_scorer_and_preedit(
+    try_rerank_selected_candidates_with_scorer_and_preedit_and_limit(
         candidates,
         candidate_indices,
         None,
@@ -183,10 +224,12 @@ fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
         runtime,
         rerank_count,
         effective_count,
+        DEFAULT_INFERENCE_COUNT_LIMIT,
     )
     .map(|outcome| outcome.result)
 }
 
+#[allow(dead_code)]
 fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?Sized>(
     candidates: &[Candidate],
     candidate_indices: &[usize],
@@ -195,6 +238,28 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
     runtime: Option<&S>,
     rerank_count: usize,
     effective_count: usize,
+) -> Result<RankingOutcome, String> {
+    try_rerank_selected_candidates_with_scorer_and_preedit_and_limit(
+        candidates,
+        candidate_indices,
+        preedit,
+        preceding_text,
+        runtime,
+        rerank_count,
+        effective_count,
+        DEFAULT_INFERENCE_COUNT_LIMIT,
+    )
+}
+
+fn try_rerank_selected_candidates_with_scorer_and_preedit_and_limit<S: CandidateScorer + ?Sized>(
+    candidates: &[Candidate],
+    candidate_indices: &[usize],
+    preedit: Option<&str>,
+    preceding_text: &str,
+    runtime: Option<&S>,
+    rerank_count: usize,
+    effective_count: usize,
+    inference_count_limit: usize,
 ) -> Result<RankingOutcome, String> {
     let pool_indices = selected_pool_indices(candidate_indices, candidates.len(), rerank_count);
     let pool_indices = match preedit {
@@ -217,21 +282,35 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
     let model_active = active_runtime.is_some() && !pool_candidates.is_empty();
     let (score_rows, llm_performance) = if model_active {
         let runtime = active_runtime.expect("active runtime must exist when scoring");
-        let scored = runtime.score_candidates_with_performance(preceding_text, &pool_candidates)?;
-        if scored.scores.len() != pool_candidates.len() {
+        let scored = runtime.score_candidates_with_performance_limit(
+            preceding_text,
+            &pool_candidates,
+            inference_count_limit,
+        )?;
+        if scored.scores.len() != scored.scored_indices.len()
+            || scored
+                .scored_indices
+                .iter()
+                .any(|index| *index >= pool_candidates.len())
+        {
             return Err(format!(
-                "llama.cpp returned {} scores for {} candidates",
+                "llama.cpp returned an invalid score mapping: {} scores for {} candidates",
                 scored.scores.len(),
                 pool_candidates.len(),
             ));
         }
 
-        let mut ranked = pool_indices
-            .iter()
-            .copied()
-            .zip(pool_candidates)
+        let mut ranked = scored
+            .scored_indices
+            .into_iter()
             .zip(scored.scores)
-            .map(|((index, candidate), score)| (index, candidate, score))
+            .map(|(pool_index, score)| {
+                (
+                    pool_indices[pool_index],
+                    pool_candidates[pool_index].clone(),
+                    score,
+                )
+            })
             .collect::<Vec<_>>();
         // Larger log probabilities are better. Keep original Rime order as a stable tie breaker.
         ranked.sort_by(|(left_index, _, left), (right_index, _, right)| {

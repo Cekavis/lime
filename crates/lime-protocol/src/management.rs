@@ -14,6 +14,9 @@ pub struct Config {
     pub llm_rerank_count: u32,
     pub llm_effective_count: u32,
     pub llm_context_token_limit: u32,
+    /// Maximum number of candidate continuation inference batches per input request.
+    #[serde(default = "default_llm_inference_count_limit")]
+    pub llm_inference_count_limit: u32,
     /// Native llama.cpp backend preference.
     pub llm_backend: String,
 }
@@ -26,6 +29,10 @@ fn default_llm_backend() -> String {
     DEFAULT_LLM_BACKEND.to_owned()
 }
 
+fn default_llm_inference_count_limit() -> u32 {
+    1
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -36,6 +43,7 @@ impl Default for Config {
             llm_rerank_count: 32,
             llm_effective_count: 3,
             llm_context_token_limit: 1024,
+            llm_inference_count_limit: default_llm_inference_count_limit(),
             llm_backend: default_llm_backend(),
         }
     }

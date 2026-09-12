@@ -14,6 +14,7 @@ pub struct Limits {
     pub llm_rerank_count: (u32, u32),
     pub llm_effective_count: (u32, u32),
     pub llm_context_token_limit: (u32, u32),
+    pub llm_inference_count_limit: (u32, u32),
 }
 
 impl Default for Limits {
@@ -25,6 +26,7 @@ impl Default for Limits {
             llm_rerank_count: (1, 128),
             llm_effective_count: (1, 32),
             llm_context_token_limit: (1, 4096),
+            llm_inference_count_limit: (1, 32),
         }
     }
 }
@@ -99,6 +101,11 @@ pub fn validate_with(config: &Config, limits: &Limits) -> Result<(), ConfigValid
         "llm_context_token_limit",
         config.llm_context_token_limit,
         limits.llm_context_token_limit,
+    )?;
+    check(
+        "llm_inference_count_limit",
+        config.llm_inference_count_limit,
+        limits.llm_inference_count_limit,
     )?;
     if config.context_preview_char_limit > config.preceding_text_char_limit {
         return Err(ConfigValidationError {

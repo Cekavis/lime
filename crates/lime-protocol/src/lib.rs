@@ -48,6 +48,7 @@ mod tests {
                 llm_rerank_count: 32,
                 llm_effective_count: 3,
                 llm_context_token_limit: 1024,
+                llm_inference_count_limit: 1,
                 llm_backend: "cuda".into(),
             }
         );
@@ -137,6 +138,8 @@ mod tests {
             context_token_count: 6,
             decode_input_token_count: 18,
             logits_output_count: 12,
+            inference_count_limit: Some(1),
+            omitted_candidate_count: 0,
         };
         let json = serde_json::to_string(&performance).expect("serialize performance");
         let decoded: LlmPerformance = serde_json::from_str(&json).expect("deserialize performance");

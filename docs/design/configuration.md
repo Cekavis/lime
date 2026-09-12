@@ -14,6 +14,7 @@ page_size                   = 9
 llm_rerank_count            = 32
 llm_effective_count         = 3
 llm_context_token_limit     = 1024
+llm_inference_count_limit   = 1
 llm_backend                 = cuda
 ```
 
@@ -22,13 +23,17 @@ llm_backend                 = cuda
 解析或改写；上游归档中的其他平台专用文件仍原样保留，但不在 Windows 设置中冒充可用能力。
 
 设置写入后立即成为配置源；Rime 相关设置实时生效。模型已加载时，管理界面保存模型后端、
-上下文 token 上限或重排候选检查范围，会立即重新加载当前模型，使 llama.cpp native 参数生效。
+上下文 token 上限、推理次数上限或重排候选检查范围，会立即重新加载当前模型，使 llama.cpp native 参数生效。
 所有设置使用范围校验，非法值拒绝写入。
 
 `llm_rerank_count` 限制每次检查的 Rime 候选前缀长度；Rust 核心通过 librime
 候选预览判断其中哪些候选消费了全部输入，仍有剩余拼音的候选不送入模型，也不由
 该前缀之后的候选补位。ASCII 英文候选还必须与原始 `preedit` 完全相等，否则只保留在
 Rime 顺序中，不送入模型。
+
+`llm_inference_count_limit` 限制每次输入可使用的候选续写推理批次数，范围为 1 到 32，默认值为 1。
+共同上文的推理不计入此额度；长度为 1 个 token 的候选只读取共同上文结果，也不计入额度。
+超过额度的较长候选保留在 Rime 顺序中，但不参与 LLM 排序。
 `llm_effective_count` 表示从这些完整候选的模型排序中实际置顶的数量，且不得大于
 `llm_rerank_count`。默认分别为 32 和 3。
 

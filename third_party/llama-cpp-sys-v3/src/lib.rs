@@ -199,6 +199,12 @@ impl LlamaLib {
             llama_model_default_params: unsafe extern "C" fn() -> llama_model_params,
             llama_model_load_from_file: unsafe extern "C" fn(*const std::ffi::c_char, llama_model_params) -> *mut llama_model,
             llama_model_free: unsafe extern "C" fn(*mut llama_model),
+            llama_model_is_recurrent: unsafe extern "C" fn(*const llama_model) -> bool,
+            llama_model_is_hybrid: unsafe extern "C" fn(*const llama_model) -> bool,
+            llama_model_is_diffusion: unsafe extern "C" fn(*const llama_model) -> bool,
+            llama_model_has_encoder: unsafe extern "C" fn(*const llama_model) -> bool,
+            llama_model_has_decoder: unsafe extern "C" fn(*const llama_model) -> bool,
+            llama_model_meta_val_str: unsafe extern "C" fn(*const llama_model, *const std::ffi::c_char, *mut std::ffi::c_char, usize) -> i32,
 
             llama_context_default_params: unsafe extern "C" fn() -> llama_context_params,
             llama_init_from_model: unsafe extern "C" fn(*mut llama_model, llama_context_params) -> *mut llama_context,
@@ -397,6 +403,17 @@ pub struct LlamaSymbols {
     pub llama_model_load_from_file:
         unsafe extern "C" fn(*const std::ffi::c_char, llama_model_params) -> *mut llama_model,
     pub llama_model_free: unsafe extern "C" fn(*mut llama_model),
+    pub llama_model_is_recurrent: unsafe extern "C" fn(*const llama_model) -> bool,
+    pub llama_model_is_hybrid: unsafe extern "C" fn(*const llama_model) -> bool,
+    pub llama_model_is_diffusion: unsafe extern "C" fn(*const llama_model) -> bool,
+    pub llama_model_has_encoder: unsafe extern "C" fn(*const llama_model) -> bool,
+    pub llama_model_has_decoder: unsafe extern "C" fn(*const llama_model) -> bool,
+    pub llama_model_meta_val_str: unsafe extern "C" fn(
+        *const llama_model,
+        *const std::ffi::c_char,
+        *mut std::ffi::c_char,
+        usize,
+    ) -> i32,
 
     pub llama_context_default_params: unsafe extern "C" fn() -> llama_context_params,
     pub llama_init_from_model:

@@ -282,6 +282,61 @@ impl LlamaModel {
         unsafe { (backend.lib.symbols.llama_model_default_params)() }
     }
 
+    pub fn is_recurrent(&self) -> bool {
+        unsafe { (self.backend.symbols.llama_model_is_recurrent)(self.handle) }
+    }
+
+    pub fn is_hybrid(&self) -> bool {
+        unsafe { (self.backend.symbols.llama_model_is_hybrid)(self.handle) }
+    }
+
+    pub fn is_diffusion(&self) -> bool {
+        unsafe { (self.backend.symbols.llama_model_is_diffusion)(self.handle) }
+    }
+
+    pub fn has_encoder(&self) -> bool {
+        unsafe { (self.backend.symbols.llama_model_has_encoder)(self.handle) }
+    }
+
+    pub fn has_decoder(&self) -> bool {
+        unsafe { (self.backend.symbols.llama_model_has_decoder)(self.handle) }
+    }
+
+    pub fn metadata(&self, key: &str) -> Option<String> {
+        let key = std::ffi::CString::new(key).ok()?;
+        let mut buffer = vec![0_i8; 256];
+        let size = unsafe {
+            (self.backend.symbols.llama_model_meta_val_str)(
+                self.handle,
+                key.as_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            )
+        };
+        if size < 0 {
+            return None;
+        }
+        if size as usize >= buffer.len() {
+            buffer.resize(size as usize + 1, 0);
+            let size = unsafe {
+                (self.backend.symbols.llama_model_meta_val_str)(
+                    self.handle,
+                    key.as_ptr(),
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                )
+            };
+            if size < 0 || size as usize >= buffer.len() {
+                return None;
+            }
+        }
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
     pub fn get_vocab(&self) -> LlamaVocab {
         let handle = unsafe { (self.backend.symbols.llama_model_get_vocab)(self.handle) };
         LlamaVocab {

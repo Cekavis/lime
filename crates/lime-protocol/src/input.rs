@@ -203,6 +203,16 @@ pub struct LlmPerformance {
     pub decode_input_token_count: u32,
     /// Number of compact log-probability result rows read from llama.cpp, summed across outer batches.
     pub logits_output_count: u32,
+    /// Maximum continuation inference batches allowed for this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_count_limit: Option<u32>,
+    /// Candidates left unscored because the continuation inference limit was reached.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_candidate_count: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// A bounded, newest-first history page.

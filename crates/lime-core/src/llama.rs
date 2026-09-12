@@ -30,6 +30,14 @@ pub const DEFAULT_SEQUENCE_COUNT: usize = 32;
 /// Context allocated for callers that use [`LlamaRuntime::load`] directly. The service uses its
 /// validated `llm_context_token_limit` and `llm_rerank_count` through the explicit load helper.
 pub const DEFAULT_CONTEXT_TOKENS: usize = 1024;
+/// Default limit used by direct runtime callers that do not provide service configuration.
+pub const DEFAULT_INFERENCE_COUNT_LIMIT: usize = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScoringPath {
+    PackedAttention,
+    PaddedRecurrent,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelMetadata {
@@ -63,6 +71,7 @@ pub struct CandidateScore {
 #[derive(Clone, Debug)]
 pub(crate) struct ScoredCandidates {
     pub scores: Vec<CandidateScore>,
+    pub scored_indices: Vec<usize>,
     pub performance: LlmPerformance,
 }
 
@@ -76,6 +85,7 @@ struct ScoringTimings {
     logits_output_count: usize,
     context_limit: usize,
     vocab_size: usize,
+    inference_count: usize,
 }
 
 impl ScoringTimings {
@@ -402,6 +412,7 @@ pub struct LlamaRuntime {
     pub vocab_size: usize,
     pub backend_name: &'static str,
     pub initialization_memory: Option<InitializationMemory>,
+    scoring_path: ScoringPath,
     // Field order is intentional: Rust drops fields in declaration order. The
     // native context and model must be released before LlamaBackend calls the
     // process-global llama_backend_free function.
@@ -424,6 +435,7 @@ impl std::fmt::Debug for LlamaRuntime {
             .field("vocab_size", &self.vocab_size)
             .field("backend_name", &self.backend_name)
             .field("initialization_memory", &self.initialization_memory)
+            .field("scoring_path", &self.scoring_path)
             .finish_non_exhaustive()
     }
 }
@@ -721,6 +733,43 @@ impl LlamaRuntime {
         });
         let model = model_result
             .map_err(|error| format!("load GGUF model {}: {error:?}", metadata.path.display()))?;
+        let architecture = model.metadata("general.architecture").ok_or_else(|| {
+            "unsupported model for Lime ranking: GGUF has no general.architecture metadata"
+                .to_owned()
+        })?;
+        let architecture_lower = architecture.to_ascii_lowercase();
+        let unsupported_architecture = [
+            "clip",
+            "bert",
+            "embedding",
+            "t5",
+            "wavtokenizer",
+            "tts",
+            "pangu-embedded",
+            "llama-embed",
+            "eagle",
+            "dflash",
+            "diffusion",
+        ]
+        .iter()
+        .any(|marker| architecture_lower.contains(marker));
+        if !model.has_decoder()
+            || model.has_encoder()
+            || model.is_diffusion()
+            || unsupported_architecture
+        {
+            return Err(format!(
+                "unsupported model for Lime ranking: architecture {architecture} is not a causal decoder"
+            ));
+        }
+        // llama.cpp reports Qwen3.5 and related models as hybrid rather than recurrent; both
+        // require the equal-length padded path because their recurrent state graph cannot consume
+        // a ragged tree. Pure attention decoders use the packed tree path.
+        let scoring_path = if model.is_recurrent() || model.is_hybrid() {
+            ScoringPath::PaddedRecurrent
+        } else {
+            ScoringPath::PackedAttention
+        };
 
         let context_tokens = context_tokens.clamp(4, MAX_CONTEXT_TOKENS);
         let sequence_count = sequence_count.clamp(1, MAX_SEQUENCE_COUNT);
@@ -728,11 +777,12 @@ impl LlamaRuntime {
         context_params.n_ctx = context_tokens as u32;
         // The application uses one total-token budget. Keep native logical, physical and output
         // capacities aligned with that budget so a request that fits the configured limit can be
-        // submitted in one decode and one micro-batch.
+        // submitted without native padding; attention scoring uses one shared-context decode and
+        // one ragged continuation decode, while recurrent scoring keeps its padded continuation.
         context_params.n_batch = context_tokens as u32;
         context_params.n_ubatch = context_tokens as u32;
         context_params.n_seq_max = sequence_count as u32;
-        context_params.n_outputs_max = context_tokens as u32;
+        context_params.n_outputs_max = context_tokens.max(sequence_count) as u32;
         context_params.n_outputs_max_per_seq = context_tokens as u32;
         context_params.kv_unified = true;
         let (context_result, context_logs) =
@@ -779,6 +829,7 @@ impl LlamaRuntime {
                 &format!("{model_logs}{context_logs}"),
                 backend.backend_name(),
             ),
+            scoring_path,
             backend,
             model,
             context: Mutex::new(context),
@@ -823,8 +874,12 @@ impl LlamaRuntime {
         preceding_text: &str,
         candidates: &[Candidate],
     ) -> Result<Vec<CandidateScore>, String> {
-        self.score_candidates_with_performance(preceding_text, candidates)
-            .map(|result| result.scores)
+        self.score_candidates_with_inference_limit(
+            preceding_text,
+            candidates,
+            DEFAULT_INFERENCE_COUNT_LIMIT,
+        )
+        .map(|result| result.scores)
     }
 
     /// Compute candidate scores and collect timing/workload counters for management diagnostics.
@@ -833,9 +888,23 @@ impl LlamaRuntime {
         preceding_text: &str,
         candidates: &[Candidate],
     ) -> Result<ScoredCandidates, String> {
+        self.score_candidates_with_inference_limit(
+            preceding_text,
+            candidates,
+            DEFAULT_INFERENCE_COUNT_LIMIT,
+        )
+    }
+
+    pub(crate) fn score_candidates_with_inference_limit(
+        &self,
+        preceding_text: &str,
+        candidates: &[Candidate],
+        inference_count_limit: usize,
+    ) -> Result<ScoredCandidates, String> {
         if candidates.is_empty() {
             return Ok(ScoredCandidates {
                 scores: Vec::new(),
+                scored_indices: Vec::new(),
                 performance: LlmPerformance::default(),
             });
         }
@@ -905,61 +974,103 @@ impl LlamaRuntime {
         // Every candidate uses the same batch decode path. Exact-boundary candidates use the
         // concatenated-text suffix; mismatch candidates use their standalone tokenization and
         // append those ids to the preceding-text prompt. The boundary check remains diagnostic.
-        let candidate_indices = plans.iter().enumerate().collect::<Vec<_>>();
+        let mut candidate_indices = (0..plans.len()).collect::<Vec<_>>();
+        candidate_indices.sort_by_key(|index| (plans[*index].score_ids.len(), *index));
         let mut chunk_start = 0;
+        let inference_count_limit = inference_count_limit.max(1);
+        let mut omitted_due_to_limit = false;
         while chunk_start < candidate_indices.len() {
-            let (chunk_len, base_budget) = plan_candidate_chunk(
-                &plans[chunk_start..],
-                self.sequence_count,
-                context_limit,
-                base_ids.len(),
-            )?;
+            let remaining = candidate_indices[chunk_start..]
+                .iter()
+                .map(|index| plans[*index].clone())
+                .collect::<Vec<_>>();
+            let (chunk_len, base_budget) = match self.scoring_path {
+                ScoringPath::PackedAttention => plan_attention_chunk(
+                    &remaining,
+                    self.sequence_count,
+                    context_limit,
+                    base_ids.len(),
+                )?,
+                ScoringPath::PaddedRecurrent => plan_candidate_chunk(
+                    &remaining,
+                    self.sequence_count,
+                    context_limit,
+                    base_ids.len(),
+                )?,
+            };
             if chunk_len == 0 {
                 return Err("candidate chunk planner produced an empty chunk".to_owned());
             }
             let chunk_end = chunk_start + chunk_len;
 
             let chunk = &candidate_indices[chunk_start..chunk_end];
+            let has_continuation = chunk.iter().any(|index| plans[*index].score_ids.len() > 1);
+            if has_continuation && timings.inference_count >= inference_count_limit {
+                omitted_due_to_limit = true;
+                break;
+            }
             let base_start = base_ids.len().saturating_sub(base_budget);
             let decode_base = base_ids[base_start..].to_vec();
             let sequences = chunk
                 .iter()
-                .map(|(_, plan)| plan.score_ids.clone())
+                .map(|index| plans[*index].score_ids.clone())
                 .collect::<Vec<_>>();
-            timings.batch_count = timings.batch_count.saturating_add(1);
-            let scores = score_batch(
-                &self.backend,
-                &self.model,
-                &mut context,
-                &mut gpu_samplers,
-                &decode_base,
-                &sequences,
-                self.sequence_count,
-                &mut timings,
-            )?;
-            for (chunk_index, (plan_index, _)) in chunk.iter().enumerate() {
+            let scores = match self.scoring_path {
+                ScoringPath::PackedAttention => score_attention_tree_batch(
+                    &self.backend,
+                    &self.model,
+                    &mut context,
+                    &mut gpu_samplers,
+                    &decode_base,
+                    &sequences,
+                    self.sequence_count,
+                    &mut timings,
+                )?,
+                ScoringPath::PaddedRecurrent => score_recurrent_batch(
+                    &self.backend,
+                    &self.model,
+                    &mut context,
+                    &mut gpu_samplers,
+                    &decode_base,
+                    &sequences,
+                    self.sequence_count,
+                    &mut timings,
+                )?,
+            };
+            for (chunk_index, plan_index) in chunk.iter().enumerate() {
                 let mut score = scores[chunk_index].clone();
                 score.mismatch = plans[*plan_index].mismatch;
                 output[*plan_index] = Some(score);
             }
+            if has_continuation {
+                timings.inference_count = timings.inference_count.saturating_add(1);
+            }
+            timings.batch_count = timings.batch_count.saturating_add(1);
             chunk_start = chunk_end;
         }
 
+        let scored_indices = output
+            .iter()
+            .enumerate()
+            .filter_map(|(index, score)| score.as_ref().map(|_| index))
+            .collect::<Vec<_>>();
         let scores = output
             .into_iter()
             .enumerate()
-            .map(|(index, score)| {
-                score.ok_or_else(|| format!("candidate {index} was not scored by llama.cpp"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter_map(|(_, score)| score)
+            .collect::<Vec<_>>();
         let target_token_count = scores
             .iter()
             .map(|score| score.token_logprobs.len())
             .sum::<usize>();
-        let mismatch_count = plans.iter().filter(|plan| plan.mismatch).count();
+        let mismatch_count = scored_indices
+            .iter()
+            .filter(|index| plans[**index].mismatch)
+            .count();
         let scored_count = scores.len().min(u32::MAX as usize) as u32;
         Ok(ScoredCandidates {
             scores,
+            scored_indices,
             performance: LlmPerformance {
                 total_ms: duration_ms(total_started.elapsed()),
                 tokenize_ms: duration_ms(timings.tokenize),
@@ -973,6 +1084,15 @@ impl LlamaRuntime {
                 context_token_count: base_ids.len().min(u32::MAX as usize) as u32,
                 decode_input_token_count: timings.decode_input_tokens.min(u32::MAX as usize) as u32,
                 logits_output_count: timings.logits_output_count.min(u32::MAX as usize) as u32,
+                inference_count_limit: Some(inference_count_limit.min(u32::MAX as usize) as u32),
+                omitted_candidate_count: if omitted_due_to_limit {
+                    candidates
+                        .len()
+                        .saturating_sub(scored_count as usize)
+                        .min(u32::MAX as usize) as u32
+                } else {
+                    0
+                },
             },
         })
     }
@@ -1051,8 +1171,204 @@ fn plan_candidate_chunk(
     Ok((chunk_len, base_budget))
 }
 
+/// Choose the largest short-first chunk for the ragged packed attention tree. Unlike the
+/// recurrent planner, each continuation contributes only its real prefix length.
+fn plan_attention_chunk(
+    plans: &[CandidatePlan],
+    sequence_count: usize,
+    context_limit: usize,
+    base_token_count: usize,
+) -> Result<(usize, usize), String> {
+    if sequence_count == 0 {
+        return Err("llama sequence capacity is zero".to_owned());
+    }
+    let minimum_base_tokens = if base_token_count == 0 { 1 } else { 1 };
+    let mut chunk_len = 0_usize;
+    let mut continuation_budget = 0_usize;
+    for plan in plans.iter().take(sequence_count) {
+        let next_budget =
+            continuation_budget.saturating_add(plan.score_ids.len().saturating_sub(1));
+        if next_budget.saturating_add(minimum_base_tokens) > context_limit {
+            if chunk_len == 0 {
+                return Err(format!(
+                    "candidate requires {} packed continuation tokens, context limit is {context_limit}",
+                    plan.score_ids.len().saturating_sub(1)
+                ));
+            }
+            break;
+        }
+        continuation_budget = next_budget;
+        chunk_len += 1;
+    }
+    if chunk_len == 0 {
+        return Err("packed attention planner produced an empty chunk".to_owned());
+    }
+    let base_budget = context_limit.saturating_sub(continuation_budget);
+    Ok((chunk_len, base_budget))
+}
+
 #[allow(clippy::too_many_arguments)]
-fn score_batch(
+fn score_attention_tree_batch(
+    backend: &LlamaBackend,
+    model: &LlamaModel,
+    context: &mut MutexGuard<'_, LlamaContext>,
+    gpu_samplers: &mut GpuSamplerSet,
+    base_tokens: &[llama_token],
+    candidates: &[Vec<llama_token>],
+    sequence_count: usize,
+    timings: &mut ScoringTimings,
+) -> Result<Vec<CandidateScore>, String> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let decode_base = if base_tokens.is_empty() {
+        vec![model.get_vocab().bos()]
+    } else {
+        base_tokens.to_vec()
+    };
+    if candidates.iter().any(|tokens| tokens.is_empty()) {
+        return Err("attention tree contains an empty candidate".to_owned());
+    }
+    let total_tokens = decode_base.len()
+        + candidates
+            .iter()
+            .map(|tokens| tokens.len().saturating_sub(1))
+            .sum::<usize>();
+    if total_tokens > timings.context_limit {
+        return Err(format!(
+            "packed attention tree has {total_tokens} tokens, context limit is {}",
+            timings.context_limit
+        ));
+    }
+    if candidates.len() > gpu_samplers.states.len() {
+        return Err(format!(
+            "llama sampler has {} sequence slots, but {} candidates were requested",
+            gpu_samplers.states.len(),
+            candidates.len()
+        ));
+    }
+
+    context.kv_cache_clear();
+    let sequence_ids = (0..candidates.len() as i32).collect::<Vec<_>>();
+    let mut token_logprobs = candidates
+        .iter()
+        .map(|tokens| Vec::with_capacity(tokens.len()))
+        .collect::<Vec<_>>();
+    let output_count = 1 + candidates
+        .iter()
+        .map(|tokens| tokens.len().saturating_sub(1))
+        .sum::<usize>();
+    timings.add_decode_workload(total_tokens, output_count);
+
+    // Decode the shared context separately. The root row is shared by all sequence ids, while
+    // candidate branches are decoded afterwards; putting both in one llama.cpp batch couples the
+    // shared prefix to future branch positions and changes the root logits for attention models.
+    let mut base_batch = LlamaBatch::new(
+        backend.lib.clone(),
+        decode_base.len().max(1) as i32,
+        0,
+        sequence_count as i32,
+    );
+    for (position, token) in decode_base.iter().copied().enumerate() {
+        base_batch.add(
+            token,
+            position as i32,
+            &sequence_ids,
+            position + 1 == decode_base.len(),
+        );
+    }
+    let mut base_target_groups = vec![Vec::new(); gpu_samplers.states.len()];
+    base_target_groups[0].push(candidates.iter().map(|tokens| tokens[0]).collect());
+    configure_gpu_samplers(gpu_samplers, base_target_groups)?;
+    let decode_started = Instant::now();
+    context
+        .decode(&base_batch)
+        .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
+    timings.add_decode(decode_started);
+    let logprob_started = Instant::now();
+    unsafe { (backend.lib.symbols.llama_synchronize)(context.handle) };
+
+    let base_state = unsafe { &*gpu_samplers.states[0] };
+    let base_values = read_gpu_sampler_row(base_state, 0)?;
+    for (candidate_index, value) in base_values.into_iter().enumerate() {
+        token_logprobs[candidate_index].push(value);
+    }
+    let max_continuations = candidates
+        .iter()
+        .map(|tokens| tokens.len().saturating_sub(1))
+        .max()
+        .unwrap_or(0);
+    if max_continuations > 0 {
+        let continuation_tokens = total_tokens.saturating_sub(decode_base.len());
+        let mut continuation_batch = LlamaBatch::new(
+            backend.lib.clone(),
+            continuation_tokens.max(1) as i32,
+            0,
+            sequence_count as i32,
+        );
+        let mut continuation_target_groups = vec![Vec::new(); gpu_samplers.states.len()];
+        for (candidate_index, tokens) in candidates.iter().enumerate() {
+            for token_index in 0..tokens.len().saturating_sub(1) {
+                continuation_batch.add(
+                    tokens[token_index],
+                    (decode_base.len() + token_index) as i32,
+                    &[sequence_ids[candidate_index]],
+                    true,
+                );
+                continuation_target_groups[candidate_index].push(vec![tokens[token_index + 1]]);
+            }
+        }
+        configure_gpu_samplers(gpu_samplers, continuation_target_groups)?;
+        let decode_started = Instant::now();
+        context
+            .decode(&continuation_batch)
+            .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
+        timings.add_decode(decode_started);
+        unsafe { (backend.lib.symbols.llama_synchronize)(context.handle) };
+        for (candidate_index, tokens) in candidates.iter().enumerate() {
+            let state = unsafe { &*gpu_samplers.states[candidate_index] };
+            for row_index in 0..tokens.len().saturating_sub(1) {
+                let values = read_gpu_sampler_row(state, row_index)?;
+                if let Some(value) = values.first().copied() {
+                    token_logprobs[candidate_index].push(value);
+                }
+            }
+        }
+    }
+    timings.add_logprob(logprob_started);
+
+    if let Some((candidate_index, (lp, tokens))) = token_logprobs
+        .iter()
+        .zip(candidates)
+        .enumerate()
+        .find(|(_, (lp, tokens))| {
+            lp.len() != tokens.len() || lp.iter().any(|value| !value.is_finite())
+        })
+    {
+        let sampler_state = unsafe { &*gpu_samplers.states[candidate_index] };
+        return Err(format!(
+            "llama.cpp GPU sampler returned incomplete packed-tree logprob rows for candidate {candidate_index}: got {}, expected {}; sampler results={}, target rows={}, current groups={}",
+            lp.len(),
+            tokens.len(),
+            sampler_state.results.len(),
+            sampler_state.target_tensors.len(),
+            sampler_state.groups.len(),
+        ));
+    }
+    Ok(token_logprobs
+        .into_iter()
+        .zip(candidates)
+        .map(|(logprobs, tokens)| CandidateScore {
+            token_ids: tokens.clone(),
+            logprob: logprobs.iter().sum(),
+            token_logprobs: logprobs,
+            mismatch: false,
+        })
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_recurrent_batch(
     backend: &LlamaBackend,
     model: &LlamaModel,
     context: &mut MutexGuard<'_, LlamaContext>,
@@ -1605,6 +1921,23 @@ mod tests {
     }
 
     #[test]
+    fn attention_chunk_planner_counts_real_branch_rows_without_padding() {
+        let plans = [2_usize, 2, 4]
+            .into_iter()
+            .map(|length| CandidatePlan {
+                score_ids: vec![1; length],
+                mismatch: false,
+            })
+            .collect::<Vec<_>>();
+        let (chunk_len, base_budget) = plan_attention_chunk(&plans, 32, 8, 4).unwrap();
+        assert_eq!(chunk_len, 3);
+        assert_eq!(base_budget, 3);
+
+        let padded = plan_candidate_chunk(&plans, 32, 8, 4).unwrap();
+        assert!(padded.0 < chunk_len);
+    }
+
+    #[test]
     fn cuda_is_the_default_service_backend_and_auto_is_capability_policy() {
         assert_eq!(lime_protocol::DEFAULT_LLM_BACKEND, "cuda");
         assert_eq!(BackendPreference::default(), BackendPreference::Auto);
@@ -1815,7 +2148,20 @@ mod tests {
         }
         let scored = scored.expect("benchmark loop always produces a score");
         assert_eq!(scored.scores.len(), candidates.len());
-        assert_eq!(scored.performance.target_token_count, 54);
+        let expected_target_tokens = candidates
+            .iter()
+            .map(|candidate| {
+                runtime
+                    .tokenize(&format!("我{}", candidate.commit_text))
+                    .unwrap()
+                    .len()
+                    .saturating_sub(runtime.tokenize("我").unwrap().len())
+            })
+            .sum::<usize>();
+        assert_eq!(
+            scored.performance.target_token_count as usize,
+            expected_target_tokens
+        );
         assert_eq!(scored.performance.batch_count, 1);
         assert!(scored
             .scores
@@ -1844,5 +2190,43 @@ mod tests {
                 (scored.scores[index].token_logprobs[0] - single[0].token_logprobs[0]).abs() < 1e-4
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires a local llama.cpp shared library and GGUF model"]
+    fn inference_count_limit_scores_short_candidates_first() {
+        let model = std::env::var_os("LIME_LLAMA_TEST_MODEL")
+            .map(PathBuf::from)
+            .expect("LIME_LLAMA_TEST_MODEL must point to a GGUF model");
+        let runtime_dir = std::env::var_os("LIME_LLAMA_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .expect("LIME_LLAMA_RUNTIME_DIR must point to llama.cpp runtime");
+        let runtime =
+            LlamaRuntime::load_with_runtime_dir_and_backend_preference_and_sequence_count(
+                &model,
+                &runtime_dir,
+                8,
+                BackendPreference::Cpu,
+                32,
+            )
+            .unwrap();
+        let candidates = ["你", "你好", "你好吗", "🙆‍♀️", "🙆‍♂️", "🙆‍♀️🙆‍♂️"]
+            .into_iter()
+            .map(|text| Candidate {
+                display_text: text.to_owned(),
+                commit_text: text.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let scored = runtime
+            .score_candidates_with_inference_limit("我", &candidates, 1)
+            .unwrap();
+        assert_eq!(scored.performance.inference_count_limit, Some(1));
+        assert!(scored.performance.omitted_candidate_count > 0);
+        assert!(scored.scored_indices.contains(&0));
+        assert!(scored.scored_indices.contains(&1));
+        assert!(scored.scored_indices.contains(&2));
+        assert!(scored.scored_indices.contains(&3));
+        assert!(!scored.scored_indices.contains(&4));
+        assert!(!scored.scored_indices.contains(&5));
     }
 }

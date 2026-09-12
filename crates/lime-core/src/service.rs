@@ -2,7 +2,9 @@ use crate::{
     config::ConfigStore,
     engine::{CandidateBatch, CandidateEngine, RimeEngine},
     logging::PrivacyLogger,
-    ranking::{try_rerank_selected_candidates_with_preedit, GenerationTracker, LlamaRuntime},
+    ranking::{
+        try_rerank_selected_candidates_with_preedit_and_limit, GenerationTracker, LlamaRuntime,
+    },
 };
 mod history;
 mod persistence;
@@ -437,7 +439,7 @@ impl CoreService {
             &request.preceding_text,
             config.preceding_text_char_limit as usize,
         );
-        let ranking = match try_rerank_selected_candidates_with_preedit(
+        let ranking = match try_rerank_selected_candidates_with_preedit_and_limit(
             &rime_candidates,
             &complete_candidate_indices,
             &request.preedit,
@@ -445,6 +447,7 @@ impl CoreService {
             runtime,
             config.llm_rerank_count as usize,
             config.llm_effective_count as usize,
+            config.llm_inference_count_limit as usize,
         ) {
             Ok(ranking) => ranking,
             Err(error) => {
@@ -548,7 +551,10 @@ impl CoreService {
             backend_preference,
             sequence_count,
         )
-        .map_err(|_| {
+        .map_err(|error| {
+            if error.contains("unsupported model for Lime ranking:") {
+                return ErrorCode::ModelUnsupported;
+            }
             if path.exists() {
                 ErrorCode::ModelLoadFailed
             } else {

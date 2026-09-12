@@ -24,6 +24,8 @@
 | `page_size` | 9 | 前端每页显示数量，仅影响候选 UI |
 | `llm_rerank_count` | 32 | 检查并尝试送入 LLM 的 Rime 候选前缀长度；其中未完整消费输入的候选会被排除 |
 | `llm_effective_count` | 3 | 从完整候选的 LLM 排序中置顶采纳的候选数量 |
+| `llm_context_token_limit` | 1024 | 单次 llama.cpp 请求允许的总 token 行数 |
+| `llm_inference_count_limit` | 1 | 每次输入允许的候选续写推理批次数；共同上文和单 token 候选不计入 |
 
 最终顺序：
 
@@ -55,11 +57,17 @@ final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
 
 ## 候选批量推理
 
-候选评分先对共同上文执行一次 decode，建立所有候选共享的 KV 状态；随后把所有候选的
-continuation prefix 放入同一个逻辑 `LlamaBatch`，不再按候选 token 深度重复调用
-`context.decode`。候选 token 数不等时，短序列在 batch 尾部用 EOS padding 到本批最长长度，
-padding 行关闭 logits 输出，不参与候选分数。llama.cpp 可以继续把这个逻辑 batch 拆成多个
-内部 `ubatch`。
+模型加载后按能力选择两条路径。纯 attention 模型先建立共享上文 KV，再把按 token 数从短到长
+排列的候选 continuation prefix 放入 ragged packed tree；每条分支只提交真实 token 行，不做
+padding。共享上文和 packed continuation 分别只解码一次。Qwen3.5 等 hybrid/recurrent 模型
+保留等长 padding batch，但同样按短候选优先分批。
+
+当前 llama.cpp runtime 对共享 sequence id 的同一 native decode 会让未来分支影响共享根节点
+的输出，因此 attention 路径没有把根和未来分支强行合并为一次 native decode；若要做到这个
+更严格的形式，需要先修改 llama.cpp 的 sequence/KV 图构建逻辑。候选 continuation 本身仍
+保持一次 ragged packed decode，且不引入 padding。
+每次输入只在候选续写批次上消耗 `llm_inference_count_limit`；达到上限后剩余候选不再送入模型。
+上文 decode 和长度为 1 的候选不消耗额度。
 
 每个候选的目标 token 由 Lime 的 GPU sampler 通过 `ggml_get_rows` 直接 gather；结果从 sampler
 result tensor 读取，并按 sampler 行保存的目标 token 映射回候选。这个路径读取任意指定 token
@@ -102,4 +110,6 @@ decode 调用；兼容字段 `logits_ms` 只统计 decode 返回后的同步和�
 - 模型输入为用户导入的单个 GGUF 文件；不要求额外 manifest。
 - 开发模型由 `LIME_LLAMA_TEST_MODEL` 指定；模型文件不进入 Git，使用用户数据目录或绝对路径，不放在仓库资源目录。
 - 模型切换通过服务受控重载；同一时间只激活一个模型。多个命名预设由服务持久化到 `model-presets.json`，可列出、保存、删除和切换；服务同时记录最近一次成功激活的模型路径并在下次启动时自动恢复，切换失败不会替换当前模型。
+- 目前只接受 causal decoder。纯 attention 模型使用 packed tree，recurrent/hybrid 模型使用 padding
+  路径；encoder、embedding、diffusion 等无法归入这两条路径的模型在加载时明确报告为不支持。
 - Windows 首期默认 CUDA，并随安装包提供 CPU 回退；未安装可用模型时仍保持 Rime-only。
