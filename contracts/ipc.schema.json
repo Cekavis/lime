@@ -1235,6 +1235,8 @@
         "llm_rerank_count",
         "llm_effective_count",
         "llm_context_token_limit",
+        "llm_inference_count_limit",
+        "llm_ignore_emoji",
         "llm_backend"
       ],
       "properties": {
@@ -1272,6 +1274,14 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 4096
+        },
+        "llm_inference_count_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "llm_ignore_emoji": {
+          "type": "boolean"
         },
         "llm_backend": {
           "enum": [

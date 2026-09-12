@@ -12,6 +12,8 @@
         "llm_rerank_count": 32,
         "llm_effective_count": 3,
         "llm_context_token_limit": 1024,
+        "llm_inference_count_limit": 1,
+        "llm_ignore_emoji": true,
         "llm_backend": "cuda"
       }
     },

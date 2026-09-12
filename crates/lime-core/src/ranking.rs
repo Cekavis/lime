@@ -7,6 +7,14 @@ pub use crate::llama::{CandidateScore, LlamaRuntime, ModelMetadata, TokenInfo};
 
 const DEFAULT_INFERENCE_COUNT_LIMIT: usize = 1;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RerankOptions {
+    pub(crate) rerank_count: usize,
+    pub(crate) effective_count: usize,
+    pub(crate) inference_count_limit: usize,
+    pub(crate) ignore_emoji: bool,
+}
+
 /// Result of candidate ranking together with the rows consumed by the management UI.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RerankResult {
@@ -174,9 +182,12 @@ pub(crate) fn try_rerank_selected_candidates_with_diagnostics(
         None,
         preceding_text,
         runtime,
-        rerank_count,
-        effective_count,
-        inference_count_limit,
+        RerankOptions {
+            rerank_count,
+            effective_count,
+            inference_count_limit,
+            ignore_emoji: false,
+        },
     )
     .map(|outcome| outcome.result)
 }
@@ -191,9 +202,7 @@ pub(crate) fn try_rerank_selected_candidates_with_preedit_and_limit(
     preedit: &str,
     preceding_text: &str,
     runtime: Option<&LlamaRuntime>,
-    rerank_count: usize,
-    effective_count: usize,
-    inference_count_limit: usize,
+    options: RerankOptions,
 ) -> Result<RankingOutcome, String> {
     try_rerank_selected_candidates_with_scorer_and_preedit_and_limit(
         candidates,
@@ -201,9 +210,7 @@ pub(crate) fn try_rerank_selected_candidates_with_preedit_and_limit(
         Some(preedit),
         preceding_text,
         runtime,
-        rerank_count,
-        effective_count,
-        inference_count_limit,
+        options,
     )
 }
 
@@ -222,9 +229,12 @@ fn try_rerank_selected_candidates_with_scorer<S: CandidateScorer + ?Sized>(
         None,
         preceding_text,
         runtime,
-        rerank_count,
-        effective_count,
-        DEFAULT_INFERENCE_COUNT_LIMIT,
+        RerankOptions {
+            rerank_count,
+            effective_count,
+            inference_count_limit: DEFAULT_INFERENCE_COUNT_LIMIT,
+            ignore_emoji: false,
+        },
     )
     .map(|outcome| outcome.result)
 }
@@ -245,9 +255,12 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit<S: CandidateScorer + ?
         preedit,
         preceding_text,
         runtime,
-        rerank_count,
-        effective_count,
-        DEFAULT_INFERENCE_COUNT_LIMIT,
+        RerankOptions {
+            rerank_count,
+            effective_count,
+            inference_count_limit: DEFAULT_INFERENCE_COUNT_LIMIT,
+            ignore_emoji: false,
+        },
     )
 }
 
@@ -257,15 +270,22 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit_and_limit<S: Candidate
     preedit: Option<&str>,
     preceding_text: &str,
     runtime: Option<&S>,
-    rerank_count: usize,
-    effective_count: usize,
-    inference_count_limit: usize,
+    options: RerankOptions,
 ) -> Result<RankingOutcome, String> {
-    let pool_indices = selected_pool_indices(candidate_indices, candidates.len(), rerank_count);
+    let pool_indices =
+        selected_pool_indices(candidate_indices, candidates.len(), options.rerank_count);
     let pool_indices = match preedit {
         Some(preedit) => pool_indices
             .into_iter()
-            .filter(|index| candidate_allowed_for_llm(&candidates[*index], preedit))
+            .filter(|index| {
+                let candidate = &candidates[*index];
+                candidate_allowed_for_llm(candidate, preedit)
+                    && (!options.ignore_emoji || !contains_emoji(&candidate.commit_text))
+            })
+            .collect::<Vec<_>>(),
+        None if options.ignore_emoji => pool_indices
+            .into_iter()
+            .filter(|index| !contains_emoji(&candidates[*index].commit_text))
             .collect::<Vec<_>>(),
         None => pool_indices,
     };
@@ -285,7 +305,7 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit_and_limit<S: Candidate
         let scored = runtime.score_candidates_with_performance_limit(
             preceding_text,
             &pool_candidates,
-            inference_count_limit,
+            options.inference_count_limit,
         )?;
         if scored.scores.len() != scored.scored_indices.len()
             || scored
@@ -325,8 +345,12 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit_and_limit<S: Candidate
         (Vec::new(), None)
     };
 
-    let (result, candidate_indices) =
-        build_rerank_result_with_indices(candidates, model_active, score_rows, effective_count);
+    let (result, candidate_indices) = build_rerank_result_with_indices(
+        candidates,
+        model_active,
+        score_rows,
+        options.effective_count,
+    );
     Ok(RankingOutcome {
         result,
         candidate_indices,
@@ -341,6 +365,34 @@ fn candidate_allowed_for_llm(candidate: &Candidate, preedit: &str) -> bool {
 fn is_english_candidate(candidate: &Candidate) -> bool {
     let text = candidate.commit_text.as_str();
     !text.is_empty() && text.is_ascii() && text.bytes().any(|byte| byte.is_ascii_alphabetic())
+}
+
+fn contains_emoji(text: &str) -> bool {
+    text.chars().any(is_emoji_code_point)
+}
+
+fn is_emoji_code_point(character: char) -> bool {
+    let code = character as u32;
+    matches!(
+        code,
+        0x1F000..=0x1FAFF
+            | 0x2194..=0x21FF
+            | 0x2300..=0x23FF
+            | 0x25AA..=0x25FF
+            | 0x2600..=0x27BF
+            | 0x2934..=0x2935
+            | 0x2B00..=0x2BFF
+            | 0x00A9
+            | 0x00AE
+            | 0x203C
+            | 0x2049
+            | 0x2122
+            | 0x2139
+            | 0x3030
+            | 0x303D
+            | 0x3297
+            | 0x3299
+    )
 }
 
 fn selected_pool_indices(
@@ -632,6 +684,121 @@ mod tests {
         assert_eq!(performance.candidate_count, 3);
         assert_eq!(performance.scored_count, 3);
         assert_eq!(performance.target_token_count, 3);
+    }
+
+    #[test]
+    fn emoji_candidates_can_be_excluded_without_changing_rime_order() {
+        use std::cell::RefCell;
+
+        struct RecordingScorer {
+            seen: RefCell<Vec<String>>,
+        }
+
+        impl CandidateScorer for RecordingScorer {
+            fn score_candidates(
+                &self,
+                _: &str,
+                candidates: &[Candidate],
+            ) -> Result<Vec<CandidateScore>, String> {
+                self.seen.borrow_mut().extend(
+                    candidates
+                        .iter()
+                        .map(|candidate| candidate.commit_text.clone()),
+                );
+                Ok(candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| CandidateScore {
+                        token_ids: Vec::new(),
+                        token_logprobs: vec![-(index as f64)],
+                        logprob: -(index as f64),
+                        mismatch: false,
+                    })
+                    .collect())
+            }
+        }
+
+        let candidates = vec![c("你好"), c("😀"), c("中文😀"), c("hello")];
+        let scorer = RecordingScorer {
+            seen: RefCell::new(Vec::new()),
+        };
+        let result = try_rerank_selected_candidates_with_scorer_and_preedit_and_limit(
+            &candidates,
+            &[0, 1, 2, 3],
+            Some("nihao"),
+            "前文",
+            Some(&scorer),
+            RerankOptions {
+                rerank_count: 4,
+                effective_count: 3,
+                inference_count_limit: DEFAULT_INFERENCE_COUNT_LIMIT,
+                ignore_emoji: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(scorer.seen.borrow().as_slice(), ["你好"]);
+        assert_eq!(result.result.candidates, candidates);
+        assert_eq!(result.result.diagnostics[0].llm_candidate, Some(c("你好")));
+
+        scorer.seen.borrow_mut().clear();
+        let result_without_filter =
+            try_rerank_selected_candidates_with_scorer_and_preedit_and_limit(
+                &candidates,
+                &[0, 1, 2, 3],
+                Some("nihao"),
+                "前文",
+                Some(&scorer),
+                RerankOptions {
+                    rerank_count: 4,
+                    effective_count: 3,
+                    inference_count_limit: DEFAULT_INFERENCE_COUNT_LIMIT,
+                    ignore_emoji: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(scorer.seen.borrow().as_slice(), ["你好", "😀", "中文😀"]);
+        assert_eq!(result_without_filter.result.candidates, candidates);
+    }
+
+    #[test]
+    fn all_emoji_candidates_keep_rime_only_behavior() {
+        struct PanickingScorer;
+
+        impl CandidateScorer for PanickingScorer {
+            fn score_candidates(
+                &self,
+                _: &str,
+                _: &[Candidate],
+            ) -> Result<Vec<CandidateScore>, String> {
+                panic!("an empty Emoji-filtered pool must not invoke the scorer");
+            }
+        }
+
+        let candidates = vec![c("😀"), c("中文😀")];
+        let result = try_rerank_selected_candidates_with_scorer_and_preedit_and_limit(
+            &candidates,
+            &[0, 1],
+            Some("nihao"),
+            "前文",
+            Some(&PanickingScorer),
+            RerankOptions {
+                rerank_count: 2,
+                effective_count: 1,
+                inference_count_limit: DEFAULT_INFERENCE_COUNT_LIMIT,
+                ignore_emoji: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.result.candidates, candidates);
+        assert!(result.llm_performance.is_none());
+        assert!(result
+            .result
+            .diagnostics
+            .iter()
+            .all(|row| row.llm_candidate.is_none() && row.logprobs.is_empty()));
     }
 
     #[test]

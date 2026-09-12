@@ -987,12 +987,9 @@ impl LlamaRuntime {
                 .map(|index| plans[*index].clone())
                 .collect::<Vec<_>>();
             let (chunk_len, base_budget) = match self.scoring_path {
-                ScoringPath::PackedAttention => plan_attention_chunk(
-                    &remaining,
-                    self.sequence_count,
-                    context_limit,
-                    base_ids.len(),
-                )?,
+                ScoringPath::PackedAttention => {
+                    plan_attention_chunk(&remaining, self.sequence_count, context_limit)?
+                }
                 ScoringPath::PaddedRecurrent => plan_candidate_chunk(
                     &remaining,
                     self.sequence_count,
@@ -1056,11 +1053,7 @@ impl LlamaRuntime {
             .enumerate()
             .filter_map(|(index, score)| score.as_ref().map(|_| index))
             .collect::<Vec<_>>();
-        let scores = output
-            .into_iter()
-            .enumerate()
-            .filter_map(|(_, score)| score)
-            .collect::<Vec<_>>();
+        let scores = output.into_iter().flatten().collect::<Vec<_>>();
         let target_token_count = scores
             .iter()
             .map(|score| score.token_logprobs.len())
@@ -1178,12 +1171,11 @@ fn plan_attention_chunk(
     plans: &[CandidatePlan],
     sequence_count: usize,
     context_limit: usize,
-    base_token_count: usize,
 ) -> Result<(usize, usize), String> {
     if sequence_count == 0 {
         return Err("llama sequence capacity is zero".to_owned());
     }
-    let minimum_base_tokens = if base_token_count == 0 { 1 } else { 1 };
+    let minimum_base_tokens = 1;
     let mut chunk_len = 0_usize;
     let mut continuation_budget = 0_usize;
     for plan in plans.iter().take(sequence_count) {
@@ -1922,7 +1914,7 @@ mod tests {
                 mismatch: false,
             })
             .collect::<Vec<_>>();
-        let (chunk_len, base_budget) = plan_attention_chunk(&plans, 32, 8, 4).unwrap();
+        let (chunk_len, base_budget) = plan_attention_chunk(&plans, 32, 8).unwrap();
         assert_eq!(chunk_len, 3);
         assert_eq!(base_budget, 3);
 

@@ -49,6 +49,18 @@
       "maximum": 4096,
       "default": 1024
     },
+    "llm_inference_count_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32,
+      "default": 1,
+      "description": "Maximum number of candidate continuation inference batches per input request."
+    },
+    "llm_ignore_emoji": {
+      "type": "boolean",
+      "default": true,
+      "description": "Exclude candidates containing Emoji code points from LLM reranking while preserving Rime order."
+    },
     "llm_backend": {
       "type": "string",
       "enum": [
@@ -67,6 +79,8 @@
     "llm_rerank_count",
     "llm_effective_count",
     "llm_context_token_limit",
+    "llm_inference_count_limit",
+    "llm_ignore_emoji",
     "llm_backend"
   ],
   "description": "Current management configuration. Cross-field bounds are enforced by lime-core::ConfigStore."

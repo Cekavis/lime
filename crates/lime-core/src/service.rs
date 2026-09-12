@@ -4,6 +4,7 @@ use crate::{
     logging::PrivacyLogger,
     ranking::{
         try_rerank_selected_candidates_with_preedit_and_limit, GenerationTracker, LlamaRuntime,
+        RerankOptions,
     },
 };
 mod history;
@@ -11,8 +12,7 @@ mod persistence;
 use lime_protocol::{
     CandidateDiagnostic, ConfigSnapshot, DictionaryPage, ErrorCode, InputHistoryEntry,
     InputHistoryPage, InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelMemoryInfo,
-    ModelPreset, Request, Response, ServiceState, ServiceStatus,
-    DICTIONARY_PAGE_SIZE,
+    ModelPreset, Request, Response, ServiceState, ServiceStatus, DICTIONARY_PAGE_SIZE,
 };
 use llama_cpp_v3::BackendPreference;
 pub(crate) use persistence::{load_config, load_model_state};
@@ -449,9 +449,12 @@ impl CoreService {
             &request.preedit,
             &preceding_text,
             runtime,
-            config.llm_rerank_count as usize,
-            config.llm_effective_count as usize,
-            config.llm_inference_count_limit as usize,
+            RerankOptions {
+                rerank_count: config.llm_rerank_count as usize,
+                effective_count: config.llm_effective_count as usize,
+                inference_count_limit: config.llm_inference_count_limit as usize,
+                ignore_emoji: config.llm_ignore_emoji,
+            },
         ) {
             Ok(ranking) => ranking,
             Err(error) => {

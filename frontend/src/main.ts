@@ -12,6 +12,7 @@ interface Config {
   llm_effective_count: number;
   llm_context_token_limit: number;
   llm_inference_count_limit: number;
+  llm_ignore_emoji: boolean;
   llm_backend: "cuda" | "cpu";
 }
 
@@ -135,6 +136,7 @@ const defaultConfig: Config = {
   llm_effective_count: 3,
   llm_context_token_limit: 1024,
   llm_inference_count_limit: 1,
+  llm_ignore_emoji: true,
   llm_backend: "cuda",
 };
 
@@ -185,6 +187,7 @@ app.innerHTML = [
   '            <label class="field"><span>LLM 单次输入推理次数上限</span><input data-config="llm_inference_count_limit" type="number" min="1" max="32" required /></label>',
   '            <label class="field"><span>LLM 重排输入候选词数</span><input data-config="llm_rerank_count" type="number" min="1" max="128" required /></label>',
   '            <label class="field"><span>LLM 重排采纳候选词数</span><input data-config="llm_effective_count" type="number" min="1" max="32" required /></label>',
+  '            <label class="field"><span>LLM 重排时忽略 Emoji</span><input data-config="llm_ignore_emoji" type="checkbox" /></label>',
   '            <label class="field"><span>LLM 后端</span><select data-config="llm_backend"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>',
   '          </div>',
   '        </section>',

@@ -10,7 +10,7 @@
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rime_schema", "preceding_text_char_limit", "context_preview_char_limit", "page_size", "llm_rerank_count", "llm_effective_count", "llm_context_token_limit", "llm_backend"],
+      "required": ["rime_schema", "preceding_text_char_limit", "context_preview_char_limit", "page_size", "llm_rerank_count", "llm_effective_count", "llm_context_token_limit", "llm_inference_count_limit", "llm_ignore_emoji", "llm_backend"],
       "properties": {
         "rime_schema": { "type": "string", "minLength": 1, "maxLength": 128 },
         "preceding_text_char_limit": { "type": "integer", "minimum": 1, "maximum": 4096 },
@@ -19,6 +19,8 @@
         "llm_rerank_count": { "type": "integer", "minimum": 1, "maximum": 128 },
         "llm_effective_count": { "type": "integer", "minimum": 1, "maximum": 32 },
         "llm_context_token_limit": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "llm_inference_count_limit": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "llm_ignore_emoji": { "type": "boolean" },
         "llm_backend": { "enum": ["cuda", "cpu"] }
       }
     },

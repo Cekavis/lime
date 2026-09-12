@@ -238,6 +238,7 @@ h3 { font-size: var(--font-size-md); line-height: var(--line-height-tight); }
   padding: var(--space-2) var(--space-3);
   color: var(--color-foreground);
 }
+.field input[type="checkbox"] { width: auto; min-width: auto; accent-color: var(--color-accent); }
 .field select[data-config="rime_schema"] { width: 11rem; }
 .field-wide input, .field-wide select, .field-wide textarea { width: 100%; }
 .field-stacked textarea { min-height: 5rem; resize: vertical; }

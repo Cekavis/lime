@@ -17,6 +17,9 @@ pub struct Config {
     /// Maximum number of candidate continuation inference batches per input request.
     #[serde(default = "default_llm_inference_count_limit")]
     pub llm_inference_count_limit: u32,
+    /// Whether candidates containing Emoji code points are excluded from LLM reranking.
+    #[serde(default = "default_llm_ignore_emoji")]
+    pub llm_ignore_emoji: bool,
     /// Native llama.cpp backend preference.
     pub llm_backend: String,
 }
@@ -33,6 +36,10 @@ fn default_llm_inference_count_limit() -> u32 {
     1
 }
 
+fn default_llm_ignore_emoji() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -44,6 +51,7 @@ impl Default for Config {
             llm_effective_count: 3,
             llm_context_token_limit: 1024,
             llm_inference_count_limit: default_llm_inference_count_limit(),
+            llm_ignore_emoji: default_llm_ignore_emoji(),
             llm_backend: default_llm_backend(),
         }
     }

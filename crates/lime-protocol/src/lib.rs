@@ -49,9 +49,28 @@ mod tests {
                 llm_effective_count: 3,
                 llm_context_token_limit: 1024,
                 llm_inference_count_limit: 1,
+                llm_ignore_emoji: true,
                 llm_backend: "cuda".into(),
             }
         );
+    }
+
+    #[test]
+    fn legacy_config_without_emoji_setting_uses_default() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "rime_schema": "rime_ice",
+            "preceding_text_char_limit": 128,
+            "context_preview_char_limit": 32,
+            "page_size": 9,
+            "llm_rerank_count": 32,
+            "llm_effective_count": 3,
+            "llm_context_token_limit": 1024,
+            "llm_inference_count_limit": 1,
+            "llm_backend": "cuda"
+        }))
+        .expect("legacy config should deserialize");
+
+        assert!(config.llm_ignore_emoji);
     }
 
     #[test]

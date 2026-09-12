@@ -15,6 +15,7 @@ llm_rerank_count            = 32
 llm_effective_count         = 3
 llm_context_token_limit     = 1024
 llm_inference_count_limit   = 1
+llm_ignore_emoji            = true
 llm_backend                 = cuda
 ```
 
@@ -24,12 +25,15 @@ llm_backend                 = cuda
 
 设置写入后立即成为配置源；Rime 相关设置实时生效。模型已加载时，管理界面保存模型后端、
 上下文 token 上限、推理次数上限或重排候选检查范围，会立即重新加载当前模型，使 llama.cpp native 参数生效。
+`llm_ignore_emoji` 只影响送入 LLM 的候选池，不影响 llama.cpp native 参数，切换该设置不重新加载模型。
 所有设置使用范围校验，非法值拒绝写入。
 
 `llm_rerank_count` 限制每次检查的 Rime 候选前缀长度；Rust 核心通过 librime
 候选预览判断其中哪些候选消费了全部输入，仍有剩余拼音的候选不送入模型，也不由
 该前缀之后的候选补位。ASCII 英文候选还必须与原始 `preedit` 完全相等，否则只保留在
 Rime 顺序中，不送入模型。
+
+`llm_ignore_emoji` 默认开启；开启时，提交文本包含 Emoji code point 的候选不会送入 LLM，混合中文和 Emoji 的候选也会被排除，但这些候选仍保留在最终 Rime 顺序中，不补充其他候选。关闭后恢复原有候选池。
 
 `llm_inference_count_limit` 限制每次输入可使用的候选续写推理批次数，范围为 1 到 32，默认值为 1。
 共同上文的推理不计入此额度；长度为 1 个 token 的候选只读取共同上文结果，也不计入额度。
@@ -45,6 +49,7 @@ llama.cpp CUDA 13.3 runtime；CUDA DLL、驱动或设备初始化失败时，服
  runtime。选择 `cpu` 时不会尝试 CUDA。
 
 Rust 服务将配置持久化到用户数据目录的 `config.json`，格式为 `{ "version": 1, "config": { ... } }`，写入采用临时文件后原子替换。未知版本或非法配置回退到默认值，不覆盖现有文件。
+旧版 `config.json` 缺少 `llm_ignore_emoji` 时按默认值 `true` 读取。
 
 ## 数据分层
 

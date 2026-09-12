@@ -8,16 +8,17 @@
 2. 平台按需请求 Rime 候选前缀；首个请求至少覆盖当前显示页，启用模型时至少覆盖前 `llm_rerank_count` 个候选。翻页超出已读取范围后，再请求更长的前缀，不预先遍历完整候选列表；这类扩展请求只追加 Rime 候选，不重新调用 LLM。
 3. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
 4. ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 完全相等时才进入 LLM；其他英文候选保留在 Rime 原始顺序中，但不参与评分。
-5. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
-6. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
-7. 使用 llama.cpp backend sampler 在 GPU 上完成 softmax、目标 token gather 和 logprob 计算；主机只读取目标 token 的紧凑结果，不回传完整 vocabulary logits。运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
-8. 边界不匹配候选将 `tokenize(candidate_text)` 得到的 token 逐个追加到上文，并与正常候选共用
+5. 开启 `llm_ignore_emoji` 时，包含 Emoji code point 的候选也不进入 LLM；混合中文和 Emoji 的候选同样排除，但仍保留在 Rime 原始顺序中。
+6. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
+7. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
+8. 使用 llama.cpp backend sampler 在 GPU 上完成 softmax、目标 token gather 和 logprob 计算；主机只读取目标 token 的紧凑结果，不回传完整 vocabulary logits。运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
+9. 边界不匹配候选将 `tokenize(candidate_text)` 得到的 token 逐个追加到上文，并与正常候选共用
    候选批量 decode 路径计算 logprob；边界不匹配只保留为诊断标记，不再改变评分路径。
-9. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
+10. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
 
 拼音用于 Rime 召回，不直接写入 LLM prompt。
 
-## 三个候选设置
+## 候选设置
 
 | 设置 | 默认 | 作用 |
 |---|---:|---|
@@ -26,16 +27,18 @@
 | `llm_effective_count` | 3 | 从完整候选的 LLM 排序中置顶采纳的候选数量 |
 | `llm_context_token_limit` | 1024 | 单次 llama.cpp 请求允许的总 token 行数 |
 | `llm_inference_count_limit` | 1 | 每次输入允许的候选续写推理批次数；共同上文和单 token 候选不计入 |
+| `llm_ignore_emoji` | true | 是否从 LLM 重排候选池排除包含 Emoji code point 的候选 |
 
 最终顺序：
 
 ```text
 complete_pool = candidates_whose_preview_consumes_all_input(first_N_rime_candidates)
 llm_pool = complete_pool - english_candidates_unless_commit_equals_preedit
+llm_pool = llm_pool - emoji_candidates_when_llm_ignore_emoji
 final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
 ```
 
-未完整消费输入的候选以及被英文策略排除的候选不会被 LLM 提升，但仍保留在最终候选列表中。英文放行条件是原始字符串的严格相等比较，不忽略大小写、空格或连字符。其余候选严格保持 Rime 原始顺序。重复、越界或无法解析的索引丢弃；完整候选或有效结果少于 K 时不补造候选。
+未完整消费输入、被英文策略排除或被 Emoji 设置排除的候选不会被 LLM 提升，但仍保留在最终候选列表中；排除候选不会触发其他候选补位。英文放行条件是原始字符串的严格相等比较，不忽略大小写、空格或连字符。Emoji 判断按提交文本中的 code point 进行，因此混合中文和 Emoji 的候选也会被排除。其余候选严格保持 Rime 原始顺序。重复、越界或无法解析的索引丢弃；完整候选或有效结果少于 K 时不补造候选。
 
 ## 时序与降级
 
@@ -54,6 +57,7 @@ final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
   使用一个 zero-based sequence；候选数超过该容量时拆分为多个外层 batch。修改上下文、后端或
   重排候选检查范围后，需要下一次受控模型重载才能更新 native context 参数。
 - 平台层先按字符裁剪，Rust/llama.cpp 再按 token 后缀截断。
+- `llm_ignore_emoji` 默认开启；它只改变送入 LLM 的候选池，不影响 llama.cpp native 参数，因此切换后不需要重新加载模型。
 
 ## 候选批量推理
 
