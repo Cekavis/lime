@@ -100,10 +100,9 @@ graph 建立包含额外 warmup 成本，不能与稳态请求直接比较。
 管理接口的 `CandidateDiagnostic` 同时保留 Rime 原始顺序、LLM 排序顺序、最终展示顺序、聚合/逐 token logprob 和边界 mismatch 标记。诊断只由测试页和历史详情页主动读取，不进入原生候选窗口。
 
 历史记录在实际执行 LLM scorer 时额外保存 `LlmPerformance`：`total_ms` 是 scorer 的总 wall time，
-并保留 tokenization、native decode 和紧凑 Logprob 结果读取阶段，同时记录送入候选数、目标 token 数、
-解码批次、边界不匹配数、上下文 token 数、decode 输入行数和紧凑 Logprob 结果行数。`decode_ms` 统计 native
-decode 调用；兼容字段 `logits_ms` 只统计 decode 返回后的同步和结果读取，不包含 `decode_ms`。没有进入 scorer
-的请求不写入该快照。
+并保留 tokenization、native decode 阶段以及送入候选数、目标 token 数、解码批次、边界不匹配数、
+上下文 token 数、decode 输入行数和紧凑 Logprob 结果行数。`decode_ms` 统计 native decode 调用；没有进入
+scorer 的请求不写入该快照。
 
 ## 模型
 

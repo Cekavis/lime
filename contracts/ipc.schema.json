@@ -234,7 +234,6 @@
         "total_ms",
         "tokenize_ms",
         "decode_ms",
-        "logits_ms",
         "candidate_count",
         "scored_count",
         "target_token_count",
@@ -254,10 +253,6 @@
           "minimum": 0
         },
         "decode_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "logits_ms": {
           "type": "integer",
           "minimum": 0
         },

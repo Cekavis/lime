@@ -58,7 +58,6 @@ interface LlmPerformance {
   totalMs: number;
   tokenizeMs: number;
   decodeMs: number;
-  logprobMs: number;
   rimeMs: number | null;
   candidateCount: number;
   scoredCount: number;
@@ -384,7 +383,6 @@ function normalizeLlmPerformance(value: unknown): LlmPerformance | null {
     totalMs: Math.max(0, totalMs),
     tokenizeMs: Math.max(0, asNumber(firstValue(record, ["tokenize_ms", "tokenizeMs"])) ?? 0),
     decodeMs: Math.max(0, asNumber(firstValue(record, ["decode_ms", "decodeMs"])) ?? 0),
-    logprobMs: Math.max(0, asNumber(firstValue(record, ["logprob_ms", "logprobMs", "logits_ms", "logitsMs"])) ?? 0),
     rimeMs: (() => {
       const value = asNumber(firstValue(record, ["rime_duration_ms", "rimeDurationMs", "rime_ms", "rimeMs"]));
       return value == null ? null : Math.max(0, value);
@@ -907,7 +905,6 @@ function llmPerformanceSummary(performance: LlmPerformance | null, rimeMs: numbe
     row("端到端用时", formatMilliseconds(endToEndMs)),
     row("Rime 用时", formatMilliseconds(effectiveRimeMs)),
     row("推理用时", formatMilliseconds(performance?.decodeMs)),
-    row("Logprob 计算用时", formatMilliseconds(performance?.logprobMs)),
     row("送入候选", performance ? String(performance.candidateCount) + " 个" : "—"),
     row("返回得分", performance ? String(performance.scoredCount) + " 个" : "—"),
     row("目标 Token", performance ? String(performance.targetTokenCount) : "—"),

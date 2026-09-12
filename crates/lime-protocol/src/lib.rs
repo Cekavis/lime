@@ -131,7 +131,6 @@ mod tests {
             total_ms: 17,
             tokenize_ms: 2,
             decode_ms: 11,
-            logits_ms: 3,
             candidate_count: 4,
             scored_count: 4,
             target_token_count: 9,
@@ -144,6 +143,7 @@ mod tests {
             omitted_candidate_count: 0,
         };
         let json = serde_json::to_string(&performance).expect("serialize performance");
+        assert!(!json.contains("logits_ms"));
         let decoded: LlmPerformance = serde_json::from_str(&json).expect("deserialize performance");
         assert_eq!(decoded, performance);
     }

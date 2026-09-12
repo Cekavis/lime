@@ -79,7 +79,6 @@ pub(crate) struct ScoredCandidates {
 struct ScoringTimings {
     tokenize: Duration,
     decode: Duration,
-    logprob: Duration,
     batch_count: u32,
     decode_input_tokens: usize,
     logits_output_count: usize,
@@ -95,10 +94,6 @@ impl ScoringTimings {
 
     fn add_decode(&mut self, started: Instant) {
         self.decode += started.elapsed();
-    }
-
-    fn add_logprob(&mut self, started: Instant) {
-        self.logprob += started.elapsed();
     }
 
     fn add_decode_workload(&mut self, input_tokens: usize, output_count: usize) {
@@ -1082,7 +1077,6 @@ impl LlamaRuntime {
                 total_ms: duration_ms(total_started.elapsed()),
                 tokenize_ms: duration_ms(timings.tokenize),
                 decode_ms: duration_ms(timings.decode),
-                logits_ms: duration_ms(timings.logprob),
                 candidate_count: candidates.len().min(u32::MAX as usize) as u32,
                 scored_count,
                 target_token_count: target_token_count.min(u32::MAX as usize) as u32,
@@ -1292,7 +1286,6 @@ fn score_attention_tree_batch(
         .decode(&base_batch)
         .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
     timings.add_decode(decode_started);
-    let logprob_started = Instant::now();
     unsafe { (backend.lib.symbols.llama_synchronize)(context.handle) };
 
     let base_state = unsafe { &*gpu_samplers.states[0] };
@@ -1342,8 +1335,6 @@ fn score_attention_tree_batch(
             }
         }
     }
-    timings.add_logprob(logprob_started);
-
     if let Some((candidate_index, (lp, tokens))) = token_logprobs
         .iter()
         .zip(candidates)
@@ -1483,15 +1474,12 @@ fn score_recurrent_batch(
         .decode(&base_batch)
         .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
     timings.add_decode(decode_started);
-    let logprob_started = Instant::now();
     unsafe { (backend.lib.symbols.llama_synchronize)(context.handle) };
     let base_state = unsafe { &*gpu_samplers.states[0] };
     let base_values = read_gpu_sampler_row(base_state, 0)?;
     for (candidate_index, value) in base_values.into_iter().enumerate() {
         token_logprobs[candidate_index].push(value);
     }
-    timings.add_logprob(logprob_started);
-
     // Submit all candidate continuation prefixes in one logical batch. Padding keeps the
     // recurrent sequences equal-length inside llama.cpp; only real candidate positions request
     // sampler output.
@@ -1541,7 +1529,6 @@ fn score_recurrent_batch(
             .decode(&continuation_batch)
             .map_err(|error| format!("llama.cpp decode failed: {error}"))?;
         timings.add_decode(decode_started);
-        let logprob_started = Instant::now();
         unsafe { (backend.lib.symbols.llama_synchronize)(context.handle) };
         let mut row_offsets = vec![0_usize; candidates.len()];
         for candidate_index in output_candidates {
@@ -1551,7 +1538,6 @@ fn score_recurrent_batch(
             let values = read_gpu_sampler_row(state, row_index)?;
             token_logprobs[candidate_index].push(values[0]);
         }
-        timings.add_logprob(logprob_started);
     }
     if let Some((candidate_index, (lp, tokens))) = token_logprobs
         .iter()
@@ -2143,10 +2129,9 @@ mod tests {
                 .score_candidates_with_performance("我", &candidates)
                 .unwrap();
             println!(
-                "RAGGED performance[{iteration}]: total_ms={}, decode_ms={}, logits_ms={}, target_tokens={}, decode_rows={}, batches={}",
+                "RAGGED performance[{iteration}]: total_ms={}, decode_ms={}, target_tokens={}, decode_rows={}, batches={}",
                 current.performance.total_ms,
                 current.performance.decode_ms,
-                current.performance.logits_ms,
                 current.performance.target_token_count,
                 current.performance.logits_output_count,
                 current.performance.batch_count,

@@ -180,13 +180,7 @@ pub struct LlmPerformance {
     /// Time spent tokenizing the context and candidate strings, in milliseconds.
     pub tokenize_ms: u64,
     /// Time spent in native llama.cpp inference decode calls, in milliseconds.
-    /// This is measured separately from `logits_ms`.
     pub decode_ms: u64,
-    /// Time spent synchronizing and reading the compact post-inference log-probability results,
-    /// in milliseconds.
-    /// This field reports synchronization and compact result-read time; it does not include
-    /// `decode_ms`.
-    pub logits_ms: u64,
     /// Number of candidates passed to the scorer after all filters.
     pub candidate_count: u32,
     /// Number of candidates for which a score was returned.
