@@ -5,7 +5,7 @@
 生产实现位于 `crates/lime-core`，由 `RimeEngine` 和 `LlamaRuntime` 负责候选召回、tokenizer 边界检查和批量 logprob 计算：
 
 1. Rime/雾凇拼音根据 `preedit` 召回候选。
-2. 平台按需请求 Rime 候选前缀；首个请求至少覆盖当前显示页，启用模型时至少覆盖前 `llm_rerank_count` 个候选。翻页超出已读取范围后，再请求更长的前缀，不预先遍历完整候选列表；这类扩展请求只追加 Rime 候选，不重新调用 LLM。
+2. 平台按需请求候选页面前缀；服务在模型启用时可额外读取前 `llm_rerank_count` 个 Rime 候选完成排序，但响应只返回请求的前缀。翻页超出已读取范围后，再请求更长的前缀，不预先遍历完整候选列表；这类扩展请求只追加 Rime 候选、不重新调用 LLM，并保持已返回的最终排序前缀。
 3. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
 4. ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 完全相等时才进入 LLM；其他英文候选保留在 Rime 原始顺序中，但不参与评分。
 5. 开启 `llm_ignore_emoji` 时，包含 Emoji code point 的候选也不进入 LLM；混合中文和 Emoji 的候选同样排除，但仍保留在 Rime 原始顺序中。

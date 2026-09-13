@@ -11,7 +11,7 @@ mod history;
 mod models;
 mod persistence;
 use lime_protocol::{
-    CandidateDiagnostic, ConfigSnapshot, DictionaryPage, ErrorCode, InputHistoryEntry,
+    Candidate, CandidateDiagnostic, ConfigSnapshot, DictionaryPage, ErrorCode, InputHistoryEntry,
     InputRequest, InputResponse, LlmPerformance, ModelInfo, ModelMemoryInfo, ModelPreset, Request,
     Response, ServiceState, ServiceStatus, DICTIONARY_PAGE_SIZE,
 };
@@ -38,6 +38,52 @@ fn backend_preference_for(value: &str) -> BackendPreference {
     }
 }
 
+fn visible_candidate_count(candidate_count: usize, requested_limit: u32) -> usize {
+    if requested_limit == 0 {
+        candidate_count
+    } else {
+        candidate_count.min(requested_limit as usize)
+    }
+}
+
+fn merge_cached_candidate_order(
+    cached: &CandidateCacheEntry,
+    candidates: &[Candidate],
+    candidate_remainders: &[Option<String>],
+) -> (Vec<Candidate>, Vec<Option<String>>) {
+    let mut used = vec![false; candidates.len()];
+    let mut ordered = Vec::with_capacity(candidates.len());
+    let mut ordered_remainders = Vec::with_capacity(candidates.len());
+    for (cached_index, cached_candidate) in cached.candidates.iter().enumerate() {
+        let Some(index) = candidates
+            .iter()
+            .enumerate()
+            .find(|(index, candidate)| !used[*index] && *candidate == cached_candidate)
+            .map(|(index, _)| index)
+        else {
+            continue;
+        };
+        used[index] = true;
+        ordered.push(candidates[index].clone());
+        let remainder = match candidate_remainders.get(index) {
+            Some(value @ Some(_)) => value.clone(),
+            Some(None) | None => cached
+                .candidate_remainders
+                .get(cached_index)
+                .cloned()
+                .unwrap_or(None),
+        };
+        ordered_remainders.push(remainder);
+    }
+    for (index, candidate) in candidates.iter().enumerate() {
+        if !used[index] {
+            ordered.push(candidate.clone());
+            ordered_remainders.push(candidate_remainders.get(index).cloned().unwrap_or(None));
+        }
+    }
+    (ordered, ordered_remainders)
+}
+
 #[derive(Clone)]
 pub struct CoreService {
     config: Arc<Mutex<ConfigStore>>,
@@ -48,6 +94,9 @@ pub struct CoreService {
     data_dir: Option<PathBuf>,
     logger: Arc<PrivacyLogger>,
     history: Arc<Mutex<Vec<InputHistoryEntry>>>,
+    /// Full final ordering for active candidate windows. Extensions use this to keep the
+    /// already-visible pages stable while appending newly loaded Rime rows.
+    candidate_cache: Arc<Mutex<BTreeMap<u64, CandidateCacheEntry>>>,
     history_clock: Arc<AtomicU64>,
     history_revision: Arc<(Mutex<u64>, Condvar)>,
     model_presets: Arc<Mutex<BTreeMap<String, ModelPreset>>>,
@@ -67,6 +116,14 @@ struct InputHistoryRecord<'a> {
     rime_duration_ms: Option<u64>,
     llm_performance: Option<LlmPerformance>,
     end_to_end_duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct CandidateCacheEntry {
+    preedit: String,
+    preceding_text: String,
+    candidates: Vec<Candidate>,
+    candidate_remainders: Vec<Option<String>>,
 }
 
 impl Default for CoreService {
@@ -177,6 +234,7 @@ impl CoreService {
             data_dir: data_dir.clone(),
             logger,
             history: Arc::new(Mutex::new(Vec::new())),
+            candidate_cache: Arc::new(Mutex::new(BTreeMap::new())),
             history_clock: Arc::new(AtomicU64::new(now_unix_ms())),
             history_revision: Arc::new((Mutex::new(0), Condvar::new())),
             model_presets: Arc::new(Mutex::new(model_presets)),
@@ -343,6 +401,10 @@ impl CoreService {
             }
             Request::ClearInputHistory => {
                 self.history.lock().expect("history mutex poisoned").clear();
+                self.candidate_cache
+                    .lock()
+                    .expect("candidate cache mutex poisoned")
+                    .clear();
                 self.bump_history_revision();
                 Response::Accepted
             }
@@ -380,6 +442,8 @@ impl CoreService {
         };
         let model_name = model_display_name(runtime);
         let rerank_count = runtime.map_or(0, |_| config.llm_rerank_count as usize);
+        // Rime must provide enough rows for the configured reranker, while the response is
+        // clipped to the client's requested prefix below.
         let candidate_limit = if request.candidate_limit == 0 {
             0
         } else {
@@ -422,16 +486,47 @@ impl CoreService {
             candidate_remainders: rime_candidate_remainders,
         } = rime_batch;
         if let Some(original_request_id) = request.candidate_extension_of {
-            let candidates = rime_candidates;
-            let candidate_remainders = rime_candidate_remainders;
-            self.append_candidate_history(original_request_id, &request, &candidates);
+            self.append_candidate_history(original_request_id, &request, &rime_candidates);
             if !self.generation.is_current(generation) {
                 return Err(ErrorCode::RequestCancelled);
             }
+            let cached = self
+                .candidate_cache
+                .lock()
+                .expect("candidate cache mutex poisoned")
+                .get(&original_request_id)
+                .filter(|entry| {
+                    entry.preedit == request.preedit
+                        && entry.preceding_text == request.preceding_text
+                })
+                .cloned();
+            let (ordered_candidates, ordered_remainders) = cached
+                .as_ref()
+                .map(|entry| {
+                    merge_cached_candidate_order(
+                        entry,
+                        &rime_candidates,
+                        &rime_candidate_remainders,
+                    )
+                })
+                .unwrap_or_else(|| (rime_candidates.clone(), rime_candidate_remainders.clone()));
+            if cached.is_some() {
+                if let Some(entry) = self
+                    .candidate_cache
+                    .lock()
+                    .expect("candidate cache mutex poisoned")
+                    .get_mut(&original_request_id)
+                {
+                    entry.candidates = ordered_candidates.clone();
+                    entry.candidate_remainders = ordered_remainders.clone();
+                }
+            }
+            let visible_count =
+                visible_candidate_count(ordered_candidates.len(), request.candidate_limit);
             return Ok(InputResponse {
                 request_id: request.request_id,
-                candidates,
-                candidate_remainders,
+                candidates: ordered_candidates[..visible_count].to_vec(),
+                candidate_remainders: ordered_remainders[..visible_count].to_vec(),
                 context_used: request.context_available && !request.preceding_text.is_empty(),
                 service_state,
                 diagnostics: Vec::new(),
@@ -466,8 +561,8 @@ impl CoreService {
             }
         };
         let llm_performance = ranking.llm_performance.clone();
-        let candidates = ranking.result.candidates;
-        let candidate_remainders = ranking
+        let final_candidates = ranking.result.candidates;
+        let final_candidate_remainders = ranking
             .candidate_indices
             .iter()
             .map(|index| {
@@ -477,13 +572,25 @@ impl CoreService {
                     .unwrap_or(None)
             })
             .collect::<Vec<_>>();
-        let diagnostics = ranking.result.diagnostics;
+        let all_diagnostics = ranking.result.diagnostics;
+        self.candidate_cache
+            .lock()
+            .expect("candidate cache mutex poisoned")
+            .insert(
+                request.request_id,
+                CandidateCacheEntry {
+                    preedit: request.preedit.clone(),
+                    preceding_text: request.preceding_text.clone(),
+                    candidates: final_candidates.clone(),
+                    candidate_remainders: final_candidate_remainders.clone(),
+                },
+            );
         let end_to_end_duration_ms = Some(elapsed_ms(input_started.elapsed()));
         self.record_input_history(InputHistoryRecord {
             request: &request,
             rime_candidates,
-            final_candidates: candidates.clone(),
-            diagnostics: diagnostics.clone(),
+            final_candidates: final_candidates.clone(),
+            diagnostics: all_diagnostics.clone(),
             service_state,
             model_name,
             rime_duration_ms,
@@ -493,13 +600,15 @@ impl CoreService {
         if !self.generation.is_current(generation) {
             return Err(ErrorCode::RequestCancelled);
         }
+        let visible_count =
+            visible_candidate_count(final_candidates.len(), request.candidate_limit);
         Ok(InputResponse {
             request_id: request.request_id,
-            candidates,
-            candidate_remainders,
+            candidates: final_candidates[..visible_count].to_vec(),
+            candidate_remainders: final_candidate_remainders[..visible_count].to_vec(),
             context_used: request.context_available && !request.preceding_text.is_empty(),
             service_state,
-            diagnostics,
+            diagnostics: all_diagnostics,
             end_to_end_duration_ms,
             rime_duration_ms,
             llm_performance,

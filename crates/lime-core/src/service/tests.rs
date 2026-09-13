@@ -3,6 +3,42 @@ use super::*;
 use lime_protocol::Config;
 
 #[test]
+fn requested_candidate_limit_only_controls_visible_prefix() {
+    assert_eq!(visible_candidate_count(32, 9), 9);
+    assert_eq!(visible_candidate_count(5, 9), 5);
+    assert_eq!(visible_candidate_count(36, 36), 36);
+    assert_eq!(visible_candidate_count(32, 0), 32);
+}
+
+#[test]
+fn candidate_extension_reuses_cached_final_order_and_remainders() {
+    let candidate = |text: &str| lime_protocol::Candidate {
+        display_text: text.into(),
+        commit_text: text.into(),
+    };
+    let raw = vec![candidate("甲"), candidate("乙"), candidate("丙")];
+    let cached = CandidateCacheEntry {
+        preedit: "jia".into(),
+        preceding_text: String::new(),
+        candidates: vec![candidate("丙"), candidate("甲")],
+        candidate_remainders: vec![Some("cached".into()), Some("cached".into())],
+    };
+    let (ordered, remainders) =
+        merge_cached_candidate_order(&cached, &raw, &[Some("a".into()), Some("b".into()), None]);
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|candidate| candidate.commit_text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["丙", "甲", "乙"]
+    );
+    assert_eq!(
+        remainders,
+        vec![Some("cached".into()), Some("a".into()), Some("b".into())]
+    );
+}
+
+#[test]
 fn service_without_packaged_rime_is_unavailable() {
     let service = CoreService::default();
     match service.handle(Request::GetStatus) {
@@ -690,6 +726,63 @@ fn native_input_returns_candidate_remainders() {
     assert_eq!(
         history.items[0].final_candidates.len(),
         extension_response.candidates.len()
+    );
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn native_input_candidate_limit_bounds_response_and_extension_prefix() {
+    let Ok(rime_dir) = std::env::var("LIME_TEST_RIME_DIR") else {
+        return;
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "lime-core-candidate-limit-service-test-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    let service =
+        CoreService::new_with_rime_dir(Some(directory.clone()), Some(PathBuf::from(rime_dir)));
+    let revision = service.config_snapshot().revision;
+    let first = match service.handle(Request::Input(InputRequest {
+        request_id: 200,
+        preedit: "nihao".into(),
+        preceding_text: String::new(),
+        context_available: false,
+        config_revision: revision,
+        candidate_extension_of: None,
+        candidate_limit: 9,
+    })) {
+        Response::Input(response) => response,
+        other => panic!("unexpected input response: {other:?}"),
+    };
+    assert!(first.candidates.len() <= 9);
+    assert_eq!(first.candidates.len(), first.candidate_remainders.len());
+
+    let extension = match service.handle(Request::Input(InputRequest {
+        request_id: 201,
+        preedit: "nihao".into(),
+        preceding_text: String::new(),
+        context_available: false,
+        config_revision: revision,
+        candidate_extension_of: Some(200),
+        candidate_limit: 36,
+    })) {
+        Response::Input(response) => response,
+        other => panic!("unexpected candidate extension response: {other:?}"),
+    };
+    assert!(extension.candidates.len() <= 36);
+    assert_eq!(
+        extension.candidates.len(),
+        extension.candidate_remainders.len()
+    );
+    assert!(extension.candidates.len() >= first.candidates.len());
+    assert_eq!(
+        extension.candidates[..first.candidates.len()],
+        first.candidates[..]
+    );
+    assert_eq!(
+        extension.candidate_remainders[..first.candidate_remainders.len()],
+        first.candidate_remainders[..]
     );
     let _ = fs::remove_dir_all(directory);
 }

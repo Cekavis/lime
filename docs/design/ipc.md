@@ -30,10 +30,12 @@ InputRequest {
 - `context_available=false` 表示读取失败；服务仍按空上下文运行。
 - `config_revision` 用于丢弃旧设置请求，不用于跨版本兼容。
 - `candidate_extension_of` 仅用于候选窗口翻页超出已加载范围时的延迟 Rime 扩展，值为原始输入请求的
-  `request_id`。服务对此类请求只加载 Rime 候选，不调用 LLM、不创建新的历史记录；成功加载的候选会追加到原历史记录。
-- `candidate_limit` 表示客户端本次需要的候选前缀长度；零表示显式请求完整列表。测试页按当前页请求，
-  Windows TSF 首次也按当前页请求；服务在模型启用时自动将其提升到 `llm_rerank_count`，翻页超出
-  已加载范围后再请求更长前缀。
+  `request_id`。服务对此类请求只加载 Rime 候选，不调用 LLM、不创建新的历史记录；成功加载的候选会追加到原历史记录，
+  已返回的最终排序前缀保持不变。
+- `candidate_limit` 表示客户端本次需要返回的候选前缀长度；零表示显式请求完整列表。测试页按当前页请求，
+  Windows TSF 首次也按当前页请求。服务可在内部读取并重排更多候选，但 `candidates` 和
+  `candidate_remainders` 只返回请求的前缀；管理用 `diagnostics` 可保留完整的内部重排行。
+  翻页超出已加载范围后再请求更长前缀。
 
 ## 响应
 

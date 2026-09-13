@@ -147,8 +147,10 @@ impl RimeEngine {
             .process_key(keycode, mask)
     }
 
-    /// Returns a bounded Rime candidate prefix plus the complete-input subset of the first
-    /// `rerank_count` rows. A zero `candidate_limit` keeps the direct engine API unbounded.
+    /// Returns a Rime candidate prefix plus the complete-input subset of the first
+    /// `rerank_count` rows. When both limits are nonzero, the engine may return up to the larger
+    /// limit so the service can rank enough rows before clipping the public response. A zero
+    /// `candidate_limit` keeps the direct engine API unbounded.
     /// librime determines coverage through its commit preview, so the result also works for
     /// double-pinyin schemas, emoji conversions, and other candidates whose displayed character
     /// count does not match the number of pinyin syllables.

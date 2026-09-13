@@ -56,12 +56,12 @@ pub struct InputRequest {
     /// create a new history entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_extension_of: Option<u64>,
-    /// Number of leading candidates requested by the client.
+    /// Number of leading candidates to return to the client.
     ///
-    /// Zero requests the full list for protocol clients that explicitly need it. The management
-    /// test page requests the current page, while Windows TSF sends the end of the page it needs
-    /// so the service can read more candidates lazily when the user pages past the initial rerank
-    /// window.
+    /// Zero requests the full list for protocol clients that explicitly need it. The service may
+    /// read and rerank more candidates internally, but the public `candidates` and
+    /// `candidate_remainders` arrays contain only this prefix. Clients request a longer prefix
+    /// through a candidate extension when paging.
     #[serde(default)]
     pub candidate_limit: u32,
 }
@@ -96,7 +96,9 @@ pub struct InputResponse {
     pub candidate_remainders: Vec<Option<String>>,
     pub context_used: bool,
     pub service_state: ServiceState,
-    /// One row per candidate used by the management/test diagnostics table.
+    /// One row per candidate used by the management/test diagnostics table. A bounded input
+    /// response may contain more diagnostic rows than public `candidates` because the service
+    /// can rerank an internal prefix before returning the requested page.
     pub diagnostics: Vec<CandidateDiagnostic>,
     /// Wall-clock time spent handling this request, for management diagnostics.
     #[serde(skip_serializing_if = "Option::is_none")]
