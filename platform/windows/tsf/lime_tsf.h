@@ -87,8 +87,9 @@ class TextService final : public ITfTextInputProcessorEx,
   bool IsPrintable(WPARAM key) const;
   bool IsPreeditKey(WPARAM key) const;
   bool IsChinesePunctuationKey(WPARAM key) const;
+  bool IsDigitKey(WPARAM key) const;
   std::wstring AsciiText(WPARAM key) const;
-  std::wstring ChinesePunctuationText(WPARAM key);
+  std::wstring ChinesePunctuationText(WPARAM key, bool previous_digit = false);
   wchar_t PreeditChar(WPARAM key) const;
   bool FetchCandidates(ITfContext* context, const std::wstring& preedit,
                        std::vector<Candidate>& candidates, std::wstring& preceding,
@@ -196,6 +197,12 @@ class TextService final : public ITfTextInputProcessorEx,
   ULONGLONG left_shift_down_tick_ = 0;
   ULONGLONG right_shift_down_tick_ = 0;
   bool ascii_mode_ = false;
+  // Chinese punctuation keeps one bit of keyboard history: an unmodified
+  // digit that was just passed through to the host makes the next period
+  // half-width, matching Weasel/Rime's numeric punctuation behavior.  This
+  // is deliberately independent of the host context text.
+  bool last_chinese_input_was_digit_ = false;
+  bool space_keyup_pending_ = false;
   bool single_quote_open_ = false;
   bool double_quote_open_ = false;
 };

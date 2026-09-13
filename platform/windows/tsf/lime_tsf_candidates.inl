@@ -61,11 +61,27 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
     return false;
   }
 
+  // Rime's numeric punctuation rule depends on the immediately preceding
+  // key event, rather than the text before the caret.  Remember only an
+  // unmodified digit that is going to the host; candidate-number shortcuts
+  // are consumed by Lime and therefore clear the flag.  Every other key
+  // clears it, while a period keeps it alive until punctuation conversion
+  // below has observed the value.
+  const bool period_key = !HasNonTextModifier() && AsciiText(key) == L".";
+  const bool period_after_digit = period_key && last_chinese_input_was_digit_;
+  if (period_key) last_chinese_input_was_digit_ = false;
+  if (IsDigitKey(key) && candidates_.empty()) {
+    last_chinese_input_was_digit_ = true;
+  } else if (!period_key) {
+    last_chinese_input_was_digit_ = false;
+  }
+
   // Esc must remain a local cancellation even while a schema reset is waiting
   // on a rejected edit lock; otherwise the host could receive it with a live
   // composition still attached.
   if (schema_reset_pending_ && key != VK_ESCAPE &&
       !ResetCompositionForSchemaChange(context)) {
+    if (period_key) last_chinese_input_was_digit_ = false;
     return false;
   }
   if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && key == VK_SPACE) {
@@ -261,10 +277,17 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
     // re-check the service state before claiming the key.  This closes the
     // small window where the process went unavailable after the last letter.
     RefreshConfigRevision(context);
-    if (!connected_) return false;
+    if (!connected_) {
+      if (period_key) last_chinese_input_was_digit_ = false;
+      return false;
+    }
     const bool previous_single_quote = single_quote_open_;
     const bool previous_double_quote = double_quote_open_;
-    const std::wstring punctuation = ChinesePunctuationText(key);
+    const std::wstring punctuation =
+        ChinesePunctuationText(key, period_after_digit);
+    // The numeric-period exception applies to one punctuation event only,
+    // including when the edit later fails or the service becomes unavailable.
+    last_chinese_input_was_digit_ = false;
     if (punctuation.empty()) return false;
 
     std::wstring pinyin;

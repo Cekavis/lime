@@ -204,6 +204,8 @@ HRESULT TextService::Deactivate() {
   left_shift_down_tick_ = 0;
   right_shift_down_tick_ = 0;
   ascii_mode_ = false;
+  last_chinese_input_was_digit_ = false;
+  space_keyup_pending_ = false;
   single_quote_open_ = false;
   double_quote_open_ = false;
   if (keystroke_manager_ && client_id_ != TF_CLIENTID_NULL) keystroke_manager_->UnadviseKeyEventSink(client_id_);
@@ -218,6 +220,8 @@ HRESULT TextService::OnSetFocus(BOOL foreground) {
   shift_pending_mask_ = 0;
   left_shift_down_tick_ = 0;
   right_shift_down_tick_ = 0;
+  last_chinese_input_was_digit_ = false;
+  space_keyup_pending_ = false;
   // Punctuation pairing belongs to the focused document.  Do not carry an
   // opening quote from one application/window into the next one.
   single_quote_open_ = false;

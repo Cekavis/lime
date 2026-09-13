@@ -32,12 +32,16 @@ std::wstring TextService::AsciiText(WPARAM key) const {
   const wchar_t value = AsciiCharForVirtualKey(key, shift, caps_lock, num_lock);
   return value ? std::wstring(1, value) : std::wstring();
 }
+bool TextService::IsDigitKey(WPARAM key) const {
+  const std::wstring text = AsciiText(key);
+  return text.size() == 1 && text.front() >= L'0' && text.front() <= L'9';
+}
 bool TextService::IsChinesePunctuationKey(WPARAM key) const {
   if (HasNonTextModifier()) return false;
   const std::wstring text = AsciiText(key);
   return text.size() == 1 && IsPunctuationCharacter(text.front());
 }
-std::wstring TextService::ChinesePunctuationText(WPARAM key) {
+std::wstring TextService::ChinesePunctuationText(WPARAM key, bool previous_digit) {
   const std::wstring ascii = AsciiText(key);
   if (ascii.size() != 1 || !IsPunctuationCharacter(ascii.front())) return {};
   const wchar_t value = ascii.front();
@@ -51,7 +55,9 @@ std::wstring TextService::ChinesePunctuationText(WPARAM key) {
     double_quote_open_ = !double_quote_open_;
     return std::wstring(1, quote);
   }
-  const std::wstring_view mapped = HalfShapeForAscii(value);
+  const std::wstring_view mapped =
+      HalfShapeForAsciiAfterDigit(value, previous_digit ||
+                                           last_chinese_input_was_digit_);
   return mapped.empty() ? std::wstring() : std::wstring(mapped);
 }
 bool TextService::IsImeKey(WPARAM key) const {
@@ -216,7 +222,14 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
                                BOOL* eaten) {
   if (!eaten) return E_POINTER;
   try {
+    // Clear the one-key numeric punctuation history as soon as an actual
+    // non-period key arrives, even when a pending TSF edit causes the handler
+    // to return before HandleKey can inspect it.  Digits are re-established by
+    // HandleKey only after they are confirmed to be host-bound text.
+    const bool period_key = !HasNonTextModifier() && AsciiText(key) == L".";
+    if (!period_key && !IsShiftKey(key)) last_chinese_input_was_digit_ = false;
     if (IsShiftKey(key)) {
+      last_chinese_input_was_digit_ = false;
       const uint8_t bit = ShiftKeyBit(key, lparam);
       if (bit == kRightShiftBit) {
         shift_down_mask_ |= kRightShiftBit;
@@ -270,14 +283,17 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
     // Win themselves.  This preserves host shortcut handling.
     shift_pending_mask_ = 0;
     if (cancel_pending_ && !ResolvePendingCancellation()) {
+      if (period_key) last_chinese_input_was_digit_ = false;
       *eaten = TRUE;
       return S_OK;
     }
     if (terminal_edit_pending_ && key != VK_ESCAPE) {
+      if (period_key) last_chinese_input_was_digit_ = false;
       *eaten = TRUE;
       return S_OK;
     }
     if (partial_edit_pending_ && key != VK_ESCAPE) {
+      if (period_key) last_chinese_input_was_digit_ = false;
       *eaten = TRUE;
       return S_OK;
     }

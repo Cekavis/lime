@@ -186,11 +186,25 @@ constexpr std::wstring_view HalfShapeForAscii(wchar_t value) {
   }
 }
 
+// Rime's punctuator keeps a just-entered numeric token in half-width form
+// when the user types a period immediately afterwards.  The TSF adapter
+// tracks that one-key history separately from the document's preceding text,
+// so editors that do not expose a readable context still get the same result.
+constexpr std::wstring_view HalfShapeForAsciiAfterDigit(wchar_t value,
+                                                         bool previous_digit) {
+  if (previous_digit && value == L'.') return L".";
+  return HalfShapeForAscii(value);
+}
+
 bool IsPunctuationCharacter(wchar_t value) {
   return value == L' ' || (value >= L'!' && value <= L'/') ||
          (value >= L':' && value <= L'@') ||
          (value >= L'[' && value <= L'`') ||
          (value >= L'{' && value <= L'~');
+}
+
+constexpr bool ShouldConsumeSpaceKeyUp(WPARAM key, bool pending) {
+  return pending && key == VK_SPACE;
 }
 
 static_assert(AsciiCharForVirtualKey('A', false, false) == L'a');
@@ -222,6 +236,13 @@ static_assert(HalfShapeForAscii(L'`') == std::wstring_view(L"·"));
 static_assert(HalfShapeForAscii(L'$') == std::wstring_view(L"\u00A5"));
 static_assert(HalfShapeForAscii(L'[') == std::wstring_view(L"【"));
 static_assert(HalfShapeForAscii(L'^') == std::wstring_view(L"……"));
+static_assert(HalfShapeForAsciiAfterDigit(L'.', true) ==
+              std::wstring_view(L"."));
+static_assert(HalfShapeForAsciiAfterDigit(L'.', false) ==
+              std::wstring_view(L"。"));
+static_assert(ShouldConsumeSpaceKeyUp(VK_SPACE, true));
+static_assert(!ShouldConsumeSpaceKeyUp(VK_SPACE, false));
+static_assert(!ShouldConsumeSpaceKeyUp(VK_RETURN, true));
 
 // Rime's stock Windows key bindings use PageUp/PageDown as well as the
 // unshifted -/= keys.  Keep those aliases in the TSF sink so a key that the
