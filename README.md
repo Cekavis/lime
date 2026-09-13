@@ -13,7 +13,7 @@ Lime 是本地优先的中文拼音输入法。Windows TSF 负责实时按键与
 - [WeaselUI 集成](docs/design/weasel-ui-integration.md)
 - [构建与发布](docs/reference/build-and-release.md)
 - [机器可读契约](contracts/README.md)
-- [Tauri 管理窗口](crates/lime-tauri/README.md)
+- [Tauri 管理窗口](crates/lime-management/README.md)
 - [Windows TSF](platform/windows/tsf/README.md)
 - [第三方资源](third_party/README.md)
 
@@ -24,8 +24,8 @@ cargo fmt --all -- --check
 cargo check --workspace
 cargo check -p lime-ipc -p lime-service
 cargo test --workspace
-cargo check --manifest-path crates/lime-tauri/Cargo.toml
-npm --prefix frontend run build
+cargo check --manifest-path crates/lime-management/src-tauri/Cargo.toml
+npm --prefix crates/lime-management run build
 ```
 
 Tauri 检查会验证发布资源路径；先运行资源准备脚本，或在本地创建 `out/windows-x64/staging/app/` 下的占位资源目录。

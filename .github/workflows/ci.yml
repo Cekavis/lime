@@ -42,16 +42,16 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: crates/lime-management/package-lock.json
       - name: Install Tauri Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: npm ci --prefix frontend
-      - run: npm run build --prefix frontend
+      - run: npm ci --prefix crates/lime-management
+      - run: npm run build --prefix crates/lime-management
       - uses: dtolnay/rust-toolchain@stable
       - name: Provide release resource placeholders for Tauri check
         run: |
           mkdir -p out/windows-x64/staging/app/rime out/windows-x64/staging/app/llama out/windows-x64/staging/app/licenses
           touch out/windows-x64/staging/app/lime-service.exe out/windows-x64/staging/app/lime-tsf.dll
-      - run: cargo check --manifest-path crates/lime-tauri/Cargo.toml --locked
+      - run: cargo check --manifest-path crates/lime-management/src-tauri/Cargo.toml --locked

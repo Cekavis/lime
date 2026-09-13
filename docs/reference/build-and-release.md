@@ -7,7 +7,7 @@
 ```text
   out/
   cargo/                         Rust/Cargo target
-  cargo-tauri/                   standalone Tauri Cargo target (local checks)
+  crates/lime-management/src-tauri/target/  Tauri local-check target (ignored)
   windows-x64/
     downloads/                   已校验的下载缓存
     sources/                     固定 commit 的第三方源码

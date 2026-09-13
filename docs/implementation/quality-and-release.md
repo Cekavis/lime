@@ -1,6 +1,6 @@
 # 验证与发布
 
-CI 覆盖 Rust workspace（包括 `lime-ipc`、`lime-core` 和 `lime-service`）的格式、检查、Clippy 和单元测试；`contracts/` 中的 JSON schema examples；以及管理窗口的前端构建和 `crates/lime-tauri` 独立 crate 检查。
+CI 覆盖 Rust workspace（包括 `lime-ipc`、`lime-core` 和 `lime-service`）的格式、检查、Clippy 和单元测试；`contracts/` 中的 JSON schema examples；以及 `crates/lime-management` 管理应用的前端构建和 `src-tauri` 独立 crate 检查。
 
 输入链路是同步的：服务在一次请求中完成 Rime 召回和可用的 LLM 排序后返回最终候选。并发请求在返回前检查 generation，旧结果不得覆盖较新的输入。
 

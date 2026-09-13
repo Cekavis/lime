@@ -12,8 +12,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-lime-ipc = { path = "../lime-ipc" }
-lime-protocol = { path = "../lime-protocol" }
+lime-ipc = { path = "../../lime-ipc" }
+lime-protocol = { path = "../../lime-protocol" }
 
 [lints.rust]
 unsafe_code = "deny"

@@ -21,8 +21,31 @@ set(LIME_TSF_SOURCES
     tsf_module.h
     lime_tsf.cpp
     lime_tsf.h
+    lime_tsf_ui_element.inl
+    lime_tsf_support.inl
+    lime_tsf_sessions.inl
+    lime_tsf_context.inl
+    lime_tsf_lifecycle.inl
+    lime_tsf_input.inl
+    lime_tsf_candidates.inl
+    lime_tsf_state.inl
+    lime_tsf_composition.inl
+    lime_tsf_registration.inl
     weasel_ui_adapter.cpp
     weasel_ui_adapter.h)
+
+set_source_files_properties(
+    lime_tsf_ui_element.inl
+    lime_tsf_support.inl
+    lime_tsf_sessions.inl
+    lime_tsf_context.inl
+    lime_tsf_lifecycle.inl
+    lime_tsf_input.inl
+    lime_tsf_candidates.inl
+    lime_tsf_state.inl
+    lime_tsf_composition.inl
+    lime_tsf_registration.inl
+    PROPERTIES HEADER_FILE_ONLY TRUE)
 
 add_library(lime_tsf SHARED ${LIME_TSF_SOURCES})
 target_compile_features(lime_tsf PRIVATE cxx_std_20)

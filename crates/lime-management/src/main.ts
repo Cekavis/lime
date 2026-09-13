@@ -1,124 +1,15 @@
-import { invoke } from "@tauri-apps/api/core";
 import "./style.css";
 
-type ServiceState = "ready" | "rime_only" | "reloading" | "unavailable";
-
-interface Config {
-  rime_schema: string;
-  preceding_text_char_limit: number;
-  context_preview_char_limit: number;
-  page_size: number;
-  llm_rerank_count: number;
-  llm_effective_count: number;
-  llm_context_token_limit: number;
-  llm_inference_count_limit: number;
-  llm_ignore_emoji: boolean;
-  llm_backend: "cuda" | "cpu";
-}
-
-interface ConfigSnapshot {
-  revision: number;
-  config: Config;
-}
-
-interface ModelInfo {
-  path: string | null;
-  size_bytes: number | null;
-  sha256: string | null;
-  loaded: boolean;
-  scoring_path: "attention" | "recurrent" | null;
-  memory: Record<string, number>;
-}
-
-interface ModelPreset {
-  id: string;
-  name: string;
-  path: string | null;
-  sizeBytes: number | null;
-  sha256: string | null;
-  loaded: boolean;
-}
-
-interface Candidate {
-  displayText: string;
-  commitText: string;
-}
-
-interface CandidateDiagnostic {
-  index: number;
-  rimeCandidate: Candidate | null;
-  llmCandidate: Candidate | null;
-  logprob: number | null;
-  logprobs: number[];
-  mismatch: boolean | null;
-  displayCandidate: Candidate | null;
-  hasDisplayCandidate: boolean;
-}
-
-interface LlmPerformance {
-  totalMs: number;
-  tokenizeMs: number;
-  decodeMs: number;
-  rimeMs: number | null;
-  candidateCount: number;
-  scoredCount: number;
-  targetTokenCount: number;
-  batchCount: number;
-  mismatchCount: number;
-  contextTokenCount: number;
-  decodeInputTokenCount: number;
-  logprobOutputCount: number;
-  inferenceCountLimit: number | null;
-  omittedCandidateCount: number;
-}
-
-interface InputData {
-  requestId?: number;
-  timestampMs: number | null;
-  endToEndMs: number | null;
-  precedingText: string;
-  preedit: string;
-  rimeCandidates: Candidate[];
-  finalCandidates: Candidate[];
-  diagnostics: CandidateDiagnostic[];
-  llmPerformance: LlmPerformance | null;
-  rimeMs: number | null;
-  model: string | null;
-  contextUsed: boolean | null;
-  serviceState: ServiceState;
-}
-
-interface HistoryPage {
-  items: InputData[];
-  total: number;
-  page: number;
-  pageSize: number;
-}
-
-interface ServiceStatus {
-  state: ServiceState;
-  config: ConfigSnapshot;
-  model: ModelInfo;
-}
-
-interface DictionaryEntry {
-  pinyin: string;
-  text: string;
-  weight: number;
-}
-
-interface DictionaryPage {
-  items: DictionaryEntry[];
-  total: number;
-  page: number;
-  pageSize: number;
-}
-
+import { clearDictionary, clearHistory, deleteModelPreset, getConfig, getDictionaryPage, getHistoryPage, getStatus, importDictionary, listModelPresets, loadModel, renameModelPreset, saveModelPreset, selectModelPreset, setConfig, testInput, unloadModel, waitForHistory } from "./api/commands";
+import { diagnosticsFrom } from "./api/decode";
+import { DICTIONARY_PAGE_SIZE, HISTORY_PAGE_SIZE } from "./api/types";
+import type { Candidate, CandidateDiagnostic, Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, HistoryPage, InputData, LlmPerformance, ModelInfo, ModelPreset, ServiceState, ServiceStatus } from "./api/types";
+import { errorMessage, escapeHtml, formatBytes, formatDecimal, formatLogprobs, formatMilliseconds, formatTimestamp } from "./ui/format";
+import { renderAppTemplate } from "./app/template";
 type RefreshReason = "initial" | "manual" | "poll" | "tab" | "visibility" | "mutation";
 
 const REFRESH_INTERVAL_MS = 3000;
 const HISTORY_WATCH_RETRY_MS = 1000;
-const DICTIONARY_PAGE_SIZE = 100;
 
 const stateLabel: Record<ServiceState, string> = {
   ready: "可用",
@@ -143,91 +34,11 @@ const defaultConfig: Config = {
 type ThemeMode = "system" | "light" | "dark";
 const THEME_STORAGE_KEY = "lime.management.theme";
 
-const HISTORY_PAGE_SIZE = 100;
 const NOTICE_DURATION_MS = 4000;
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Lime UI mount point is missing");
 
-app.innerHTML = [
-  '<div class="shell" data-active-tab="input">',
-  '  <header class="header">',
-  '    <div class="brand" aria-label="Lime"><img class="brand-logo" src="/logo.svg" alt="Lime" /></div>',
-  '    <nav class="tabs" aria-label="Lime 功能">',
-  '      <button class="tab is-active" type="button" data-tab="input">设置</button>',
-  '      <button class="tab" type="button" data-tab="test">测试</button>',
-  '      <button class="tab" type="button" data-tab="dictionary">词库</button>',
-  '      <button class="tab" type="button" data-tab="history">历史</button>',
-  '      <button class="tab" type="button" data-tab="diagnostics">诊断</button>',
-  '    </nav>',
-  '    <span class="badge" data-service-state="unavailable" aria-live="polite">服务 不可用</span>',
-  "  </header>",
-  '  <div class="toast-region" data-notice-region aria-live="polite" aria-atomic="true">',
-  '    <div class="notice is-hidden" data-notice role="status" aria-hidden="true">',
-  '      <span data-notice-message></span>',
-  '      <button class="toast-close" data-notice-close type="button" aria-label="关闭提示">×</button>',
-  "    </div>",
-  "  </div>",
-  "  <main>",
-  '    <section class="panel" data-panel="input">',
-  '      <form data-config-form>',
-  '        <section class="settings-section settings-section-first">',
-  '          <div class="section-heading"><h3>前端</h3></div>',
-  '          <div class="form-grid">',
-  '            <label class="field"><span>每页展示候选词数</span><input data-config="page_size" type="number" min="1" max="20" required /></label>',
-  '            <label class="field"><span>前文预览字符数</span><input data-config="context_preview_char_limit" type="number" min="0" max="1024" required /></label>',
-  '            <label class="field"><span>前文实际获取字符数</span><input data-config="preceding_text_char_limit" type="number" min="1" max="4096" required /></label>',
-  '            <label class="field"><span>管理界面深色模式</span><select data-theme-mode><option value="system">跟随系统</option><option value="light">固定浅色</option><option value="dark">固定深色</option></select></label>',
-  '          </div>',
-  '        </section>',
-  '        <section class="settings-section">',
-  '          <div class="section-heading"><h3>后端</h3></div>',
-  '          <div class="form-grid">',
-  '            <label class="field"><span>Rime 方案</span><select data-config="rime_schema"><option value="rime_ice">雾凇拼音（全拼）</option><option value="double_pinyin">自然码双拼</option><option value="double_pinyin_abc">智能 ABC 双拼</option><option value="double_pinyin_mspy">微软双拼</option><option value="double_pinyin_sogou">搜狗双拼</option><option value="double_pinyin_flypy">小鹤双拼</option><option value="double_pinyin_ziguang">紫光双拼</option><option value="double_pinyin_jiajia">拼音加加双拼</option></select></label>',
-  '            <label class="field"><span>LLM 单次请求 token 数上限</span><input data-config="llm_context_token_limit" type="number" min="1" max="4096" required /></label>',
-  '            <label class="field"><span>LLM 单次输入推理次数上限</span><input data-config="llm_inference_count_limit" type="number" min="1" max="32" required /></label>',
-  '            <label class="field"><span>LLM 重排输入候选词数</span><input data-config="llm_rerank_count" type="number" min="1" max="128" required /></label>',
-  '            <label class="field"><span>LLM 重排采纳候选词数</span><input data-config="llm_effective_count" type="number" min="1" max="32" required /></label>',
-  '            <label class="field"><span>LLM 重排时忽略 Emoji</span><input data-config="llm_ignore_emoji" type="checkbox" /></label>',
-  '            <label class="field"><span>LLM 后端</span><select data-config="llm_backend"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>',
-  '          </div>',
-  '        </section>',
-  '        <div class="actions settings-actions"><button class="button button-primary" type="submit">保存设置</button></div>',
-  '      </form>',
-  '      <section class="settings-section model-status-section"><div class="section-heading"><h3>模型状态</h3><span class="status-dot" data-model-state>未加载</span></div>',
-  '        <div class="model-card"><dl class="status-list"><dt>路径</dt><dd class="model-path" data-model-path title="—">—</dd><dt>文件大小</dt><dd data-model-size>—</dd><dt>推理路径</dt><dd data-model-scoring-path>—</dd></dl><div class="model-memory" data-model-memory><p class="muted">未加载模型，暂无显存占用信息。</p></div></div>',
-  '      </section>',
-  '      <section class="settings-section preset-section"><div class="section-heading"><h3>模型预设</h3><div class="section-heading-actions"><span class="meta-badge" data-preset-count>0 个</span><button class="button button-danger" data-unload-model type="button">卸载模型</button></div></div>',
-  '        <div class="actions model-add-actions"><button class="button" data-add-model type="button" aria-expanded="false">添加模型</button></div>',
-  '        <form class="preset-form is-hidden" data-preset-form><label class="field"><span>名称</span><input data-preset-name type="text" placeholder="例如 Qwen 7B" required /></label><label class="field field-wide"><span>GGUF 文件路径</span><input data-preset-path type="text" placeholder="C:\\Models\\lime.gguf" required /></label><div class="actions"><button class="button button-primary" type="submit">保存模型</button><button class="button" data-cancel-add-model type="button">取消</button></div></form>',
-  '        <div class="preset-list" data-model-presets><p class="muted">尚未读取模型预设。</p></div>',
-  '      </section>',
-  '      <form class="model-form is-hidden" data-model-form><input data-model-path-input type="text" aria-hidden="true" tabindex="-1" /></form>',
-  "    </section>",
-  '    <section class="panel is-hidden" data-panel="test">',
-  '      <form data-test-form>',
-  '        <label class="field field-wide field-stacked"><span>上文</span><textarea data-test-context rows="3" placeholder="可选：输入光标前的中文文本"></textarea></label>',
-  '        <label class="field field-wide"><span>拼音</span><input data-test-preedit type="text" placeholder="例如 nihao" required /></label>',
-  '        <div class="actions"><button class="button button-primary" type="submit">请求候选</button><button class="button" data-test-clear type="button">清空结果</button></div>',
-  "      </form>",
-  '      <div class="test-result" data-test-result></div>',
-  "    </section>",
-  '    <section class="panel is-hidden" data-panel="dictionary">',
-  '      <div class="actions"><span class="meta-badge" data-dictionary-count>— 条</span><button class="button" data-import-dictionary type="button">导入 JSON</button><button class="button" data-export-dictionary type="button">导出 JSON</button><button class="button button-danger" data-clear-dictionary type="button">清空用户词库</button><input class="visually-hidden" data-dictionary-file type="file" accept="application/json,.json" /></div>',
-  '      <div class="table-wrap"><table><thead><tr><th>拼音</th><th>文本</th><th>权重</th></tr></thead><tbody data-dictionary-table><tr><td colspan="3" class="muted">尚未读取词库</td></tr></tbody></table></div>',
-  "    </section>",
-  '    <section class="panel is-hidden" data-panel="history">',
-  '      <div class="panel-heading"><h2>历史</h2><div class="actions-inline"><span class="meta-badge" data-history-count>0 条</span><button class="button button-danger" data-clear-history type="button">清空历史</button></div></div>',
-  '      <div class="table-wrap"><table class="history-table"><thead><tr><th>上文</th><th>拼音</th><th>Rime 候选（前 2）</th><th>LLM 排序（前 2）</th><th>端到端用时</th><th>模型</th></tr></thead><tbody data-history-table><tr><td colspan="6" class="muted">暂无输入记录</td></tr></tbody></table></div>',
-  '      <div class="pagination" data-history-pagination><button class="button" data-history-prev type="button">上一页</button><span data-history-page-label>第 1 页</span><button class="button" data-history-next type="button">下一页</button></div>',
-  '      <section class="history-detail is-hidden" data-history-detail aria-live="polite"><div class="panel-heading compact-heading"><p class="muted" data-history-detail-meta>—</p><button class="button" data-history-detail-close type="button">返回列表</button></div><div data-history-detail-table><p class="muted">选择一条记录查看详情。</p></div></section>',
-  "    </section>",
-  '    <section class="panel is-hidden" data-panel="diagnostics">',
-  '      <div class="panel-heading"><h2>诊断</h2><button class="button" data-refresh type="button">刷新</button></div>',
-  '      <dl class="status-list diagnostics-list"><dt>服务状态</dt><dd data-diagnostic-state>—</dd><dt>模型</dt><dd data-diagnostic-model>—</dd><dt>词库条目</dt><dd data-diagnostic-dictionary>—</dd><dt>最近操作</dt><dd data-last-operation>—</dd></dl>',
-  "    </section>",
-  "  </main>",
-  "</div>",
-].join("\n");
+app.innerHTML = renderAppTemplate();
 
 let currentConfig: Config = { ...defaultConfig };
 let currentStatus: ServiceStatus | null = null;
@@ -321,352 +132,21 @@ function recordOperation(message: string) {
   if (target) target.textContent = message;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-function firstValue(record: Record<string, unknown> | null, keys: string[]): unknown {
-  if (!record) return undefined;
-  for (const key of keys) if (record[key] !== undefined && record[key] !== null) return record[key];
-  return undefined;
-}
-
-function fieldValue(record: Record<string, unknown> | null, keys: string[]): { present: boolean; value: unknown } {
-  if (!record) return { present: false, value: undefined };
-  for (const key of keys) {
-    if (Object.prototype.hasOwnProperty.call(record, key)) return { present: true, value: record[key] };
-  }
-  return { present: false, value: undefined };
-}
-
-function asString(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value : value == null ? fallback : String(value);
-}
-
-function asNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
-  return null;
-}
-
-function asBoolean(value: unknown): boolean | null {
-  return typeof value === "boolean" ? value : null;
-}
-
-function normalizeState(value: unknown): ServiceState {
-  return value === "ready" || value === "rime_only" || value === "reloading" || value === "unavailable" ? value : "unavailable";
-}
-
-function normalizeCandidate(value: unknown): Candidate | null {
-  if (typeof value === "string") return { displayText: value, commitText: value };
-  const record = asRecord(value);
-  if (!record) return null;
-  const display = asString(firstValue(record, ["display_text", "displayText", "text", "commit_text", "commitText"]));
-  const commit = asString(firstValue(record, ["commit_text", "commitText", "display_text", "displayText", "text"]), display);
-  return display || commit ? { displayText: display || commit, commitText: commit || display } : null;
-}
-
-function normalizeCandidates(value: unknown): Candidate[] {
-  if (!Array.isArray(value)) return [];
-  return value.map(normalizeCandidate).filter((candidate): candidate is Candidate => candidate !== null);
-}
-
-function normalizeLogprobs(value: unknown): number[] {
-  if (!Array.isArray(value)) return [];
-  return value.map(asNumber).filter((item): item is number => item !== null);
-}
-
-function normalizeLlmPerformance(value: unknown): LlmPerformance | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  const totalMs = asNumber(firstValue(record, ["total_ms", "totalMs", "total_duration_ms", "totalDurationMs"]));
-  if (totalMs == null) return null;
-  const count = (keys: string[]) => Math.max(0, Math.trunc(asNumber(firstValue(record, keys)) ?? 0));
-  return {
-    totalMs: Math.max(0, totalMs),
-    tokenizeMs: Math.max(0, asNumber(firstValue(record, ["tokenize_ms", "tokenizeMs"])) ?? 0),
-    decodeMs: Math.max(0, asNumber(firstValue(record, ["decode_ms", "decodeMs"])) ?? 0),
-    rimeMs: (() => {
-      const value = asNumber(firstValue(record, ["rime_duration_ms", "rimeDurationMs", "rime_ms", "rimeMs"]));
-      return value == null ? null : Math.max(0, value);
-    })(),
-    candidateCount: count(["candidate_count", "candidateCount"]),
-    scoredCount: count(["scored_count", "scoredCount"]),
-    targetTokenCount: count(["target_token_count", "targetTokenCount"]),
-    batchCount: count(["batch_count", "batchCount"]),
-    mismatchCount: count(["mismatch_count", "mismatchCount"]),
-    contextTokenCount: count(["context_token_count", "contextTokenCount"]),
-    decodeInputTokenCount: count(["decode_input_token_count", "decodeInputTokenCount"]),
-    logprobOutputCount: count(["logprob_output_count", "logprobOutputCount", "logits_output_count", "logitsOutputCount"]),
-    inferenceCountLimit: (() => {
-      const value = asNumber(firstValue(record, ["inference_count_limit", "inferenceCountLimit"]));
-      return value == null ? null : Math.max(0, Math.trunc(value));
-    })(),
-    omittedCandidateCount: count(["omitted_candidate_count", "omittedCandidateCount"]),
-  };
-}
-
-function normalizeDiagnostic(value: unknown, index: number, rime: Candidate[], final: Candidate[]): CandidateDiagnostic {
-  const record = asRecord(value);
-  const rimeField = fieldValue(record, ["rime_candidate", "rimeCandidate", "rime", "raw_candidate"]);
-  const llmField = fieldValue(record, ["llm_candidate", "llmCandidate", "candidate", "final_candidate"]);
-  const displayField = fieldValue(record, ["display_candidate", "displayCandidate", "shown_candidate", "shownCandidate"]);
-  const explicitRime = normalizeCandidate(rimeField.value);
-  const explicitLlm = normalizeCandidate(llmField.value);
-  const rawIndex = asNumber(firstValue(record, ["index"]));
-  const rawRank = asNumber(firstValue(record, ["rank", "position"]));
-  const diagnosticIndex = rawRank == null
-    ? rawIndex == null ? index : Math.max(0, Math.trunc(rawIndex))
-    : Math.max(0, Math.trunc(rawRank) - 1);
-  const rimeCandidate = rimeField.present ? explicitRime : rime[diagnosticIndex] ?? null;
-  const llmCandidate = llmField.present ? explicitLlm : final[diagnosticIndex] ?? null;
-  const displayCandidate = normalizeCandidate(displayField.value);
-  const logprob = asNumber(firstValue(record, ["logprob", "score", "llm_logprob"]));
-  const mismatch = asBoolean(firstValue(record, ["mismatch", "token_mismatch"]));
-  return {
-    index: diagnosticIndex,
-    rimeCandidate,
-    llmCandidate,
-    logprob,
-    logprobs: normalizeLogprobs(firstValue(record, ["logprobs", "token_logprobs", "tokenLogprobs"])),
-    mismatch,
-    displayCandidate,
-    hasDisplayCandidate: displayField.present,
-  };
-}
-
-function diagnosticsFrom(raw: unknown, rime: Candidate[], final: Candidate[]): CandidateDiagnostic[] {
-  const values = Array.isArray(raw) ? raw : [];
-  const count = Math.max(values.length, rime.length, final.length);
-  const result = Array.from({ length: count }, (_, index) => normalizeDiagnostic(values[index], index, rime, final));
-  const hasScore = (diagnostic: CandidateDiagnostic) =>
-    diagnostic.logprob != null && diagnostic.logprobs.length > 0;
-  return result.sort((left, right) => {
-    // The wire format uses logprob=0 for rows outside llm_rerank_count. Their empty
-    // logprobs array is the authoritative marker that they were not scored. Without this
-    // check, all untouched Rime rows sort ahead of the first LLM-ranked candidates.
-    const leftScored = hasScore(left);
-    const rightScored = hasScore(right);
-    if (!leftScored && !rightScored) return left.index - right.index;
-    if (!leftScored) return 1;
-    if (!rightScored) return -1;
-    return Math.abs(left.logprob!) - Math.abs(right.logprob!) || left.index - right.index;
-  });
-}
-
-function normalizeInputData(value: unknown, fallback: Partial<InputData> = {}): InputData {
-  const record = asRecord(value);
-  const rawRime = firstValue(record, ["rime_candidates", "rimeCandidates", "raw_candidates", "rawCandidates"]);
-  const rawFinal = firstValue(record, ["final_candidates", "finalCandidates", "candidates", "llm_candidates", "llmCandidates"]);
-  const rime = Array.isArray(rawRime) ? normalizeCandidates(rawRime) : fallback.rimeCandidates || [];
-  const final = Array.isArray(rawFinal) ? normalizeCandidates(rawFinal) : fallback.finalCandidates || [];
-  const diagnosticsRaw = firstValue(record, ["diagnostics", "candidate_diagnostics", "candidateDiagnostics"]);
-  const performanceRaw = firstValue(record, ["llm_performance", "llmPerformance", "performance"]);
-  const performanceRecord = asRecord(performanceRaw);
-  const rimeDuration = asNumber(firstValue(record, [
-    "rime_duration_ms", "rimeDurationMs", "rime_ms", "rimeMs", "rime_elapsed_ms", "rimeElapsedMs",
-  ])) ?? asNumber(firstValue(performanceRecord, ["rime_duration_ms", "rimeDurationMs", "rime_ms", "rimeMs"]));
-  const modelValue = firstValue(record, ["model_name", "modelName", "model", "model_id", "modelId"]);
-  const modelRecord = asRecord(modelValue);
-  const model = asString(
-    modelRecord
-      ? firstValue(modelRecord, ["name", "model_name", "modelName", "path", "model_path", "modelPath"])
-      : modelValue,
-    "",
-  ) || null;
-  const precedingText = asString(firstValue(record, ["preceding_text", "precedingText", "context"]), fallback.precedingText || "");
-  const preedit = asString(firstValue(record, ["preedit", "input_preedit", "inputPreedit"]), fallback.preedit || "");
-  const timestamp = asNumber(firstValue(record, ["timestamp_ms", "timestampMs", "created_at_ms", "createdAtMs", "timestamp"]));
-  const endToEndDuration = asNumber(firstValue(record, [
-    "end_to_end_duration_ms", "endToEndDurationMs", "end_to_end_ms", "endToEndMs",
-  ]));
-  return {
-    requestId: asNumber(firstValue(record, ["request_id", "requestId"])) ?? fallback.requestId,
-    timestampMs: timestamp ?? fallback.timestampMs ?? null,
-    endToEndMs: endToEndDuration ?? fallback.endToEndMs ?? null,
-    precedingText,
-    preedit,
-    rimeCandidates: rime,
-    finalCandidates: final,
-    diagnostics: diagnosticsFrom(diagnosticsRaw, rime, final),
-    llmPerformance: normalizeLlmPerformance(performanceRaw) ?? fallback.llmPerformance ?? null,
-    rimeMs: rimeDuration ?? fallback.rimeMs ?? (normalizeLlmPerformance(performanceRaw)?.rimeMs ?? null),
-    model: model ?? fallback.model ?? null,
-    contextUsed: asBoolean(firstValue(record, ["context_used", "contextUsed"])) ?? fallback.contextUsed ?? null,
-    serviceState: normalizeState(firstValue(record, ["service_state", "serviceState", "state"]) ?? fallback.serviceState),
-  };
-}
-
-function normalizeConfigSnapshot(value: unknown): ConfigSnapshot {
-  const record = asRecord(value);
-  const configRecord = asRecord(firstValue(record, ["config"])) ?? record;
-  const config = { ...defaultConfig } as Config;
-  for (const key of Object.keys(defaultConfig) as (keyof Config)[]) {
-    const valueForKey = configRecord?.[key];
-    if (typeof defaultConfig[key] === "boolean") {
-      if (typeof valueForKey === "boolean") config[key] = valueForKey as never;
-    } else if (key === "rime_schema" || key === "llm_backend") {
-      if (typeof valueForKey === "string" && valueForKey) config[key] = valueForKey as never;
-    } else {
-      const numberValue = asNumber(valueForKey);
-      if (numberValue != null) config[key] = numberValue as never;
-    }
-  }
-  return { revision: asNumber(firstValue(record, ["revision", "config_revision", "configRevision"])) ?? 0, config };
-}
-
-function normalizeModel(value: unknown): ModelInfo {
-  const record = asRecord(value);
-  const memory: Record<string, number> = {};
-  const collectMemory = (candidate: unknown, prefix = "") => {
-    const nested = asRecord(candidate);
-    if (!nested) return;
-    for (const [key, nestedValue] of Object.entries(nested)) {
-      if (!prefix && key === "breakdown" && asRecord(nestedValue)) {
-        collectMemory(nestedValue);
-        continue;
-      }
-      const label = prefix ? prefix + "." + key : key;
-      const numeric = asNumber(nestedValue);
-      if (numeric != null && Number.isFinite(numeric) && numeric >= 0) memory[label] = numeric;
-      else if (asRecord(nestedValue)) collectMemory(nestedValue, label);
-    }
-  };
-  const memoryValue = firstValue(record, [
-    "memory", "memory_usage", "memoryUsage", "vram", "vram_usage", "vramUsage",
-    "gpu_memory", "gpuMemory", "gpu_mem", "gpuMem", "initialization_memory", "initializationMemory",
-    "init_memory", "initMemory",
-  ]);
-  const memoryRecord = asRecord(memoryValue);
-  if (memoryRecord?.breakdown && asRecord(memoryRecord.breakdown)) {
-    collectMemory(memoryRecord.breakdown);
-  } else {
-    collectMemory(memoryValue);
-  }
-  if (record) {
-    for (const [key, nestedValue] of Object.entries(record)) {
-      if (!/(memory|vram|gpu_mem|offload|buffer)/i.test(key)) continue;
-      const numeric = asNumber(nestedValue);
-      if (numeric != null && Number.isFinite(numeric) && numeric >= 0) memory[key] = numeric;
-    }
-  }
-  return {
-    path: (firstValue(record, ["path", "model_path", "modelPath"]) as string | null | undefined) ?? null,
-    size_bytes: asNumber(firstValue(record, ["size_bytes", "sizeBytes"])),
-    sha256: (firstValue(record, ["sha256", "sha_256"]) as string | null | undefined) ?? null,
-    loaded: Boolean(firstValue(record, ["loaded", "is_loaded", "isLoaded"])),
-    scoring_path: (() => {
-      const value = asString(firstValue(record, ["scoring_path", "scoringPath"]));
-      return value === "attention" || value === "recurrent" ? value : null;
-    })(),
-    memory,
-  };
-}
-
-function normalizePreset(value: unknown): ModelPreset | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  const name = asString(firstValue(record, ["name", "label", "id"]));
-  const pathValue = firstValue(record, ["path", "model_path", "modelPath"]);
-  if (!name && typeof pathValue !== "string") return null;
-  const path = typeof pathValue === "string" ? pathValue : null;
-  return {
-    id: asString(firstValue(record, ["id", "key", "name"]), name || path || ""),
-    name: name || path || "未命名预设",
-    path,
-    sizeBytes: asNumber(firstValue(record, ["size_bytes", "sizeBytes"])),
-    sha256: (firstValue(record, ["sha256", "sha_256"]) as string | null | undefined) ?? null,
-    loaded: Boolean(firstValue(record, ["loaded", "is_loaded", "isLoaded"])),
-  };
-}
-
-function normalizePresets(value: unknown): ModelPreset[] {
-  const record = asRecord(value);
-  const values = Array.isArray(value) ? value : firstValue(record, ["presets", "items", "models"]);
-  if (!Array.isArray(values)) return [];
-  return values.map(normalizePreset).filter((preset): preset is ModelPreset => preset !== null);
-}
-
-function normalizeHistoryPage(value: unknown, page: number): HistoryPage {
-  const record = asRecord(value);
-  const values = Array.isArray(value) ? value : firstValue(record, ["items", "entries", "history"]);
-  const items = Array.isArray(values) ? values.map((item) => normalizeInputData(item)) : [];
-  const total = asNumber(firstValue(record, ["total", "total_count", "totalCount"])) ?? items.length;
-  const returnedPage = asNumber(firstValue(record, ["page", "page_number", "pageNumber"])) ?? page;
-  const pageSize = asNumber(firstValue(record, ["page_size", "pageSize"])) ?? HISTORY_PAGE_SIZE;
-  return { items, total, page: returnedPage, pageSize };
-}
-
-function normalizeDictionaryEntry(value: unknown): DictionaryEntry | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  const pinyin = asString(firstValue(record, ["pinyin", "code"]));
-  const text = asString(firstValue(record, ["text", "word"]));
-  const weight = asNumber(firstValue(record, ["weight", "score"])) ?? 0;
-  return pinyin && text ? { pinyin, text, weight } : null;
-}
-
-function normalizeDictionaryPage(value: unknown, page: number): DictionaryPage {
-  const record = asRecord(value);
-  const values = Array.isArray(value) ? value : firstValue(record, ["items", "entries", "dictionary"]);
-  const items = Array.isArray(values)
-    ? values.map(normalizeDictionaryEntry).filter((entry): entry is DictionaryEntry => entry !== null)
-    : [];
-  const total = asNumber(firstValue(record, ["total", "total_count", "totalCount"])) ?? items.length;
-  const returnedPage = asNumber(firstValue(record, ["page", "page_number", "pageNumber"])) ?? page;
-  const pageSize = asNumber(firstValue(record, ["page_size", "pageSize"])) ?? DICTIONARY_PAGE_SIZE;
-  return { items, total, page: returnedPage, pageSize };
-}
-
-async function invokeVariants<T>(command: string, variants: Array<Record<string, unknown> | undefined>): Promise<T> {
-  let firstError: unknown;
-  let lastError: unknown = new Error("命令调用失败");
-  for (const args of variants) {
-    try {
-      return await invoke<T>(command, args);
-    } catch (error) {
-      firstError ??= error;
-      lastError = error;
-    }
-  }
-  // Preserve a meaningful domain error from the canonical argument shape when a
-  // compatibility retry fails because that shape is unsupported.
-  throw firstError ?? lastError;
-}
-
 async function fetchHistoryPage(page: number): Promise<HistoryPage> {
-  try {
-    const value = await invokeVariants<unknown>("get_input_history_page", [
-      { page, pageSize: HISTORY_PAGE_SIZE },
-      { page, page_size: HISTORY_PAGE_SIZE },
-    ]);
-    return sortHistory(normalizeHistoryPage(value, page));
-  } catch (error) {
-    // Do not fall back to the legacy unbounded history response: a long-running
-    // service can exceed the local IPC frame limit before the UI can paginate it.
-    throw error;
-  }
+  return sortHistory(await getHistoryPage(page));
 }
 
 async function fetchDictionaryPage(page: number): Promise<DictionaryPage> {
-  const value = await invokeVariants<unknown>("get_dictionary_page", [
-    { page, pageSize: DICTIONARY_PAGE_SIZE },
-    { page, page_size: DICTIONARY_PAGE_SIZE },
-  ]);
-  return normalizeDictionaryPage(value, page);
+  return getDictionaryPage(page);
 }
 
 async function fetchAllDictionaryEntries(): Promise<DictionaryEntry[]> {
   const first = await fetchDictionaryPage(1);
   const totalPages = Math.max(1, Math.ceil(first.total / DICTIONARY_PAGE_SIZE));
   const entries = [...first.items];
-  for (let page = 2; page <= totalPages; page += 1) {
-    const next = await fetchDictionaryPage(page);
-    entries.push(...next.items);
-  }
+  for (let page = 2; page <= totalPages; page += 1) entries.push(...(await fetchDictionaryPage(page)).items);
   return entries;
 }
-
 function sortHistory(page: HistoryPage): HistoryPage {
   const indexed = page.items.map((item, index) => ({ item, index }));
   indexed.sort((left, right) => {
@@ -707,12 +187,12 @@ function renderModel(model: ModelInfo | null) {
     path.title = fullPath;
   }
   const size = query<HTMLElement>("[data-model-size]");
-  if (size) size.textContent = model?.size_bytes == null ? "—" : formatBytes(model.size_bytes);
+  if (size) size.textContent = model?.sizeBytes == null ? "—" : formatBytes(model.sizeBytes);
   const scoringPath = query<HTMLElement>("[data-model-scoring-path]");
   if (scoringPath) {
-    scoringPath.textContent = !loaded || model?.scoring_path == null
+    scoringPath.textContent = !loaded || model?.scoringPath == null
       ? "—"
-      : model.scoring_path === "attention" ? "Attention" : "Recurrent";
+      : model.scoringPath === "attention" ? "Attention" : "Recurrent";
   }
   const memory = query<HTMLElement>("[data-model-memory]");
   if (memory) {
@@ -985,8 +465,7 @@ function closeHistoryDetail() {
 }
 
 async function fetchModelPresets(): Promise<ModelPreset[]> {
-  const value = await invokeVariants<unknown>("list_model_presets", [undefined, {}]);
-  return normalizePresets(value);
+  return listModelPresets();
 }
 
 async function loadModelPresets(options: { force?: boolean } = {}) {
@@ -1013,7 +492,7 @@ function renderModelPresets(presets: ModelPreset[], options: { force?: boolean }
     return;
   }
   target.innerHTML = presets.map((preset) => {
-    const key = escapeHtml(preset.id || preset.name);
+    const key = escapeHtml(preset.name);
     const loaded = preset.loaded ? " is-loaded" : "";
     const fullPath = preset.path || "—";
     return '<article class="preset-item' + loaded + '"><div class="preset-info"><strong>' + escapeHtml(preset.name) + '</strong><span class="muted mono" title="' + escapeHtml(fullPath) + '">' + escapeHtml(fullPath === "—" ? fullPath : truncatePath(fullPath, 56)) + '</span></div><div class="preset-actions"><button class="button button-primary" type="button" data-preset-action="select" data-preset-key="' + key + '">切换</button><button class="button" type="button" data-preset-action="rename" data-preset-key="' + key + '">重命名</button><button class="button button-danger" type="button" data-preset-action="delete" data-preset-key="' + key + '">删除</button></div></article>';
@@ -1024,8 +503,8 @@ function renderModelPresets(presets: ModelPreset[], options: { force?: boolean }
 async function performRefresh(reason: RefreshReason, mutationAtStart: number) {
   const historyAtStart = historyRefreshEpoch;
   const results = await Promise.allSettled([
-    invoke<unknown>("get_config"),
-    invoke<unknown>("get_status"),
+    getConfig(),
+    getStatus(),
     fetchDictionaryPage(1),
     fetchHistoryPage(currentHistoryPage),
     fetchModelPresets(),
@@ -1043,22 +522,21 @@ async function performRefresh(reason: RefreshReason, mutationAtStart: number) {
   const presetsResult = results[4];
 
   let configSnapshot: ConfigSnapshot | null = null;
-  if (configResult.status === "fulfilled") configSnapshot = normalizeConfigSnapshot(configResult.value);
+  if (configResult.status === "fulfilled") configSnapshot = configResult.value;
   else errors.push(configResult.reason);
 
   let statusConfig: ConfigSnapshot | null = null;
   if (statusResult.status === "fulfilled") {
-    const rawStatus = asRecord(statusResult.value);
-    const rawStatusConfig = firstValue(rawStatus, ["config"]);
-    if (rawStatusConfig != null) statusConfig = normalizeConfigSnapshot(rawStatusConfig);
+    const rawStatus = statusResult.value;
+    statusConfig = rawStatus.config;
     const fallbackStatusConfig = statusConfig ?? configSnapshot ?? currentStatus?.config ?? {
       revision: 0,
       config: { ...currentConfig },
     };
     const status: ServiceStatus = {
-      state: normalizeState(firstValue(rawStatus, ["state", "service_state", "serviceState"])),
+      state: rawStatus.state,
       config: fallbackStatusConfig,
-      model: normalizeModel(firstValue(rawStatus, ["model"]) ?? {}),
+      model: rawStatus.model,
     };
     currentStatus = status;
     renderStatus(status);
@@ -1154,9 +632,8 @@ async function watchInputHistory() {
   // the background and resolves as soon as the service records or clears data.
   while (!historyWatchStopped) {
     try {
-      const value = await invoke<unknown>("wait_for_input_history", { revision: historyRevision });
-      const nextRevision = asNumber(value);
-      if (nextRevision == null) throw new Error("历史更新通知无效");
+      const nextRevision = await waitForHistory(historyRevision);
+      if (!Number.isFinite(nextRevision)) throw new Error("历史更新通知无效");
       if (nextRevision !== historyRevision) {
         historyRevision = nextRevision;
         void refreshHistoryNow();
@@ -1220,16 +697,14 @@ configForm?.addEventListener("submit", async (event) => {
     || previousConfig.llm_backend !== nextConfig.llm_backend
   ));
   try {
-    const value = await invoke<unknown>("set_config", { config: nextConfig });
-    const snapshot = normalizeConfigSnapshot(value);
+    const snapshot = await setConfig(nextConfig);
     applyConfig(snapshot, { force: true });
     if (currentStatus) currentStatus.config = snapshot;
     renderStatus(currentStatus);
     applyThemeMode(query<HTMLSelectElement>("[data-theme-mode]")?.value, true);
     if (reloadModel && activeModelPath) {
       try {
-        const modelValue = await invokeVariants<unknown>("load_model", [{ path: activeModelPath }, { modelPath: activeModelPath }]);
-        const model = normalizeModel(modelValue);
+        const model = await loadModel(activeModelPath);
         renderModel(model);
         if (currentStatus) currentStatus.model = model;
         await loadModelPresets({ force: true });
@@ -1258,8 +733,7 @@ query<HTMLFormElement>("[data-model-form]")?.addEventListener("submit", async (e
   if (!path) return setNotice("请输入 GGUF 文件路径", "error");
   markMutation();
   try {
-    const value = await invokeVariants<unknown>("load_model", [{ path }, { modelPath: path }]);
-    const model = normalizeModel(value);
+    const model = await loadModel(path);
     renderModel(model);
     if (currentStatus) currentStatus.model = model;
     await loadModelPresets({ force: true });
@@ -1276,8 +750,7 @@ query<HTMLFormElement>("[data-model-form]")?.addEventListener("submit", async (e
 query<HTMLButtonElement>("[data-unload-model]")?.addEventListener("click", async () => {
   markMutation();
   try {
-    const value = await invoke<unknown>("unload_model");
-    const model = normalizeModel(value);
+    const model = await unloadModel();
     renderModel(model);
     if (currentStatus) currentStatus.model = model;
     await loadModelPresets({ force: true });
@@ -1317,7 +790,7 @@ query<HTMLFormElement>("[data-preset-form]")?.addEventListener("submit", async (
   if (!name || !path) return setNotice("请输入预设名称和 GGUF 路径", "error");
   markMutation();
   try {
-    await invokeVariants<unknown>("save_model_preset", [{ name, path }, { preset: { name, path } }]);
+    await saveModelPreset(name, path);
     await loadModelPresets({ force: true });
     presetForm?.reset();
     setPresetFormVisible(false);
@@ -1336,7 +809,7 @@ query<HTMLElement>("[data-model-presets]")?.addEventListener("click", async (eve
   const button = target.closest<HTMLButtonElement>("[data-preset-action]");
   if (!button) return;
   const key = button.dataset.presetKey ?? "";
-  const preset = currentPresets.find((item) => item.id === key || item.name === key);
+  const preset = currentPresets.find((item) => item.name === key);
   if (!preset) return;
   const action = button.dataset.presetAction;
   markMutation();
@@ -1346,8 +819,15 @@ query<HTMLElement>("[data-model-presets]")?.addEventListener("click", async (eve
       // `id` is only a UI-derived alias; sending it first makes Tauri reject the
       // request before the canonical `{ name }` payload is attempted, and the
       // compatibility helper would then surface that misleading first error.
-      const value = await invoke<unknown>("select_model_preset", { name: preset.name });
-      const model = normalizeModel(value);
+      const presetResult = await selectModelPreset(preset.name);
+      const model = {
+        path: presetResult.path,
+        sizeBytes: presetResult.sizeBytes,
+        sha256: presetResult.sha256,
+        loaded: presetResult.loaded,
+        scoringPath: null,
+        memory: {},
+      } satisfies ModelInfo;
       if (model.path !== null || model.loaded) {
         renderModel(model);
         if (currentStatus) currentStatus.model = model;
@@ -1358,13 +838,13 @@ query<HTMLElement>("[data-model-presets]")?.addEventListener("click", async (eve
     } else if (action === "rename") {
       const newName = window.prompt("请输入新的模型预设名称", preset.name)?.trim();
       if (!newName || newName === preset.name) return;
-      await invoke("rename_model_preset", { name: preset.name, newName });
+      await renameModelPreset(preset.name, newName);
       await loadModelPresets({ force: true });
       setNotice("模型预设已重命名", "success");
       recordOperation("模型预设已重命名");
     } else if (action === "delete") {
       if (!window.confirm("确定删除模型预设“" + preset.name + "”吗？")) return;
-      await invoke("delete_model_preset", { name: preset.name });
+      await deleteModelPreset(preset.name);
       await loadModelPresets({ force: true });
       setNotice("模型预设已删除", "success");
       recordOperation("模型预设已删除");
@@ -1386,7 +866,7 @@ query<HTMLInputElement>("[data-dictionary-file]")?.addEventListener("change", as
     if (!Array.isArray(parsed)) throw new Error("词库 JSON 必须是条目数组");
     const entries = parsed.map(validateEntry);
     markMutation();
-    await invoke("import_dictionary", { entries });
+    await importDictionary(entries);
     const updated = await fetchDictionaryPage(1);
     renderDictionary(updated.items, {}, updated.total);
     setNotice("已导入 " + entries.length + " 条词库记录", "success");
@@ -1423,7 +903,7 @@ query<HTMLButtonElement>("[data-clear-dictionary]")?.addEventListener("click", a
   if (!window.confirm("确定清空用户词库吗？此操作不可撤销。")) return;
   markMutation();
   try {
-    await invoke("clear_dictionary");
+    await clearDictionary();
     renderDictionary([], { force: true });
     setNotice("用户词库已清空", "success");
     recordOperation("词库已清空");
@@ -1442,11 +922,7 @@ query<HTMLFormElement>("[data-test-form]")?.addEventListener("submit", async (ev
   if (!preedit) return setNotice("请输入拼音", "error");
   markMutation();
   try {
-    const value = await invokeVariants<unknown>("test_input", [
-      { precedingText, preedit },
-      { preceding_text: precedingText, preedit },
-    ]);
-    const response = normalizeInputData(value, { precedingText, preedit });
+    const response = await testInput(precedingText, preedit);
     // A successful test creates the newest history entry.  Return to page one so the
     // just-completed request is immediately visible in the newest-first list.
     currentHistoryPage = 1;
@@ -1525,7 +1001,7 @@ query<HTMLButtonElement>("[data-clear-history]")?.addEventListener("click", asyn
   if (!window.confirm("确定清空输入历史吗？")) return;
   markMutation();
   try {
-    await invoke("clear_input_history");
+    await clearHistory();
     currentHistoryPage = 1;
     renderHistory({ items: [], total: 0, page: 1, pageSize: HISTORY_PAGE_SIZE }, { force: true });
     closeHistoryDetail();
@@ -1561,50 +1037,6 @@ function validateEntry(value: unknown): DictionaryEntry {
     throw new Error("词库条目必须包含有效的 pinyin、text 和整数 weight");
   }
   return { pinyin: entry.pinyin, text: entry.text, weight: entry.weight };
-}
-
-function escapeHtml(value: unknown): string {
-  return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character] ?? character);
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
-  return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
-}
-
-function formatDecimal(value: number): string {
-  return Number.isFinite(value) ? value.toFixed(2) : "—";
-}
-
-function formatMilliseconds(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return "—";
-  return (Number.isInteger(value) ? String(value) : value.toFixed(2)) + " ms";
-}
-
-function formatLogprobs(values: number[], aggregate: number | null): string {
-  if (!values.length) return "—";
-  const rawSum = values.reduce((sum, value) => sum + value, 0);
-  const targetCents = Math.round((aggregate == null ? rawSum : aggregate) * 100);
-  const cents = values.map((value) => Math.round(value * 100));
-  const prefixSum = cents.slice(0, -1).reduce((sum, value) => sum + value, 0);
-  cents[cents.length - 1] = targetCents - prefixSum;
-  return cents.map((value) => formatDecimal(value / 100)).join(", ");
-}
-
-function formatTimestamp(value: number | null): string {
-  if (value == null || !Number.isFinite(value)) return "时间未知";
-  const milliseconds = value < 1_000_000_000_000 ? value * 1000 : value;
-  const date = new Date(milliseconds);
-  return Number.isNaN(date.getTime()) ? "时间未知" : date.toLocaleString("zh-CN");
-}
-
-function errorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("model_unsupported") || message.includes("LIME-0011")) {
-    return "模型不支持：仅支持 causal decoder；encoder、embedding 或 diffusion 模型不能用于候选排序";
-  }
-  return message;
 }
 
 window.addEventListener("beforeunload", () => { historyWatchStopped = true; });

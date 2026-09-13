@@ -52,11 +52,11 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $license) -Force | Out-Nu
 Copy-Item -LiteralPath (Join-Path $repoRoot "third_party/weasel-ui/LICENSE.txt") -Destination $license -Force
 
 Write-Host "Installing frontend dependencies..."
-Invoke-Checked $npm @("--prefix", "frontend", "ci")
+Invoke-Checked $npm @("--prefix", "crates/lime-management", "ci")
 Write-Host "Building management UI and installer..."
-$tauriCli = Join-Path $repoRoot "frontend/node_modules/.bin/tauri.cmd"
+$tauriCli = Join-Path $repoRoot "crates/lime-management/node_modules/.bin/tauri.cmd"
 if (-not (Test-Path -LiteralPath $tauriCli)) { throw "Tauri CLI was not installed" }
-Invoke-Checked $tauriCli @("build", "--config", "crates/lime-tauri/tauri.conf.json", "--bundles", "nsis")
+Invoke-Checked $tauriCli @("build", "--bundles", "nsis", "--config", "crates/lime-management/src-tauri/tauri.conf.json")
 
 $bundle = Get-ChildItem (Join-Path $cargoRoot "release/bundle/nsis/*.exe") | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $bundle) { throw "Tauri did not produce an NSIS installer" }

@@ -29,6 +29,8 @@ Tauri 2 management window
   └─ settings / model / dictionary / diagnostics
 ```
 
+代码布局保持这些边界：`crates/lime-management/` 是标准 Tauri 应用根目录，`src/` 放 Vite 管理页面，`src-tauri/` 放桌面壳和 IPC 命令；`lime-core` 按 engine、llama、ranking、service 子模块组织运行时；Windows TSF 的 `lime_tsf.cpp` 通过同一翻译单元包含职责独立的 `.inl` 文件，以保留 COM 私有状态和内部链接，同时避免继续维护单个超大源文件。
+
 macOS 未来只替换最上层平台适配器和候选 UI，复用 Rust 服务 API。
 
 ## 实时输入流程

@@ -1,11 +1,11 @@
 # Rust / Tauri build output
 target/
-crates/lime-tauri/target/
-crates/lime-tauri/gen/
+crates/lime-management/src-tauri/target/
+crates/lime-management/src-tauri/gen/
 dist/
 build/
 out/
-frontend/node_modules/
+crates/lime-management/node_modules/
 
 # Local models and native runtime binaries
 *.gguf
