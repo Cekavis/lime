@@ -39,6 +39,7 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
     terminal_edit_generation_ = 0;
     return false;
   }
+
   auto* session = new (std::nothrow)
       CompositionSession(this, context, action, text, generation, remainder);
   if (!session) {
@@ -49,6 +50,13 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
     terminal_edit_generation_ = 0;
     return false;
   }
+  // Match Weasel's TSF lifecycle: register the candidate UI before the first
+  // composition is created.  Search-box hosts make their rendering choice
+  // during BeginUIElement, so this keeps that initial handshake in the same
+  // position as Weasel's implementation.
+  const bool candidate_ui_pending = action == Action::Update && !composition_;
+  if (candidate_ui_pending) BeginCandidateUi();
+
   last_edit_error_ = S_OK;
   HRESULT result = E_FAIL;
   // Ordinary composition updates use ASYNCDONTCARE so TSF can queue them when
@@ -58,6 +66,7 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
   HRESULT request = context->RequestEditSession(client_id_, session, edit_flags, &result);
   session->Release();
   if (FAILED(request)) {
+    if (candidate_ui_pending && !composition_) EndCandidateUi();
     last_edit_error_ = request;
     if (action == Action::Cancel) cancel_pending_ = true;
     if (action == Action::CommitPartial) ClearPendingPartialSelection();
@@ -75,6 +84,7 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
       // lock.
       ++edit_generation_;
       last_edit_error_ = TF_E_SYNCHRONOUS;
+      if (candidate_ui_pending && !composition_) EndCandidateUi();
       terminal_edit_pending_ = false;
       terminal_edit_generation_ = 0;
       if (action == Action::CommitPartial) ClearPendingPartialSelection();
@@ -88,6 +98,7 @@ bool TextService::RequestEdit(ITfContext* context, Action action, const std::wst
     return true;
   }
   last_edit_error_ = result;
+  if (candidate_ui_pending && !composition_) EndCandidateUi();
   if (action == Action::Cancel) cancel_pending_ = true;
   if (action == Action::CommitPartial) ClearPendingPartialSelection();
   terminal_edit_pending_ = false;

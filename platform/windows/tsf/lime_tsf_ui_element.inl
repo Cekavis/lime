@@ -85,7 +85,10 @@ class CandidateUiElement final : public ITfIntegratableCandidateListUIElement,
   HRESULT STDMETHODCALLTYPE GetPageIndex(UINT* indices, UINT size,
                                           UINT* page_count) override {
     if (!page_count) return E_POINTER;
-    *page_count = candidates_.empty() ? 0 : 1;
+    // Keep one logical page even while the snapshot is empty, matching
+    // Weasel's candidate-list contract and avoiding a special empty-list
+    // shape during the initial UI-element handshake.
+    *page_count = 1;
     if (!indices) return S_OK;
     if (size < 1 || *page_count != 1) return E_INVALIDARG;
     indices[0] = 0;

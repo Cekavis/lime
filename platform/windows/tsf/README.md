@@ -29,6 +29,8 @@ TSF DLL 和静态链接进来的 WeaselUI 使用 MSVC 静态运行库：Release 
 
 候选窗口由独立 Win32 UI 线程维护；TSF 在只读 edit session 中获取组合串起点的 `GetTextExt` 屏幕矩形（无可用 layout 时回退到 GUI caret），再按小狼毫的输入位置规则在下方留出 6px 间距。候选窗口只使用固定版本的 WeaselUI（GPLv3），复用 Weasel 的布局、DPI、字体、颜色、圆角、阴影和自定义主题语义；项目不再保留第二套内置绘制器。宿主编辑器负责显示未确认拼音，候选窗不再绘制第二行拼音。TSF 读取的光标前文通过 WeaselUI auxiliary row 显示在候选区域上方，不改变 Weasel 的 Context 序列化布局。安装包同时携带 `licenses/WeaselUI-GPL-3.0.txt` 和对应源码快照。
 
+首个 composition 更新前，候选 UI 按小狼毫的时序注册并保持单页列表契约。搜索框类宿主仍可能在 `BeginUIElement` 返回 `pbShow=FALSE` 后使用自己的集成候选 UI；这时方向、字体和颜色由宿主决定。
+
 组合串使用与小狼毫兼容的 TSF display attribute（点状下划线），并在组合串真正创建后再刷新候选窗口位置；适配层同时监听宿主的 TSF layout change，在首字符完成布局后重新读取组合串末端的位置，避免首个字母沿用上一次位置。读取光标前文优先使用通用 TSF range 移动接口，只有宿主不支持时才回退到 ACP 范围。
 
 Telegram 7.2.x 的输入框是 Qt `QTextEdit`。当 TSF range 返回空前文时，适配层在 edit session 结束后通过独立的 UI Automation MTA 查询当前获得焦点的 Qt 编辑控件，只读取 bounded `TextPattern2` caret 前缀；查询失败、密码框或焦点变化时保持 `context_available=false`，不会读取文档范围、聊天列表或预输入内容。Qt 的 `IMR_RECONVERTSTRING` 会改变选区，因此不用于前文读取。
@@ -41,4 +43,4 @@ TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使�
 
 候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。TSF 只按需要请求候选页面，重排候选数量由服务内部处理；翻页超出已加载范围时只追加 Rime 候选，不重新调用 LLM，也不产生新的历史记录。中文模式下，宿主刚刚收到数字后紧接的句号保留为半角 `.`；退格和其他按键会重置这一状态。F1–F12 等功能键由宿主处理，不参与 Lime 输入。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；取消完成前继续吞键，避免按键进入宿主文本。
 
-`third_party/weasel-ui` 是 Windows TSF 构建的必需依赖；缺少源码时 CMake 直接失败，不再切换到另一套候选窗口。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。
+`third_party/weasel-ui` 是 Windows TSF 构建的必需依赖；缺少源码时 CMake 直接失败，不再切换到另一套候选窗口。普通桌面宿主直接读取用户 Rime 主题；受限宿主通过 Lime 桌面服务取得同一主题文本，避免主题文件访问失败后回退到竖排黑边框默认样式。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。

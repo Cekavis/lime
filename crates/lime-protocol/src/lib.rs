@@ -219,6 +219,21 @@ mod tests {
     }
 
     #[test]
+    fn weasel_theme_messages_round_trip() {
+        let request = Request::GetWeaselTheme;
+        let json = serde_json::to_string(&request).expect("serialize theme request");
+        assert_eq!(json, r#"{"kind":"get_weasel_theme"}"#);
+
+        let response = Response::WeaselTheme {
+            base: "style:\n  horizontal: true\n".into(),
+            custom: "patch:\n  \"style/color_scheme\": google\n".into(),
+        };
+        let encoded = serde_json::to_string(&response).expect("serialize theme response");
+        let decoded: Response = serde_json::from_str(&encoded).expect("decode theme response");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
     fn management_payloads_are_explicit_and_current() {
         let request = Request::GetDictionaryPage {
             page: 1,

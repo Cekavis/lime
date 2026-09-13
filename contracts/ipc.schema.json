@@ -652,6 +652,22 @@
         }
       }
     },
+    "weasel_theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base",
+        "custom"
+      ],
+      "properties": {
+        "base": {
+          "type": "string"
+        },
+        "custom": {
+          "type": "string"
+        }
+      }
+    },
     "management_request": {
       "oneOf": [
         {
@@ -675,6 +691,18 @@
           "properties": {
             "kind": {
               "const": "get_status"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get_weasel_theme"
             }
           }
         },
@@ -1091,6 +1119,22 @@
             },
             "payload": {
               "$ref": "#/$defs/service_status"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "weasel_theme"
+            },
+            "payload": {
+              "$ref": "#/$defs/weasel_theme"
             }
           }
         },

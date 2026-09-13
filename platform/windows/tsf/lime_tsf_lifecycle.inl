@@ -135,6 +135,9 @@ void TextService::UpdateCandidateUi() {
       manager->UpdateUIElement(candidate_ui_->ui_id());
     }
   }
+  // A FALSE pbShow means the focused host owns the integrated candidate list.
+  // Do not open a second Weasel popup over it; that would produce duplicate
+  // candidates and different keyboard focus behavior.
   if (!should_show ||
       (candidate_ui_ && candidate_ui_->started() && !candidate_ui_external_)) {
     g_candidates.Hide();

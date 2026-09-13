@@ -28,6 +28,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+fn read_user_weasel_theme_file(name: &str) -> String {
+    let Some(appdata) = std::env::var_os("APPDATA") else {
+        return String::new();
+    };
+    fs::read_to_string(PathBuf::from(appdata).join("Rime").join(name)).unwrap_or_default()
+}
+
 fn backend_preference_for(value: &str) -> BackendPreference {
     match value {
         "cpu" => BackendPreference::Cpu,
@@ -348,6 +355,10 @@ impl CoreService {
                 }
             }
             Request::GetStatus => Response::Status(self.status()),
+            Request::GetWeaselTheme => Response::WeaselTheme {
+                base: read_user_weasel_theme_file("weasel.yaml"),
+                custom: read_user_weasel_theme_file("weasel.custom.yaml"),
+            },
             Request::LoadModel { path } => self.load_model(Path::new(&path)),
             Request::UnloadModel => self.unload_model(),
             Request::ListModelPresets => Response::ModelPresets(self.model_presets()),

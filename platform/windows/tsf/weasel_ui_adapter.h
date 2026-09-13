@@ -15,6 +15,10 @@
 
 namespace lime::tsf {
 
+// Fetches the desktop user's Weasel theme layers through the Lime service.
+// TSF may run inside an AppContainer that cannot read %APPDATA% directly.
+bool RequestWeaselThemeFiles(std::string& base, std::string& custom);
+
 // A small, thread-owned bridge between Lime's snapshot candidate model and
 // WeaselUI's rendering API.  The TSF host owns the unconfirmed composition;
 // this window renders candidates and the preceding-text auxiliary row only.

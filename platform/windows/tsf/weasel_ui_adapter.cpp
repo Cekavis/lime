@@ -6,7 +6,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 
@@ -393,10 +395,7 @@ void ApplyColorScheme(weasel::UIStyle& style, const ThemeMap& scheme) {
   color("hilited_mark_color", style.hilited_mark_color, 0);
 }
 
-bool ReadThemeFile(const std::filesystem::path& path, ThemeDocument& document) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) return false;
-
+bool ReadThemeStream(std::istream& input, ThemeDocument& document) {
   int style_indent = -1;
   int layout_indent = -1;
   int schemes_indent = -1;
@@ -508,6 +507,31 @@ bool ReadThemeFile(const std::filesystem::path& path, ThemeDocument& document) {
   return true;
 }
 
+bool ReadThemeFile(const std::filesystem::path& path, ThemeDocument& document) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) return false;
+  return ReadThemeStream(input, document);
+}
+
+bool ReadThemeText(std::string_view text, ThemeDocument& document) {
+  std::istringstream input{std::string(text)};
+  return ReadThemeStream(input, document);
+}
+
+bool ReadThemeIfPresent(const std::filesystem::path& path,
+                        ThemeDocument& document) {
+  if (path.empty()) return false;
+
+  // Start/Search and Microsoft Store run the TSF DLL from restricted
+  // AppContainer processes.  Querying an inaccessible APPDATA path through
+  // the throwing filesystem overload aborts the whole theme load and leaves
+  // WeaselUI at its vertical, black-border defaults.  Treat an inaccessible
+  // optional layer like a missing layer so the packaged theme remains usable.
+  std::error_code error;
+  if (!std::filesystem::exists(path, error) || error) return false;
+  return ReadThemeFile(path, document);
+}
+
 std::filesystem::path ModuleDirectory() {
   wchar_t buffer[MAX_PATH]{};
   const DWORD length = GetModuleFileNameW(g_instance, buffer, ARRAYSIZE(buffer));
@@ -536,12 +560,24 @@ void LoadTheme(weasel::UIStyle& style) {
   const std::filesystem::path user_yaml = appdata / L"Rime" / L"weasel.yaml";
   const std::filesystem::path user_custom = appdata / L"Rime" / L"weasel.custom.yaml";
 
-  if (!bundled.empty() && std::filesystem::exists(bundled)) ReadThemeFile(bundled, document);
-  if (!packaged.empty() && std::filesystem::exists(packaged)) ReadThemeFile(packaged, document);
-  if (!beside_dll.empty() && std::filesystem::exists(beside_dll)) ReadThemeFile(beside_dll, document);
-  if (!user_yaml.empty() && std::filesystem::exists(user_yaml)) ReadThemeFile(user_yaml, document);
-  if (!user_custom.empty() && std::filesystem::exists(user_custom)) ReadThemeFile(user_custom, document);
-  if (!explicit_path.empty() && std::filesystem::exists(explicit_path)) ReadThemeFile(explicit_path, document);
+  ReadThemeIfPresent(bundled, document);
+  ReadThemeIfPresent(packaged, document);
+  ReadThemeIfPresent(beside_dll, document);
+  ReadThemeIfPresent(user_yaml, document);
+  ReadThemeIfPresent(user_custom, document);
+
+  // A TSF instance can be loaded into Start/Search or Microsoft Store, where
+  // the AppContainer cannot read the desktop user's Rime directory.  Weasel
+  // solves this by applying its style in the desktop server process.  Ask
+  // Lime's desktop service for the same two user layers so the in-process
+  // WeaselUI renderer receives identical theme data in every host.
+  std::string service_base;
+  std::string service_custom;
+  if (RequestWeaselThemeFiles(service_base, service_custom)) {
+    if (!service_base.empty()) ReadThemeText(service_base, document);
+    if (!service_custom.empty()) ReadThemeText(service_custom, document);
+  }
+  ReadThemeIfPresent(explicit_path, document);
 
   auto set_string = [&](std::string_view key, std::wstring& target) {
     std::string value;
@@ -692,7 +728,8 @@ bool WeaselColorSchemeFallbacksMatchUpstream() {
          style.comment_text_color == black &&
          style.hilited_label_text_color == white &&
          style.hilited_comment_text_color == white &&
-         style.hilited_candidate_back_color == google_highlight;
+         style.hilited_candidate_back_color == google_highlight &&
+         google_highlight == Color(0x39, 0x75, 0xce);
 }
 
 }  // namespace testing

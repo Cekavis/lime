@@ -387,3 +387,13 @@ CandidateWindow g_candidates;
 PipeClient g_pipe;
 
 }  // namespace
+
+bool RequestWeaselThemeFiles(std::string& base, std::string& custom) {
+  base.clear();
+  custom.clear();
+  std::string body;
+  if (!g_pipe.Request(R"({"kind":"get_weasel_theme"})", body)) return false;
+  if (!JsonField(body, "base", base)) return false;
+  JsonField(body, "custom", custom);
+  return true;
+}
