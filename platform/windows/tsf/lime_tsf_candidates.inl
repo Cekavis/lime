@@ -90,6 +90,14 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
     // space while the user is holding Shift for another host gesture.
     return false;
   }
+  // A bare Space with no active composition is left to the host, matching
+  // Weasel's key sink so media controls (such as video play/pause) continue
+  // to work in Chinese mode.  Space remains Lime-owned for candidate
+  // selection or raw-preedit commit below.
+  if (key == VK_SPACE && !composition_ && preedit_.empty() &&
+      candidates_.empty()) {
+    return false;
+  }
   if (IsPreeditKey(key)) {
     wchar_t value[2] = {PreeditChar(key), 0};
     preedit_ += value;

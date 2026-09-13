@@ -37,8 +37,8 @@ Telegram 7.2.x 的输入框是 Qt `QTextEdit`。当 TSF range 返回空前文时
 
 TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使用 `TF_ES_READWRITE` 的 ASYNCDONTCARE 调度：宿主允许时同步执行，否则由 TSF 排队。`StartComposition` 即使返回 `S_OK` 也可能通过空的 `ppComposition` 表示宿主拒绝组合；适配层会检查这一点并显示明确错误。
 
-中文模式下的独立标点（空格除外）即使没有现有拼音组合串，也会建立并立即结束一个短生命周期 TSF composition；独立空格同样复用该生命周期但写入半角 U+0020。不在按键回调中直接调用 `ITfInsertAtSelection` 修改宿主 selection，避免 Chromium/WebView2 等文本上下文的重入崩溃。
+中文模式下的独立标点（空格除外）即使没有现有拼音组合串，也会建立并立即结束一个短生命周期 TSF composition；无组合串和候选时的独立空格透传给宿主，让视频播放器等宿主继续响应播放/暂停快捷键。有候选或组合串时，空格的 keydown/keyup 成对由 TSF 消费，用于选择候选或提交组合。不在按键回调中直接调用 `ITfInsertAtSelection` 修改宿主 selection，避免 Chromium/WebView2 等文本上下文的重入崩溃。
 
-候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。翻页超出已加载的 Rime 候选时只追加 Rime 候选，不重新调用 LLM，也不产生新的历史记录。F1–F12 等功能键由宿主处理，不参与 Lime 输入。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；取消完成前继续吞键，避免按键进入宿主文本。
+候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。TSF 只按需要请求候选页面，重排候选数量由服务内部处理；翻页超出已加载范围时只追加 Rime 候选，不重新调用 LLM，也不产生新的历史记录。中文模式下，宿主刚刚收到数字后紧接的句号保留为半角 `.`；退格和其他按键会重置这一状态。F1–F12 等功能键由宿主处理，不参与 Lime 输入。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；取消完成前继续吞键，避免按键进入宿主文本。
 
 `third_party/weasel-ui` 是 Windows TSF 构建的必需依赖；缺少源码时 CMake 直接失败，不再切换到另一套候选窗口。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。

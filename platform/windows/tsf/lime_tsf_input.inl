@@ -70,6 +70,19 @@ bool TextService::IsImeKey(WPARAM key) const {
 HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
                                    BOOL* eaten) {
   if (!eaten) return E_POINTER;
+  *eaten = FALSE;
+  struct SpaceKeyupProbe final {
+    TextService* owner;
+    WPARAM key;
+    BOOL* eaten;
+    ~SpaceKeyupProbe() {
+      if (key == VK_SPACE) {
+        owner->space_keyup_pending_ = *eaten != FALSE;
+      } else if (!IsShiftKey(key)) {
+        owner->space_keyup_pending_ = false;
+      }
+    }
+  } space_keyup_probe{this, key, eaten};
   try {
     // A non-Shift key turns a possible bare-Shift tap into a chord.  This is
     // deliberately done in the probe so OnKeyDown sees the same state even
@@ -155,6 +168,16 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
       *eaten = FALSE;
       return S_OK;
     }
+    // Match Weasel/Rime's ProcessKeyEvent behavior when there is no active
+    // composition or candidate list: a bare Chinese-mode Space belongs to
+    // the host (for example, a video player's play/pause shortcut).  Once a
+    // preedit or candidate page exists, the normal candidate/commit path
+    // below still consumes Space.
+    if (key == VK_SPACE && !composition_ && preedit_.empty() &&
+        candidates_.empty()) {
+      *eaten = FALSE;
+      return S_OK;
+    }
     if (IsPreeditKey(key) ||
         (IsChinesePunctuationKey(key) && !previous_page && !next_page)) {
       if (!connected_) RefreshConfigRevision();
@@ -180,6 +203,9 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
     *eaten = FALSE;
   } else if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && key == VK_SPACE) {
     *eaten = FALSE;
+  } else if (key == VK_SPACE && !composition_ && preedit_.empty() &&
+             candidates_.empty()) {
+    *eaten = FALSE;
   } else if (IsPreeditKey(key)) {
     *eaten = connected_ ? TRUE : FALSE;
   } else if (key == VK_ESCAPE &&
@@ -204,6 +230,10 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
 }
 HRESULT TextService::OnTestKeyUp(ITfContext*, WPARAM key, LPARAM lparam, BOOL* eaten) {
   if (!eaten) return E_POINTER;
+  if (ShouldConsumeSpaceKeyUp(key, space_keyup_pending_)) {
+    *eaten = TRUE;
+    return S_OK;
+  }
   if (!IsShiftKey(key)) {
     *eaten = FALSE;
     return S_OK;
@@ -221,6 +251,19 @@ HRESULT TextService::OnTestKeyUp(ITfContext*, WPARAM key, LPARAM lparam, BOOL* e
 HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
                                BOOL* eaten) {
   if (!eaten) return E_POINTER;
+  *eaten = FALSE;
+  struct SpaceKeyupResult final {
+    TextService* owner;
+    WPARAM key;
+    BOOL* eaten;
+    ~SpaceKeyupResult() {
+      if (key == VK_SPACE) {
+        owner->space_keyup_pending_ = *eaten != FALSE;
+      } else if (!IsShiftKey(key)) {
+        owner->space_keyup_pending_ = false;
+      }
+    }
+  } space_keyup_result{this, key, eaten};
   try {
     // Clear the one-key numeric punctuation history as soon as an actual
     // non-period key arrives, even when a pending TSF edit causes the handler
@@ -308,6 +351,11 @@ HRESULT TextService::OnKeyUp(ITfContext* context, WPARAM key, LPARAM lparam,
                              BOOL* eaten) {
   if (!eaten) return E_POINTER;
   try {
+    if (ShouldConsumeSpaceKeyUp(key, space_keyup_pending_)) {
+      space_keyup_pending_ = false;
+      *eaten = TRUE;
+      return S_OK;
+    }
     if (!IsShiftKey(key)) {
       *eaten = FALSE;
       return S_OK;

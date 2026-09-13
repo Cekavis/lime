@@ -48,6 +48,23 @@ int wmain() {
     CHECK(provider->GetDisplayAttributeInfo(unknown, &info) == E_INVALIDARG);
 
     CHECK(testing::WeaselColorSchemeFallbacksMatchUpstream());
+
+    // With no active composition or candidates, a bare Chinese-mode Space
+    // must remain host-owned so media controls (for example, video
+    // play/pause) still receive it.  The key-up probe follows the same
+    // pass-through contract.
+    BOOL eaten = TRUE;
+    CHECK(SUCCEEDED(service.OnTestKeyDown(nullptr, VK_SPACE, 0, &eaten)));
+    CHECK(eaten == FALSE);
+    eaten = TRUE;
+    CHECK(SUCCEEDED(service.OnKeyDown(nullptr, VK_SPACE, 0, &eaten)));
+    CHECK(eaten == FALSE);
+    eaten = TRUE;
+    CHECK(SUCCEEDED(service.OnTestKeyUp(nullptr, VK_SPACE, 0, &eaten)));
+    CHECK(eaten == FALSE);
+    eaten = TRUE;
+    CHECK(SUCCEEDED(service.OnKeyUp(nullptr, VK_SPACE, 0, &eaten)));
+    CHECK(eaten == FALSE);
   }
 
   if (SUCCEEDED(init)) CoUninitialize();
