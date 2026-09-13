@@ -14,8 +14,8 @@ Windows 候选窗口由 TSF 原生层负责。Lime 只复用 vendored `third_par
 资源与主题：
 
 - 内置 `third_party/rime/weasel.yaml` 提供默认样式；发布时由脚本复制到安装包的 `rime/` 资源目录。
-- 用户配置按安装目录、用户 Rime 目录和 `LIME_WEASEL_YAML` 覆盖，未知字段使用 Weasel 默认值。
-- 普通桌面进程直接读取用户 Rime 目录；Start/Search 和 Microsoft Store 等受限宿主无法读取该目录时，TSF 通过 Lime 桌面服务取得同一组主题文本，再由同一个解析器应用。单个覆盖文件不可读只会跳过该层，不会让整个样式回退到默认的竖排黑边框。
+- 用户配置按安装目录、`%LOCALAPPDATA%/Lime/rime`（或 `LIME_DATA_DIR/rime`）和显式的 `LIME_WEASEL_YAML` 覆盖，未知字段使用 Weasel 默认值。
+- 普通桌面进程直接读取 Lime 自有数据目录；Start/Search 和 Microsoft Store 等受限宿主无法读取该目录时，TSF 通过 Lime 桌面服务取得同一组 Lime 主题文本，再由同一个解析器应用。单个覆盖文件不可读只会跳过该层，不会让整个样式回退到默认的竖排黑边框。
 - TSF 进程只解析候选窗口需要的样式字段，不把主题文件路径传给 WeaselUI。
 
 后续改进保留为独立工作：

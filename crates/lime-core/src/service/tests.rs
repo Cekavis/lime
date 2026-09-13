@@ -11,6 +11,35 @@ fn requested_candidate_limit_only_controls_visible_prefix() {
 }
 
 #[test]
+fn weasel_theme_reads_only_lime_data_directory() {
+    let directory = std::env::temp_dir().join(format!(
+        "lime-core-theme-test-{}-{}",
+        std::process::id(),
+        now_unix_ms()
+    ));
+    let theme_dir = directory.join("rime");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&theme_dir).unwrap();
+    fs::write(theme_dir.join("weasel.yaml"), "style:\n  font_point: 15\n").unwrap();
+    fs::write(
+        theme_dir.join("weasel.custom.yaml"),
+        "patch:\n  style/font_point: 16\n",
+    )
+    .unwrap();
+
+    let service = CoreService::new(Some(directory.clone()));
+    assert_eq!(
+        service.handle(Request::GetWeaselTheme),
+        Response::WeaselTheme {
+            base: "style:\n  font_point: 15\n".into(),
+            custom: "patch:\n  style/font_point: 16\n".into(),
+        }
+    );
+
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn candidate_extension_reuses_cached_final_order_and_remainders() {
     let candidate = |text: &str| lime_protocol::Candidate {
         display_text: text.into(),

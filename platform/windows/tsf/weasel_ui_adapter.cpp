@@ -523,7 +523,7 @@ bool ReadThemeIfPresent(const std::filesystem::path& path,
   if (path.empty()) return false;
 
   // Start/Search and Microsoft Store run the TSF DLL from restricted
-  // AppContainer processes.  Querying an inaccessible APPDATA path through
+  // AppContainer processes.  Querying an inaccessible Lime data path through
   // the throwing filesystem overload aborts the whole theme load and leaves
   // WeaselUI at its vertical, black-border defaults.  Treat an inaccessible
   // optional layer like a missing layer so the packaged theme remains usable.
@@ -547,18 +547,31 @@ std::filesystem::path EnvironmentPath(const wchar_t* name) {
   return std::filesystem::path(buffer, buffer + length);
 }
 
+std::filesystem::path LimeDataDirectory() {
+  const std::filesystem::path explicit_path = EnvironmentPath(L"LIME_DATA_DIR");
+  if (!explicit_path.empty()) return explicit_path;
+  const std::filesystem::path local_app_data = EnvironmentPath(L"LOCALAPPDATA");
+  if (local_app_data.empty()) return {};
+  return local_app_data / L"Lime";
+}
+
 void LoadTheme(weasel::UIStyle& style) {
   SetDefaultStyle(style);
   try {
   ThemeDocument document;
   const std::filesystem::path module = ModuleDirectory();
-  const std::filesystem::path appdata = EnvironmentPath(L"APPDATA");
   const std::filesystem::path explicit_path = EnvironmentPath(L"LIME_WEASEL_YAML");
   const std::filesystem::path bundled = module / L"resources" / L"rime" / L"weasel.yaml";
   const std::filesystem::path packaged = module / L"rime" / L"weasel.yaml";
   const std::filesystem::path beside_dll = module / L"weasel.yaml";
-  const std::filesystem::path user_yaml = appdata / L"Rime" / L"weasel.yaml";
-  const std::filesystem::path user_custom = appdata / L"Rime" / L"weasel.custom.yaml";
+  const std::filesystem::path lime_data_dir = LimeDataDirectory();
+  const std::filesystem::path user_theme_dir =
+      lime_data_dir.empty() ? std::filesystem::path{} : lime_data_dir / L"rime";
+  const std::filesystem::path user_yaml =
+      user_theme_dir.empty() ? std::filesystem::path{} : user_theme_dir / L"weasel.yaml";
+  const std::filesystem::path user_custom = user_theme_dir.empty()
+      ? std::filesystem::path{}
+      : user_theme_dir / L"weasel.custom.yaml";
 
   ReadThemeIfPresent(bundled, document);
   ReadThemeIfPresent(packaged, document);
@@ -567,9 +580,8 @@ void LoadTheme(weasel::UIStyle& style) {
   ReadThemeIfPresent(user_custom, document);
 
   // A TSF instance can be loaded into Start/Search or Microsoft Store, where
-  // the AppContainer cannot read the desktop user's Rime directory.  Weasel
-  // solves this by applying its style in the desktop server process.  Ask
-  // Lime's desktop service for the same two user layers so the in-process
+  // the AppContainer cannot read Lime's data directory. Ask Lime's desktop
+  // service for the same two Lime-owned user layers so the in-process
   // WeaselUI renderer receives identical theme data in every host.
   std::string service_base;
   std::string service_custom;

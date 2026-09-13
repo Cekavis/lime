@@ -28,11 +28,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-fn read_user_weasel_theme_file(name: &str) -> String {
-    let Some(appdata) = std::env::var_os("APPDATA") else {
+fn read_user_weasel_theme_file(data_dir: Option<&Path>, name: &str) -> String {
+    let Some(data_dir) = data_dir else {
         return String::new();
     };
-    fs::read_to_string(PathBuf::from(appdata).join("Rime").join(name)).unwrap_or_default()
+    fs::read_to_string(data_dir.join("rime").join(name)).unwrap_or_default()
 }
 
 fn backend_preference_for(value: &str) -> BackendPreference {
@@ -356,8 +356,8 @@ impl CoreService {
             }
             Request::GetStatus => Response::Status(self.status()),
             Request::GetWeaselTheme => Response::WeaselTheme {
-                base: read_user_weasel_theme_file("weasel.yaml"),
-                custom: read_user_weasel_theme_file("weasel.custom.yaml"),
+                base: read_user_weasel_theme_file(self.data_dir.as_deref(), "weasel.yaml"),
+                custom: read_user_weasel_theme_file(self.data_dir.as_deref(), "weasel.custom.yaml"),
             },
             Request::LoadModel { path } => self.load_model(Path::new(&path)),
             Request::UnloadModel => self.unload_model(),

@@ -43,4 +43,4 @@ TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使�
 
 候选分页支持 PageUp/PageDown、未移位的主键盘 `-`/`=`、小键盘 `-`/`+` 和 Weasel 滚轮。TSF 只按需要请求候选页面，重排候选数量由服务内部处理；翻页超出已加载范围时只追加 Rime 候选，不重新调用 LLM，也不产生新的历史记录。中文模式下，宿主刚刚收到数字后紧接的句号保留为半角 `.`；退格和其他按键会重置这一状态。F1–F12 等功能键由宿主处理，不参与 Lime 输入。Esc 或退格清空最后一个字母时，会先删除 TSF 组合范围再结束组合；取消完成前继续吞键，避免按键进入宿主文本。
 
-`third_party/weasel-ui` 是 Windows TSF 构建的必需依赖；缺少源码时 CMake 直接失败，不再切换到另一套候选窗口。普通桌面宿主直接读取用户 Rime 主题；受限宿主通过 Lime 桌面服务取得同一主题文本，避免主题文件访问失败后回退到竖排黑边框默认样式。主题加载顺序和用户迁移方式见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。
+`third_party/weasel-ui` 是 Windows TSF 构建的必需依赖；缺少源码时 CMake 直接失败，不再切换到另一套候选窗口。普通桌面宿主直接读取 Lime 自有目录中的主题；受限宿主通过 Lime 桌面服务取得同一主题文本，避免主题文件访问失败后回退到竖排黑边框默认样式。主题加载顺序和用户目录见 [`docs/design/weasel-ui-integration.md`](../../../docs/design/weasel-ui-integration.md)。
