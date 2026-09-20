@@ -1,0 +1,23 @@
+{
+  "kind": "start_benchmark",
+  "payload": {
+    "models": [
+      "本地模型 A",
+      "本地模型 B"
+    ],
+    "modes": [
+      "full",
+      "initials"
+    ],
+    "configurations": [
+      {
+        "llm_rerank_count": 16,
+        "preceding_text_char_limit": 64
+      },
+      {
+        "llm_rerank_count": 32,
+        "preceding_text_char_limit": 128
+      }
+    ]
+  }
+}

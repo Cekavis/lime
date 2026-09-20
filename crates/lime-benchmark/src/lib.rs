@@ -8,8 +8,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-const MAX_CASES: usize = 5_000;
-const MAX_DATASET_BYTES: usize = 8 * 1024 * 1024;
+mod corpus;
+pub use corpus::{
+    builtin_dataset, builtin_dataset_info, builtin_dataset_sha256,
+    builtin_dataset_with_context_limit, visit_builtin_cases, CorpusInfo, DatasetInfo,
+};
+
+const MAX_CASES: usize = 250_000;
+const MAX_DATASET_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_CONTEXT_CHARS: usize = 4_096;
 const MAX_TARGET_CHARS: usize = 32;
 
@@ -23,7 +29,7 @@ pub struct Dataset {
     pub cases: Vec<Case>,
 }
 
-/// One expected Chinese continuation and its hand-reviewed pinyin syllables.
+/// One expected Chinese continuation and its frozen pinyin syllables.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
@@ -91,11 +97,6 @@ pub struct Report {
     pub complete: bool,
 }
 
-/// Load the bundled 48-case daily-language dataset.
-pub fn builtin_dataset() -> Result<Dataset, String> {
-    parse_dataset(include_str!("../data/builtin.json"))
-}
-
 /// Parse and validate a JSON dataset. Invalid cases are returned as errors; none are dropped.
 pub fn parse_dataset(json: &str) -> Result<Dataset, String> {
     let dataset: Dataset = serde_json::from_str(json)
@@ -150,7 +151,7 @@ pub fn validate_case(case: &Case) -> Result<(), String> {
         return Err(format!("case {} category must not be empty", case.id));
     }
     let context_chars = case.context.chars().count();
-    if context_chars == 0 || case.context.trim().is_empty() {
+    if context_chars == 0 {
         return Err(format!("case {} context must not be empty", case.id));
     }
     if context_chars > MAX_CONTEXT_CHARS {
@@ -457,26 +458,22 @@ mod tests {
     }
 
     #[test]
-    fn bundled_dataset_is_valid_and_has_four_categories() {
+    fn bundled_dataset_is_valid_and_has_two_real_text_categories() {
         let dataset = builtin_dataset().expect("bundled dataset should validate");
-        assert_eq!(dataset.cases.len(), 48);
-        assert_eq!(preedit(&dataset.cases[29], InputMode::Full), "fang'an");
-        assert_eq!(preedit(&dataset.cases[30], InputMode::Initials), "wt");
+        validate_dataset(&dataset).unwrap();
+        assert_eq!(dataset.cases.len(), 85_565);
         let categories: HashSet<_> = dataset
             .cases
             .iter()
             .map(|case| case.category.as_str())
             .collect();
-        assert_eq!(
-            categories,
-            HashSet::from(["chat", "search", "prompt", "article"])
-        );
+        assert_eq!(categories, HashSet::from(["zhihu", "classics"]));
     }
 
     #[test]
     fn validation_rejects_bad_context_target_alignment_and_syllables() {
         let mut value = tiny_dataset();
-        value.cases[0].context = "   ".to_owned();
+        value.cases[0].context = String::new();
         assert!(validate_dataset(&value).is_err());
         value = tiny_dataset();
         value.cases[0].context = "我想吃".to_owned();
@@ -502,6 +499,23 @@ mod tests {
             "ignored":"this must fail"
         }"#;
         assert!(parse_dataset(json).is_err());
+    }
+
+    #[test]
+    fn actual_whitespace_prefix_is_valid_and_is_not_trimmed() {
+        let mut value = tiny_dataset();
+        value.cases[0].context = " \n ".to_owned();
+        validate_dataset(&value).unwrap();
+        let observation = observe(
+            &value.cases[0],
+            InputMode::Full,
+            Prediction {
+                top1: None,
+                error: None,
+                elapsed_ms: None,
+            },
+        );
+        assert_eq!(observation.context, " \n ");
     }
 
     #[test]

@@ -30,6 +30,8 @@ jobs:
       - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.response.example.json --spec=draft2020
       - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.management.request.example.json --spec=draft2020
       - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.management.response.example.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.benchmark.request.example.json --spec=draft2020
+      - run: bunx --yes ajv-cli@5 validate -s contracts/ipc.schema.json -d contracts/ipc.benchmark.response.example.json --spec=draft2020
       - run: bunx --yes ajv-cli@5 validate -s contracts/persistence.schema.json -d contracts/config.persisted.example.json --spec=draft2020
       - run: bunx --yes ajv-cli@5 validate -s contracts/persistence.schema.json -d contracts/model-presets.persisted.example.json --spec=draft2020
       - run: bunx --yes ajv-cli@5 validate -s contracts/errors.json -d contracts/errors.catalog.json --spec=draft2020
@@ -49,6 +51,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: npm ci --prefix crates/lime-management
       - run: npm run build --prefix crates/lime-management
+      - run: node --test crates/lime-management/src/ui/benchmark.test.mjs
       - uses: dtolnay/rust-toolchain@stable
       - name: Provide release resource placeholders for Tauri check
         run: |

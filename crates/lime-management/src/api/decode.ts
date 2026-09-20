@@ -2,11 +2,12 @@ import type {
   BoundaryRollback,
   Candidate,
   CandidateDiagnostic,
-  BenchmarkCase,
+  BenchmarkCorpus,
   BenchmarkDatasetView,
   BenchmarkMode,
   BenchmarkObservation,
   BenchmarkReportView,
+  BenchmarkResult,
   BenchmarkRunState,
   BenchmarkRunStatus,
   BenchmarkSummary,
@@ -250,32 +251,26 @@ function decodeBenchmarkModes(value: unknown): BenchmarkMode[] {
   return [...new Set(value.map(decodeBenchmarkMode))];
 }
 
-function decodeBenchmarkCase(value: unknown): BenchmarkCase | null {
+function decodeBenchmarkCorpus(value: unknown): BenchmarkCorpus | null {
   const item = asRecord(value);
   const id = string(item?.id);
   if (id === null) return null;
-  const rawSyllables = item?.syllables;
-  const syllables = Array.isArray(rawSyllables)
-    ? rawSyllables.map(string).filter((part): part is string => part !== null)
-    : typeof rawSyllables === "string" ? rawSyllables.trim().split(/\s+/).filter(Boolean) : [];
   return {
     id,
-    category: nullableString(item?.category),
-    context: string(item?.context) ?? string(item?.preceding_text) ?? "",
-    expected: string(item?.expected) ?? string(item?.target) ?? "",
-    syllables,
+    name: string(item?.name) ?? id,
+    characters: integer(item?.characters),
+    cases: integer(item?.cases),
   };
 }
 
 export function decodeBenchmarkDataset(value: unknown): BenchmarkDatasetView {
   const item = asRecord(value);
-  const rawCases = Array.isArray(item?.cases) ? item.cases : Array.isArray(item?.items) ? item.items : [];
+  const rawCorpora = Array.isArray(item?.corpora) ? item.corpora : [];
   return {
     id: nullableString(item?.id) ?? nullableString(item?.dataset_id),
     name: nullableString(item?.name) ?? nullableString(item?.dataset_name),
     version: nullableNumber(item?.version) ?? nullableNumber(item?.dataset_version),
-    sha256: nullableString(item?.sha256) ?? nullableString(item?.dataset_sha256),
-    cases: rawCases.map(decodeBenchmarkCase).filter((entry): entry is BenchmarkCase => entry !== null),
+    corpora: rawCorpora.map(decodeBenchmarkCorpus).filter((entry): entry is BenchmarkCorpus => entry !== null),
   };
 }
 
@@ -340,25 +335,44 @@ export function decodeBenchmarkReport(value: unknown): BenchmarkReportView | nul
   };
 }
 
+function decodeBenchmarkStatus(value: unknown): BenchmarkRunStatus {
+  return value === "running" || value === "stopping" || value === "cancelled" || value === "completed" || value === "failed" ? value : "idle";
+}
+
+function decodeBenchmarkResult(value: unknown): BenchmarkResult | null {
+  const item = asRecord(value);
+  const id = string(item?.id);
+  if (id === null) return null;
+  const configuration = asRecord(item?.configuration);
+  return {
+    id,
+    modelName: string(item?.model_name) ?? "",
+    modelSha256: nullableString(item?.model_sha256),
+    configuration: {
+      llm_rerank_count: integer(configuration?.llm_rerank_count),
+      preceding_text_char_limit: integer(configuration?.preceding_text_char_limit),
+    },
+    mode: decodeBenchmarkMode(item?.mode),
+    config: item?.config == null ? null : decodeConfigSnapshot({ revision: 0, config: item.config }).config,
+    status: item?.status === "pending" ? "pending" : decodeBenchmarkStatus(item?.status),
+    report: decodeBenchmarkReport(item?.report),
+    error: nullableString(item?.error),
+  };
+}
+
 export function decodeBenchmarkRunState(value: unknown): BenchmarkRunState {
   const item = asRecord(value);
-  const rawStatus = item?.status;
-  const status: BenchmarkRunStatus = rawStatus === "running" || rawStatus === "stopping" || rawStatus === "cancelled" || rawStatus === "completed" || rawStatus === "failed"
-    ? rawStatus
-    : "idle";
+  const rawResults = Array.isArray(item?.results) ? item.results : [];
   return {
-    status,
-    runId: nullableString(item?.run_id) ?? nullableString(item?.runId),
+    status: decodeBenchmarkStatus(item?.status),
     datasetId: nullableString(item?.dataset_id) ?? nullableString(item?.datasetId),
     datasetName: nullableString(item?.dataset_name) ?? nullableString(item?.datasetName),
     datasetVersion: nullableNumber(item?.dataset_version) ?? nullableNumber(item?.datasetVersion),
     configRevision: asNumber(item?.config_revision ?? item?.configRevision),
-    modelName: nullableString(item?.model_name) ?? nullableString(item?.modelName),
-    modelSha256: nullableString(item?.model_sha256) ?? nullableString(item?.modelSha256),
-    config: item?.config == null ? null : decodeConfigSnapshot({ revision: item?.config_revision ?? 0, config: item.config }).config,
+    rimeSnapshotSha256: nullableString(item?.rime_snapshot_sha256),
     total: integer(item?.total),
     completed: integer(item?.completed),
-    report: decodeBenchmarkReport(item?.report),
+    results: rawResults.map(decodeBenchmarkResult).filter((entry): entry is BenchmarkResult => entry !== null),
     error: nullableString(item?.error),
   };
 }

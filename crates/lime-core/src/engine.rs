@@ -44,6 +44,7 @@ pub struct RimeKeyResult {
 #[derive(Debug)]
 pub struct RimeEngine {
     native: Option<NativeBackend>,
+    revision: u64,
 }
 
 impl Default for RimeEngine {
@@ -54,7 +55,15 @@ impl Default for RimeEngine {
 
 impl RimeEngine {
     pub fn new() -> Self {
-        Self { native: None }
+        Self {
+            native: None,
+            revision: 0,
+        }
+    }
+
+    /// Changes when the schema or user dictionary may have changed.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Returns whether an initialized native librime session is available.
@@ -119,6 +128,7 @@ impl RimeEngine {
 
     /// Changes the active native schema without rewriting any published resource files.
     pub fn select_schema(&mut self, schema: &str) -> Result<(), CoreError> {
+        self.revision = self.revision.wrapping_add(1);
         self.native
             .as_mut()
             .ok_or_else(|| {
@@ -259,6 +269,7 @@ impl CandidateEngine for RimeEngine {
     }
 
     fn learn(&mut self, pinyin: &str, text: &str) -> Result<(), CoreError> {
+        self.revision = self.revision.wrapping_add(1);
         self.native
             .as_mut()
             .ok_or_else(|| {
@@ -283,6 +294,7 @@ impl CandidateEngine for RimeEngine {
     }
 
     fn import_dictionary(&mut self, entries: &[DictionaryEntry]) -> Result<(), CoreError> {
+        self.revision = self.revision.wrapping_add(1);
         for entry in entries {
             if Self::normalized(&entry.pinyin).is_empty() || entry.text.trim().is_empty() {
                 return Err(CoreError::new(
@@ -303,6 +315,7 @@ impl CandidateEngine for RimeEngine {
     }
 
     fn clear_dictionary(&mut self) -> Result<(), CoreError> {
+        self.revision = self.revision.wrapping_add(1);
         self.native
             .as_mut()
             .ok_or_else(|| {

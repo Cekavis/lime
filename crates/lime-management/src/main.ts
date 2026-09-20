@@ -3,9 +3,10 @@ import "./style.css";
 import { clearDictionary, clearHistory, deleteModelPreset, getBenchmarkDataset, getBenchmarkStatus, getConfig, getDictionaryPage, getHistoryPage, getStatus, importDictionary, listModelPresets, loadModel, renameModelPreset, saveModelPreset, selectModelPreset, setConfig, startBenchmark, stopBenchmark, testInput, unloadModel, waitForHistory } from "./api/commands";
 import { diagnosticsFrom } from "./api/decode";
 import { DICTIONARY_PAGE_SIZE, HISTORY_PAGE_SIZE } from "./api/types";
-import type { BenchmarkDatasetView, BenchmarkMode, BenchmarkObservation, BenchmarkReportView, BenchmarkRunState, Candidate, CandidateDiagnostic, Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, HistoryPage, InputData, LlmPerformance, ModelInfo, ModelPreset, ServiceState, ServiceStatus } from "./api/types";
+import type { BenchmarkConfiguration, BenchmarkDatasetView, BenchmarkMode, BenchmarkObservation, BenchmarkResult, BenchmarkRunState, Candidate, CandidateDiagnostic, Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, HistoryPage, InputData, LlmPerformance, ModelInfo, ModelPreset, ServiceState, ServiceStatus } from "./api/types";
 import { errorMessage, escapeHtml, formatBytes, formatDecimal, formatLogprobs, formatMilliseconds, formatTimestamp } from "./ui/format";
 import { renderBoundaryRollback } from "./ui/boundary-rollback";
+import { benchmarkModeLabel, benchmarkResultAccuracy, sortBenchmarkResults } from "./ui/benchmark";
 import { renderAppTemplate } from "./app/template";
 type RefreshReason = "initial" | "manual" | "poll" | "tab" | "visibility" | "mutation";
 
@@ -51,20 +52,20 @@ let benchmarkDataset: BenchmarkDatasetView | null = null;
 let benchmarkDatasetLoaded = false;
 let benchmarkState: BenchmarkRunState = {
   status: "idle",
-  runId: null,
   datasetId: null,
   datasetName: null,
   datasetVersion: null,
   configRevision: null,
-  modelName: null,
-  modelSha256: null,
-  config: null,
+  rimeSnapshotSha256: null,
   total: 0,
   completed: 0,
-  report: null,
+  results: [],
   error: null,
 };
-let benchmarkRenderedReportKey = "";
+const benchmarkExpandedResults = new Set<string>();
+const benchmarkDetailContent = new WeakMap<HTMLElement, string>();
+let benchmarkModelsInitialized = false;
+let benchmarkActionInFlight = false;
 let benchmarkRefreshInFlight: Promise<void> | null = null;
 let benchmarkRefreshQueued = false;
 let benchmarkRefreshEpoch = 0;
@@ -477,12 +478,8 @@ const benchmarkStatusLabels: Record<BenchmarkRunState["status"], string> = {
   failed: "失败",
 };
 
-function benchmarkModeLabel(mode: BenchmarkMode): string {
-  return mode === "full" ? "全拼" : "首拼";
-}
-
 function benchmarkCategoryLabel(category: string | null): string {
-  return category && category.trim() ? category : "未分类";
+  return benchmarkDataset?.corpora.find((corpus) => corpus.id === category)?.name ?? category ?? "—";
 }
 
 function benchmarkTabActive(): boolean {
@@ -492,23 +489,46 @@ function benchmarkTabActive(): boolean {
 function renderBenchmarkDataset(dataset: BenchmarkDatasetView) {
   const target = query<HTMLElement>("[data-benchmark-corpora]");
   if (!target) return;
-  const counts = new Map<string, number>();
-  for (const item of dataset.cases) {
-    const category = item.category ?? "";
-    counts.set(category, (counts.get(category) ?? 0) + 1);
-  }
-  const categories = [...counts.keys()].sort((left, right) => benchmarkCategoryLabel(left).localeCompare(benchmarkCategoryLabel(right), "zh-CN"));
-  const previous = new Set(all<HTMLInputElement>("[data-benchmark-category]").filter((input) => input.checked).map((input) => input.value));
-  if (!categories.length) {
-    target.innerHTML = '<p class="muted">暂无可用语料。</p>';
+  target.textContent = dataset.corpora.length
+    ? dataset.corpora.map((corpus) => corpus.name + "（" + corpus.characters.toLocaleString("zh-CN") + " 字）").join("、")
+    : "暂无可用语料。";
+}
+
+function renderBenchmarkModels(presets: ModelPreset[]) {
+  const target = query<HTMLElement>("[data-benchmark-models]");
+  if (!target) return;
+  if (!presets.length) {
+    target.innerHTML = '<span class="muted">请先在设置中添加模型。</span>';
     return;
   }
-  const preserveSelection = previous.size > 0;
-  target.innerHTML = categories.map((category) => {
-    const value = escapeHtml(category);
-    const checked = preserveSelection ? previous.has(category) : true;
-    return '<label class="check-option"><input data-benchmark-category type="checkbox" value="' + value + '"' + (checked ? " checked" : "") + ' /><span>' + escapeHtml(benchmarkCategoryLabel(category)) + ' <small class="muted">' + counts.get(category) + ' 条</small></span></label>';
-  }).join("");
+  const existing = new Map([...target.querySelectorAll<HTMLInputElement>("[data-benchmark-model]")].map((input) => [input.value, input.closest("label")!]));
+  const defaultName = presets.find((preset) => preset.loaded)?.name ?? presets[0].name;
+  const labels = presets.map((preset) => {
+    const previous = existing.get(preset.name);
+    if (previous) return previous;
+    const label = document.createElement("label");
+    label.className = "check-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.benchmarkModel = "";
+    input.value = preset.name;
+    input.checked = !benchmarkModelsInitialized && preset.name === defaultName;
+    const name = document.createElement("span");
+    name.textContent = preset.name;
+    label.append(input, name);
+    return label;
+  });
+  reconcileBenchmarkChildren(target, labels);
+  benchmarkModelsInitialized = true;
+}
+
+function reconcileBenchmarkChildren(target: HTMLElement, children: HTMLElement[]) {
+  const focused = document.activeElement instanceof HTMLElement && target.contains(document.activeElement) ? document.activeElement : null;
+  children.forEach((child, index) => {
+    if (target.children[index] !== child) target.insertBefore(child, target.children[index] ?? null);
+  });
+  while (target.children.length > children.length) target.lastElementChild?.remove();
+  if (focused?.isConnected && focused !== document.activeElement) focused.focus({ preventScroll: true });
 }
 
 function benchmarkAccuracy(value: number | null): string {
@@ -517,44 +537,81 @@ function benchmarkAccuracy(value: number | null): string {
   return formatDecimal(Math.max(0, Math.min(1, normalized)) * 100) + "%";
 }
 
-function benchmarkSummaryRows(report: BenchmarkReportView): string {
-  if (!report.summaries.length) return '<tr><td colspan="8" class="muted">暂无汇总</td></tr>';
-  return report.summaries.map((summary) => {
-    return '<tr><td>' + escapeHtml(benchmarkCategoryLabel(summary.category)) + '</td><td>' + benchmarkModeLabel(summary.mode) + '</td><td class="mono numeric">' + summary.total + '</td><td class="mono numeric">' + summary.completed + '</td><td class="mono numeric">' + summary.correct + '</td><td class="mono numeric">' + summary.noPrediction + '</td><td class="mono numeric">' + summary.errors + '</td><td class="mono numeric">' + benchmarkAccuracy(summary.accuracy) + '</td></tr>';
-  }).join("");
-}
-
 function benchmarkObservationRows(observations: BenchmarkObservation[]): string {
   return observations.map((observation) => {
-    const outcome = observation.error ? "错误" : observation.correct === true ? "正确" : observation.correct === false ? "不正确" : "—";
-    const outcomeClass = observation.error || observation.correct === false ? "benchmark-observation-error" : observation.correct === true ? "benchmark-observation-match" : "";
-    const errorText = observation.error ? "：" + observation.error : "";
-    return '<tr class="' + outcomeClass + '"><td>' + escapeHtml(benchmarkCategoryLabel(observation.category)) + '</td><td>' + benchmarkModeLabel(observation.mode) + '</td><td>' + escapeHtml(observation.context || "（空）") + '</td><td class="mono">' + escapeHtml(observation.preedit || "—") + '</td><td>' + escapeHtml(observation.expected || "—") + '</td><td>' + escapeHtml(observation.top1 || "—") + '</td><td>' + escapeHtml(outcome + errorText) + '</td></tr>';
+    return '<tr class="benchmark-observation-error"><td>' + escapeHtml(benchmarkCategoryLabel(observation.category)) + '</td><td>' + escapeHtml(observation.context || "（空）") + '</td><td class="mono">' + escapeHtml(observation.preedit || "—") + '</td><td>' + escapeHtml(observation.expected || "—") + '</td><td>' + escapeHtml(observation.top1 || "—") + '</td><td>' + escapeHtml(observation.error || "首位不匹配") + '</td></tr>';
   }).join("");
 }
 
-function renderBenchmarkReport(report: BenchmarkReportView, state: BenchmarkRunState) {
-  const key = JSON.stringify(report);
-  if (key === benchmarkRenderedReportKey) return;
-  benchmarkRenderedReportKey = key;
-  const summary = query<HTMLElement>("[data-benchmark-summary]");
-  const details = query<HTMLElement>("[data-benchmark-details]");
-  const datasetLabel = report.datasetName || state.datasetName;
-  const modelLabel = state.modelName;
-  const configLabel = state.config
-    ? "重排 " + state.config.llm_rerank_count + " · 采纳 " + state.config.llm_effective_count + " · 上下文 " + state.config.llm_context_token_limit
-    : "";
-  if (summary) {
-    const meta = [datasetLabel ? "语料集：" + datasetLabel : "", modelLabel ? "模型：" + modelLabel : "", configLabel ? "配置：" + configLabel : ""].filter(Boolean).join(" · ");
-    const runError = state.error ? '<p class="notice-inline error">' + escapeHtml(state.error) + '</p>' : "";
-    summary.innerHTML = runError + (meta ? '<p class="benchmark-report-meta muted">' + escapeHtml(meta) + '</p>' : "") + '<div class="table-wrap benchmark-summary-wrap"><table class="benchmark-summary-table"><thead><tr><th>语料</th><th>模式</th><th>样本</th><th>完成</th><th>正确</th><th>无结果</th><th>错误</th><th>准确率</th></tr></thead><tbody>' + benchmarkSummaryRows(report) + '</tbody></table></div>';
+function benchmarkResultDetails(result: BenchmarkResult): string {
+  const error = result.error ? '<p class="notice-inline error">' + escapeHtml(result.error) + '</p>' : "";
+  const examples = (result.report?.observations ?? []).filter((item) => item.error || item.correct === false).slice(0, 40);
+  return error + (examples.length
+    ? '<div class="table-wrap benchmark-observations-wrap"><table class="benchmark-observations-table"><thead><tr><th>语料</th><th>上文</th><th>拼音</th><th>目标词</th><th>首位结果</th><th>错误</th></tr></thead><tbody>' + benchmarkObservationRows(examples) + '</tbody></table></div>'
+    : '<p class="muted">' + (result.status === "completed" ? "暂无错误记录。" : "暂无错误样例。") + '</p>');
+}
+
+function renderBenchmarkResults(state: BenchmarkRunState) {
+  const target = query<HTMLElement>("[data-benchmark-summary]");
+  if (!target) return;
+  if (!state.results.length) {
+    const message = state.error || (state.status === "idle" ? "选择模型和配置后开始评测。" : "等待评测结果。");
+    target.innerHTML = '<p class="' + (state.error ? "notice-inline error" : "muted") + '">' + escapeHtml(message) + '</p>';
+    return;
   }
-  if (!details) return;
-  const failed = report.observations.filter((observation) => observation.error || observation.correct === false);
-  const examples = (failed.length ? failed : report.observations).slice(0, 40);
-  details.innerHTML = examples.length
-    ? '<div class="table-wrap benchmark-observations-wrap"><table class="benchmark-observations-table"><thead><tr><th>语料</th><th>模式</th><th>上文</th><th>拼音</th><th>目标</th><th>首位结果</th><th>结果</th></tr></thead><tbody>' + benchmarkObservationRows(examples) + '</tbody></table></div>'
-    : '<p class="muted">暂无错误记录。</p>';
+  const corpora = benchmarkDataset?.corpora ?? [{ id: "zhihu", name: "知乎" }, { id: "classics", name: "经典文章" }];
+  const headings = ["模型", "配置", "总准确率", ...corpora.map((corpus) => corpus.name), "状态", ""];
+  let body = target.querySelector<HTMLTableSectionElement>("[data-benchmark-results]");
+  if (!body) {
+    target.innerHTML = '<p class="notice-inline error is-hidden" data-benchmark-run-error></p><div class="table-wrap benchmark-summary-wrap"><table class="benchmark-summary-table"><thead><tr>' + headings.map((heading) => '<th>' + escapeHtml(heading) + '</th>').join("") + '</tr></thead><tbody data-benchmark-results></tbody></table></div>';
+    body = target.querySelector<HTMLTableSectionElement>("[data-benchmark-results]")!;
+  }
+  const runError = target.querySelector<HTMLElement>("[data-benchmark-run-error]");
+  if (runError) {
+    runError.textContent = state.error ?? "";
+    runError.classList.toggle("is-hidden", !state.error);
+  }
+  const existing = new Map([...body.querySelectorAll<HTMLTableRowElement>("[data-benchmark-result]")].map((row) => [row.dataset.benchmarkResult!, row]));
+  const existingDetails = new Map([...body.querySelectorAll<HTMLTableRowElement>("[data-benchmark-result-detail]")].map((row) => [row.dataset.benchmarkResultDetail!, row]));
+  const rows: HTMLTableRowElement[] = [];
+  for (const result of sortBenchmarkResults(state.results)) {
+    const row = existing.get(result.id) ?? document.createElement("tr");
+    row.dataset.benchmarkResult = result.id;
+    row.className = "history-row";
+    row.tabIndex = 0;
+    const expanded = benchmarkExpandedResults.has(result.id);
+    row.setAttribute("aria-expanded", String(expanded));
+    const configuration = benchmarkModeLabel(result.mode) + " · 重排 " + result.configuration.llm_rerank_count + " · 前文 " + result.configuration.preceding_text_char_limit;
+    const cells = [result.modelName, configuration, benchmarkAccuracy(benchmarkResultAccuracy(result)), ...corpora.map((corpus) => benchmarkAccuracy(benchmarkResultAccuracy(result, corpus.id))), result.status === "pending" || result.status === "idle" ? "待评测" : benchmarkStatusLabels[result.status]];
+    if (!row.cells.length) {
+      cells.forEach(() => row.insertCell());
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "button";
+      row.insertCell().append(button);
+    }
+    cells.forEach((value, index) => {
+      if (row.cells[index].textContent !== value) row.cells[index].textContent = value;
+      if (index >= 2 && index < cells.length - 1) row.cells[index].className = "mono numeric";
+    });
+    const button = row.querySelector<HTMLButtonElement>("button")!;
+    button.textContent = expanded ? "收起" : "查看错误";
+    button.setAttribute("aria-expanded", String(expanded));
+    button.setAttribute("aria-label", (expanded ? "收起" : "查看") + result.modelName + "，" + configuration + "的错误样例");
+    rows.push(row);
+    if (expanded) {
+      const detail = existingDetails.get(result.id) ?? document.createElement("tr");
+      detail.dataset.benchmarkResultDetail = result.id;
+      detail.className = "benchmark-result-detail";
+      const content = '<td colspan="' + headings.length + '">' + benchmarkResultDetails(result) + '</td>';
+      if (benchmarkDetailContent.get(detail) !== content) {
+        detail.innerHTML = content;
+        benchmarkDetailContent.set(detail, content);
+      }
+      rows.push(detail);
+    }
+  }
+  reconcileBenchmarkChildren(body, rows);
 }
 
 function renderBenchmarkState(state: BenchmarkRunState) {
@@ -571,32 +628,22 @@ function renderBenchmarkState(state: BenchmarkRunState) {
   const label = query<HTMLElement>("[data-benchmark-progress-label]");
   if (label) label.textContent = state.status === "failed" ? "评测失败" : benchmarkStatusLabels[state.status];
   const count = query<HTMLElement>("[data-benchmark-progress-count]");
-  if (count) count.textContent = completed + " / " + total;
+  if (count) count.textContent = formatDecimal(percentage) + "%";
+  query<HTMLElement>("[data-benchmark-progress-track]")?.setAttribute("aria-valuenow", String(Math.round(percentage)));
   const run = query<HTMLButtonElement>("[data-benchmark-run]");
-  if (run) run.disabled = state.status === "running" || state.status === "stopping";
+  if (run) run.disabled = benchmarkActionInFlight || state.status === "running" || state.status === "stopping";
   const stop = query<HTMLButtonElement>("[data-benchmark-stop]");
-  if (stop) stop.disabled = state.status !== "running";
+  if (stop) stop.disabled = benchmarkActionInFlight || state.status !== "running";
   const exportButton = query<HTMLButtonElement>("[data-benchmark-export]");
-  if (exportButton) exportButton.disabled = state.report === null;
-  if (state.report) renderBenchmarkReport(state.report, state);
-  else if (state.status === "failed") {
-    const summary = query<HTMLElement>("[data-benchmark-summary]");
-    if (summary) summary.innerHTML = '<p class="notice-inline error">' + escapeHtml(state.error || "评测失败") + '</p>';
-  }
+  if (exportButton) exportButton.disabled = state.results.length === 0;
+  renderBenchmarkResults(state);
 }
 
 function renderBenchmarkReadError(message: string) {
   const target = query<HTMLElement>("[data-benchmark-corpora]");
   if (target && !benchmarkDatasetLoaded) target.innerHTML = '<p class="notice-inline error">' + escapeHtml(message) + '</p>';
   const summary = query<HTMLElement>("[data-benchmark-summary]");
-  if (summary && !benchmarkState.report) summary.innerHTML = '<p class="notice-inline error">' + escapeHtml(message) + '</p>';
-}
-
-function clearBenchmarkReportView(message = "评测进行中，完成后显示结果。") {
-  const summary = query<HTMLElement>("[data-benchmark-summary]");
-  if (summary) summary.innerHTML = '<p class="muted">' + escapeHtml(message) + '</p>';
-  const details = query<HTMLElement>("[data-benchmark-details]");
-  if (details) details.innerHTML = "";
+  if (summary && !benchmarkState.results.length) summary.innerHTML = '<p class="notice-inline error">' + escapeHtml(message) + '</p>';
 }
 
 async function performBenchmarkRefresh(epoch: number, reason: RefreshReason) {
@@ -616,7 +663,7 @@ async function performBenchmarkRefresh(epoch: number, reason: RefreshReason) {
 }
 
 function requestBenchmarkRefresh(reason: RefreshReason = "poll"): Promise<void> {
-  if (!benchmarkTabActive()) return Promise.resolve();
+  if (!benchmarkTabActive() || benchmarkActionInFlight) return Promise.resolve();
   if (benchmarkRefreshInFlight) {
     benchmarkRefreshQueued = true;
     return benchmarkRefreshInFlight;
@@ -674,6 +721,7 @@ async function loadModelPresets(options: { force?: boolean } = {}) {
 }
 
 function renderModelPresets(presets: ModelPreset[], options: { force?: boolean } = {}) {
+  renderBenchmarkModels(presets);
   const key = JSON.stringify(presets);
   if (!options.force && key !== renderedPresetsKey && isFocusedWithin("[data-model-presets]")) {
     pendingPresets = presets;
@@ -1156,39 +1204,108 @@ function selectedBenchmarkModes(): BenchmarkMode[] {
     .filter((value): value is BenchmarkMode => value === "full" || value === "initials");
 }
 
-function selectedBenchmarkCategories(): string[] {
-  return all<HTMLInputElement>("[data-benchmark-category]")
+function selectedBenchmarkModels(): string[] {
+  return all<HTMLInputElement>("[data-benchmark-model]")
     .filter((input) => input.checked)
     .map((input) => input.value);
 }
 
+function selectedBenchmarkConfigurations(): BenchmarkConfiguration[] {
+  const configurations = all<HTMLElement>("[data-benchmark-configuration]").map((row) => ({
+    llm_rerank_count: Number(row.querySelector<HTMLInputElement>("[data-benchmark-rerank]")?.value),
+    preceding_text_char_limit: Number(row.querySelector<HTMLInputElement>("[data-benchmark-context]")?.value),
+  }));
+  if (configurations.some((configuration) => !Number.isInteger(configuration.llm_rerank_count) || configuration.llm_rerank_count < 1 || configuration.llm_rerank_count > 128 || !Number.isInteger(configuration.preceding_text_char_limit) || configuration.preceding_text_char_limit < 1 || configuration.preceding_text_char_limit > 4096)) {
+    throw new Error("重排候选词数需为 1–128 的整数，前文字符数需为 1–4096 的整数");
+  }
+  return [...new Map(configurations.map((configuration) => [JSON.stringify(configuration), configuration])).values()];
+}
+
+function updateBenchmarkConfigurationButtons() {
+  const buttons = all<HTMLButtonElement>("[data-benchmark-remove-configuration]");
+  for (const button of buttons) button.disabled = buttons.length <= 1;
+}
+
+query<HTMLButtonElement>("[data-benchmark-add-configuration]")?.addEventListener("click", () => {
+  const target = query<HTMLElement>("[data-benchmark-configurations]");
+  const previous = target?.lastElementChild;
+  if (!target || !previous) return;
+  const row = previous.cloneNode(true) as HTMLElement;
+  target.append(row);
+  updateBenchmarkConfigurationButtons();
+  row.querySelector<HTMLInputElement>("[data-benchmark-rerank]")?.focus();
+});
+
+query<HTMLElement>("[data-benchmark-configurations]")?.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-benchmark-remove-configuration]");
+  if (!button || all<HTMLElement>("[data-benchmark-configuration]").length <= 1) return;
+  button.closest("[data-benchmark-configuration]")?.remove();
+  updateBenchmarkConfigurationButtons();
+});
+
+function toggleBenchmarkResult(row: HTMLElement) {
+  const id = row.dataset.benchmarkResult;
+  if (!id) return;
+  if (benchmarkExpandedResults.has(id)) benchmarkExpandedResults.delete(id);
+  else benchmarkExpandedResults.add(id);
+  renderBenchmarkResults(benchmarkState);
+}
+
+query<HTMLElement>("[data-benchmark-summary]")?.addEventListener("click", (event) => {
+  const row = (event.target as HTMLElement).closest<HTMLElement>("[data-benchmark-result]");
+  if (row) toggleBenchmarkResult(row);
+});
+
+query<HTMLElement>("[data-benchmark-summary]")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const row = (event.target as HTMLElement).closest<HTMLElement>("[data-benchmark-result]");
+  if (!row || event.target !== row) return;
+  event.preventDefault();
+  toggleBenchmarkResult(row);
+});
+
 query<HTMLFormElement>("[data-benchmark-form]")?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (benchmarkActionInFlight || benchmarkState.status === "running" || benchmarkState.status === "stopping") return;
   const modes = selectedBenchmarkModes();
-  const categories = selectedBenchmarkCategories();
+  const models = selectedBenchmarkModels();
   if (!modes.length) return setNotice("至少选择一种拼音模式", "error");
-  if (!categories.length) return setNotice("至少选择一类语料", "error");
+  if (!models.length) return setNotice("至少选择一个模型", "error");
+  let configurations: BenchmarkConfiguration[];
+  try {
+    configurations = selectedBenchmarkConfigurations();
+  } catch (error) {
+    return setNotice(errorMessage(error), "error");
+  }
+  if (!configurations.length) return setNotice("至少添加一种配置", "error");
+  if (models.length * configurations.length * modes.length > 32) return setNotice("每次最多评测 32 种模型、配置和拼音模式组合", "error");
   const actionEpoch = ++benchmarkMutationEpoch;
+  benchmarkActionInFlight = true;
+  renderBenchmarkState(benchmarkState);
   markMutation();
   try {
-    const state = await startBenchmark({ modes, categories });
+    const state = await startBenchmark({ modes, models, configurations });
     if (actionEpoch !== benchmarkMutationEpoch) return;
     benchmarkState = state;
-    benchmarkRenderedReportKey = "";
-    clearBenchmarkReportView();
+    benchmarkExpandedResults.clear();
     renderBenchmarkState(state);
     setNotice("评测已开始", "success");
     recordOperation("评测已开始");
-    void requestBenchmarkRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("启动评测失败");
+  } finally {
+    benchmarkActionInFlight = false;
+    renderBenchmarkState(benchmarkState);
+    void requestBenchmarkRefresh("mutation");
   }
 });
 
 query<HTMLButtonElement>("[data-benchmark-stop]")?.addEventListener("click", async () => {
-  if (benchmarkState.status !== "running") return;
+  if (benchmarkActionInFlight || benchmarkState.status !== "running") return;
   const actionEpoch = ++benchmarkMutationEpoch;
+  benchmarkActionInFlight = true;
+  renderBenchmarkState(benchmarkState);
   markMutation();
   try {
     await stopBenchmark();
@@ -1197,23 +1314,21 @@ query<HTMLButtonElement>("[data-benchmark-stop]")?.addEventListener("click", asy
     renderBenchmarkState(benchmarkState);
     setNotice("正在停止评测", "info");
     recordOperation("正在停止评测");
-    void requestBenchmarkRefresh("mutation");
   } catch (error) {
     setNotice(errorMessage(error), "error");
     recordOperation("停止评测失败");
+  } finally {
+    benchmarkActionInFlight = false;
+    renderBenchmarkState(benchmarkState);
+    void requestBenchmarkRefresh("mutation");
   }
 });
 
 query<HTMLButtonElement>("[data-benchmark-export]")?.addEventListener("click", () => {
-  if (!benchmarkState.report) return;
+  if (!benchmarkState.results.length) return;
   const payload = {
     dataset: benchmarkDataset,
-    report: benchmarkState.report,
-    status: benchmarkState.status,
-    model: benchmarkState.modelName,
-    modelSha256: benchmarkState.modelSha256,
-    config: benchmarkState.config,
-    configRevision: benchmarkState.configRevision,
+    ...benchmarkState,
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);

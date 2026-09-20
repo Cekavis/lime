@@ -22,8 +22,9 @@ mod management;
 mod request;
 
 pub use benchmark::{
-    BenchmarkRunRequest, BenchmarkRunState, BenchmarkRunStatus, Case as BenchmarkCase,
-    Observation as BenchmarkObservation, Summary as BenchmarkSummary,
+    BenchmarkConfiguration, BenchmarkResult, BenchmarkRunRequest, BenchmarkRunState,
+    BenchmarkRunStatus, Case as BenchmarkCase, Observation as BenchmarkObservation,
+    Summary as BenchmarkSummary,
 };
 pub use error::ErrorCode;
 pub use input::{
@@ -31,7 +32,7 @@ pub use input::{
     InputHistoryPage, InputRequest, InputResponse, LlmBoundaryRollback, LlmPerformance,
     ServiceState,
 };
-pub use lime_benchmark::{Dataset as BenchmarkDataset, InputMode, Report as BenchmarkReport};
+pub use lime_benchmark::{DatasetInfo as BenchmarkDataset, InputMode, Report as BenchmarkReport};
 pub use management::{
     Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, ModelInfo, ModelMemoryInfo,
     ModelPreset, ModelScoringPath, ServiceStatus,
@@ -348,19 +349,23 @@ mod tests {
     fn benchmark_messages_round_trip() {
         let request = Request::StartBenchmark(BenchmarkRunRequest {
             modes: vec![InputMode::Full, InputMode::Initials],
-            categories: vec!["chat".into()],
+            models: vec!["local model".into()],
+            configurations: vec![BenchmarkConfiguration {
+                llm_rerank_count: 32,
+                preceding_text_char_limit: 128,
+            }],
         });
         let encoded = serde_json::to_string(&request).expect("serialize benchmark request");
         let decoded: Request =
             serde_json::from_str(&encoded).expect("deserialize benchmark request");
         assert_eq!(decoded, request);
 
-        let dataset = lime_benchmark::builtin_dataset().expect("bundled benchmark dataset");
+        let dataset = lime_benchmark::builtin_dataset_info().expect("bundled benchmark dataset");
         let response = Response::BenchmarkDataset(dataset.clone());
         let encoded = serde_json::to_string(&response).expect("serialize benchmark dataset");
         let decoded: Response =
             serde_json::from_str(&encoded).expect("deserialize benchmark dataset");
         assert_eq!(decoded, response);
-        assert_eq!(dataset.cases.len(), 48);
+        assert_eq!(dataset.corpora.len(), 2);
     }
 }

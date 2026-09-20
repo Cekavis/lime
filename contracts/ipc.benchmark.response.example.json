@@ -1,0 +1,190 @@
+{
+  "kind": "benchmark_state",
+  "payload": {
+    "status": "running",
+    "dataset_id": "lime-real-text-v1",
+    "dataset_name": "知乎与经典文章逐词评测",
+    "dataset_version": 1,
+    "config_revision": 1,
+    "total": 684520,
+    "completed": 0,
+    "results": [
+      {
+        "id": "run-1",
+        "model_name": "本地模型 A",
+        "configuration": {
+          "llm_rerank_count": 16,
+          "preceding_text_char_limit": 64
+        },
+        "mode": "full",
+        "config": {
+          "rime_schema": "rime_ice",
+          "preceding_text_char_limit": 64,
+          "context_preview_char_limit": 0,
+          "page_size": 1,
+          "llm_rerank_count": 16,
+          "llm_effective_count": 1,
+          "llm_context_token_limit": 1024,
+          "llm_inference_count_limit": 1,
+          "llm_ignore_emoji": true,
+          "llm_backend": "cuda"
+        },
+        "status": "idle"
+      },
+      {
+        "id": "run-2",
+        "model_name": "本地模型 A",
+        "configuration": {
+          "llm_rerank_count": 16,
+          "preceding_text_char_limit": 64
+        },
+        "mode": "initials",
+        "config": {
+          "rime_schema": "rime_ice",
+          "preceding_text_char_limit": 64,
+          "context_preview_char_limit": 0,
+          "page_size": 1,
+          "llm_rerank_count": 16,
+          "llm_effective_count": 1,
+          "llm_context_token_limit": 1024,
+          "llm_inference_count_limit": 1,
+          "llm_ignore_emoji": true,
+          "llm_backend": "cuda"
+        },
+        "status": "idle"
+      },
+      {
+        "id": "run-3",
+        "model_name": "本地模型 A",
+        "configuration": {
+          "llm_rerank_count": 32,
+          "preceding_text_char_limit": 128
+        },
+        "mode": "full",
+        "config": {
+          "rime_schema": "rime_ice",
+          "preceding_text_char_limit": 128,
+          "context_preview_char_limit": 0,
+          "page_size": 1,
+          "llm_rerank_count": 32,
+          "llm_effective_count": 1,
+          "llm_context_token_limit": 1024,
+          "llm_inference_count_limit": 1,
+          "llm_ignore_emoji": true,
+          "llm_backend": "cuda"
+        },
+        "status": "idle"
+      },
+      {
+        "id": "run-4",
+        "model_name": "本地模型 A",
+        "configuration": {
+          "llm_rerank_count": 32,
+          "preceding_text_char_limit": 128
+        },
+        "mode": "initials",
+        "config": {
+          "rime_schema": "rime_ice",
+          "preceding_text_char_limit": 128,
+          "context_preview_char_limit": 0,
+          "page_size": 1,
+          "llm_rerank_count": 32,
+          "llm_effective_count": 1,
+          "llm_context_token_limit": 1024,
+          "llm_inference_count_limit": 1,
+          "llm_ignore_emoji": true,
+          "llm_backend": "cuda"
+        },
+        "status": "idle"
+      },
+      {
+        "id": "run-5",
+        "model_name": "本地模型 B",
+        "configuration": {
+          "llm_rerank_count": 16,
+          "preceding_text_char_limit": 64
+        },
+        "mode": "full",
+        "config": {
+          "rime_schema": "rime_ice",
+          "preceding_text_char_limit": 64,
+          "context_preview_char_limit": 0,
+          "page_size": 1,
+          "llm_rerank_count": 16,
+          "llm_effective_count": 1,
+          "llm_context_token_limit": 1024,
+          "llm_inference_count_limit": 1,
+          "llm_ignore_emoji": true,
+          "llm_backend": "cuda"
+        },
+        "status": "idle"
+      },
+      {
+        "id": "run-6",
+        "model_name": "本地模型 B",
+        "configuration": {
+          "llm_rerank_count": 16,
+          "preceding_text_char_limit": 64
+        },
+        "mode": "initials",
+        "config": {
+          "rime_schema": "rime_ice",
+          "preceding_text_char_limit": 64,
+          "context_preview_char_limit": 0,
+          "page_size": 1,
+          "llm_rerank_count": 16,
+          "llm_effective_count": 1,
+          "llm_context_token_limit": 1024,
+          "llm_inference_count_limit": 1,
+          "llm_ignore_emoji": true,
+          "llm_backend": "cuda"
+        },
+        "status": "idle"
+      },
+      {
+        "id": "run-7",
+        "model_name": "本地模型 B",
+        "configuration": {
+          "llm_rerank_count": 32,
+          "preceding_text_char_limit": 128
+        },
+        "mode": "full",
+        "config": {
+          "rime_schema": "rime_ice",
+          "preceding_text_char_limit": 128,
+          "context_preview_char_limit": 0,
+          "page_size": 1,
+          "llm_rerank_count": 32,
+          "llm_effective_count": 1,
+          "llm_context_token_limit": 1024,
+          "llm_inference_count_limit": 1,
+          "llm_ignore_emoji": true,
+          "llm_backend": "cuda"
+        },
+        "status": "idle"
+      },
+      {
+        "id": "run-8",
+        "model_name": "本地模型 B",
+        "configuration": {
+          "llm_rerank_count": 32,
+          "preceding_text_char_limit": 128
+        },
+        "mode": "initials",
+        "config": {
+          "rime_schema": "rime_ice",
+          "preceding_text_char_limit": 128,
+          "context_preview_char_limit": 0,
+          "page_size": 1,
+          "llm_rerank_count": 32,
+          "llm_effective_count": 1,
+          "llm_context_token_limit": 1024,
+          "llm_inference_count_limit": 1,
+          "llm_ignore_emoji": true,
+          "llm_backend": "cuda"
+        },
+        "status": "idle"
+      }
+    ]
+  }
+}

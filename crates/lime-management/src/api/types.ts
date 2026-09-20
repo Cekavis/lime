@@ -96,23 +96,27 @@ export type BenchmarkRunStatus = "idle" | "running" | "stopping" | "cancelled" |
 
 export interface BenchmarkRunRequest {
   modes: BenchmarkMode[];
-  categories: string[];
+  models: string[];
+  configurations: BenchmarkConfiguration[];
 }
 
-export interface BenchmarkCase {
+export interface BenchmarkConfiguration {
+  llm_rerank_count: number;
+  preceding_text_char_limit: number;
+}
+
+export interface BenchmarkCorpus {
   id: string;
-  category: string | null;
-  context: string;
-  expected: string;
-  syllables: string[];
+  name: string;
+  characters: number;
+  cases: number;
 }
 
 export interface BenchmarkDatasetView {
   id: string | null;
   name: string | null;
   version: number | null;
-  sha256: string | null;
-  cases: BenchmarkCase[];
+  corpora: BenchmarkCorpus[];
 }
 
 export interface BenchmarkSummary {
@@ -150,19 +154,28 @@ export interface BenchmarkReportView {
   complete: boolean;
 }
 
+export interface BenchmarkResult {
+  id: string;
+  modelName: string;
+  modelSha256: string | null;
+  configuration: BenchmarkConfiguration;
+  mode: BenchmarkMode;
+  config: Config | null;
+  status: BenchmarkRunStatus | "pending";
+  error: string | null;
+  report: BenchmarkReportView | null;
+}
+
 export interface BenchmarkRunState {
   status: BenchmarkRunStatus;
-  runId: string | null;
   datasetId: string | null;
   datasetName: string | null;
   datasetVersion: number | null;
   configRevision: number | null;
-  modelName: string | null;
-  modelSha256: string | null;
-  config: Config | null;
+  rimeSnapshotSha256: string | null;
   total: number;
   completed: number;
-  report: BenchmarkReportView | null;
+  results: BenchmarkResult[];
   error: string | null;
 }
 

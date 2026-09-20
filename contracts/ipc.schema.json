@@ -339,7 +339,10 @@
           "minimum": 0
         },
         "inference_count_limit": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 4294967295
         },
@@ -1628,7 +1631,7 @@
         "id",
         "name",
         "version",
-        "cases"
+        "corpora"
       ],
       "properties": {
         "id": {
@@ -1643,12 +1646,12 @@
           "type": "integer",
           "minimum": 0
         },
-        "cases": {
+        "corpora": {
           "type": "array",
-          "minItems": 1,
-          "maxItems": 5000,
+          "minItems": 2,
+          "maxItems": 2,
           "items": {
-            "$ref": "#/$defs/benchmark_case"
+            "$ref": "#/$defs/benchmark_corpus"
           }
         }
       }
@@ -1658,7 +1661,8 @@
       "additionalProperties": false,
       "required": [
         "modes",
-        "categories"
+        "models",
+        "configurations"
       ],
       "properties": {
         "modes": {
@@ -1668,11 +1672,19 @@
             "$ref": "#/$defs/benchmark_input_mode"
           }
         },
-        "categories": {
+        "models": {
           "type": "array",
+          "minItems": 1,
           "items": {
             "type": "string",
             "minLength": 1
+          }
+        },
+        "configurations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/benchmark_configuration"
           }
         }
       }
@@ -1881,17 +1893,20 @@
         "dataset_version",
         "config_revision",
         "total",
-        "completed"
+        "completed",
+        "results"
       ],
       "properties": {
         "status": {
           "$ref": "#/$defs/benchmark_run_status"
         },
         "dataset_id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "dataset_name": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "dataset_version": {
           "type": "integer",
@@ -1901,37 +1916,6 @@
           "type": "integer",
           "minimum": 0
         },
-        "model_name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "model_sha256": {
-          "anyOf": [
-            {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "config": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/config"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "total": {
           "type": "integer",
           "minimum": 0
@@ -1940,25 +1924,112 @@
           "type": "integer",
           "minimum": 0
         },
-        "report": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/benchmark_report"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "results": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/benchmark_result"
+          }
+        },
+        "rime_snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "error": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "type": "string"
+        }
+      }
+    },
+    "benchmark_corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "characters",
+        "cases"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "characters": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cases": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "benchmark_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "llm_rerank_count",
+        "preceding_text_char_limit"
+      ],
+      "properties": {
+        "llm_rerank_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "preceding_text_char_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        }
+      }
+    },
+    "benchmark_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "model_name",
+        "configuration",
+        "mode",
+        "config",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "configuration": {
+          "$ref": "#/$defs/benchmark_configuration"
+        },
+        "mode": {
+          "$ref": "#/$defs/benchmark_input_mode"
+        },
+        "config": {
+          "$ref": "#/$defs/config"
+        },
+        "status": {
+          "$ref": "#/$defs/benchmark_run_status"
+        },
+        "model_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "report": {
+          "$ref": "#/$defs/benchmark_report"
+        },
+        "error": {
+          "type": "string"
         }
       }
     }

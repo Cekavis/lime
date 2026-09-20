@@ -54,7 +54,7 @@ pub enum Response {
     DictionaryPage(DictionaryPage),
     InputHistoryPage(InputHistoryPage),
     InputHistoryRevision(u64),
-    BenchmarkDataset(lime_benchmark::Dataset),
+    BenchmarkDataset(lime_benchmark::DatasetInfo),
     BenchmarkState(crate::BenchmarkRunState),
     Accepted,
     Error { code: ErrorCode },

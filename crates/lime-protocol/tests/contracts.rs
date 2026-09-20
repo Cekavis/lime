@@ -34,4 +34,24 @@ fn contract_examples_match_rust_wire_types() {
     ))
     .expect("management response example must match protocol");
     assert!(matches!(management_response, Response::Status(_)));
+
+    let benchmark_request: Request = serde_json::from_str(include_str!(
+        "../../../contracts/ipc.benchmark.request.example.json"
+    ))
+    .expect("benchmark request example must match protocol");
+    let Request::StartBenchmark(request) = benchmark_request else {
+        panic!("expected benchmark batch request");
+    };
+    assert_eq!(request.models.len(), 2);
+    assert_eq!(request.configurations.len(), 2);
+    assert_eq!(request.modes.len(), 2);
+    let benchmark_response: Response = serde_json::from_str(include_str!(
+        "../../../contracts/ipc.benchmark.response.example.json"
+    ))
+    .expect("benchmark response example must match protocol");
+    let Response::BenchmarkState(state) = benchmark_response else {
+        panic!("expected benchmark batch response");
+    };
+    assert_eq!(state.results.len(), 8);
+    assert_eq!(state.results[0].configuration.llm_rerank_count, 16);
 }

@@ -113,7 +113,6 @@ pub struct CoreService {
     active_model_path: Arc<Mutex<Option<String>>>,
     model_loading: Arc<std::sync::atomic::AtomicBool>,
     benchmark: Arc<Mutex<benchmark::BenchmarkControl>>,
-    benchmark_request_id: Arc<AtomicU64>,
 }
 
 struct InputHistoryRecord<'a> {
@@ -251,7 +250,6 @@ impl CoreService {
             active_model_path: Arc::new(Mutex::new(active_model_path.clone())),
             model_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             benchmark: Arc::new(Mutex::new(benchmark::BenchmarkControl::new())),
-            benchmark_request_id: Arc::new(AtomicU64::new(1)),
         };
         // Restoring the last model is best-effort.  A missing model, unavailable
         // native runtime, or an incompatible GGUF must leave the service alive in
@@ -433,13 +431,6 @@ impl CoreService {
 
     fn input(&self, request: InputRequest) -> Result<InputResponse, ErrorCode> {
         self.input_with_options(request, true, true)
-    }
-
-    pub(crate) fn input_for_benchmark(
-        &self,
-        request: InputRequest,
-    ) -> Result<InputResponse, ErrorCode> {
-        self.input_with_options(request, false, false)
     }
 
     fn input_with_options(
