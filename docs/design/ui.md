@@ -18,6 +18,8 @@
 
 TSF 写入组合串时以 `RequestEditSession` 的 `phrSession` 结果为准，使用 `TF_ES_READWRITE` 的 ASYNCDONTCARE 调度。`StartComposition` 的 `S_OK` 不代表一定创建了组合，必须同时检查 `ppComposition`；宿主拒绝时显示明确诊断而不是静默透传。取消会先清空组合范围再结束组合，并把 selection 折叠到组合末端；未完成的异步取消会继续吞键，避免 Esc 或后续字母泄漏到宿主。
 
+新增拼音被只读上下文以 `TF_E_READONLY` 拒绝时，丢弃本次新增字符，继续消费按键并显示只读提示；此前有效的拼音保留，下一次可编辑输入不携带被丢弃的字符。回滚必须尊重请求期间的焦点清理，不得恢复已清空的输入状态。其他编辑错误和候选获取失败沿用原有恢复策略。
+
 ### Tauri 管理窗口
 
 当前使用 Tauri 2、Vite、TypeScript 和 vanilla DOM，包含：

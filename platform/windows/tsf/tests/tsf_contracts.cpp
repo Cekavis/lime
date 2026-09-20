@@ -16,6 +16,8 @@ using Microsoft::WRL::ComPtr;
   } \
 } while (false)
 
+#include "tsf_readonly_contracts.h"
+
 int wmain() {
   const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   CHECK(SUCCEEDED(init));
@@ -66,6 +68,8 @@ int wmain() {
     CHECK(SUCCEEDED(service.OnKeyUp(nullptr, VK_SPACE, 0, &eaten)));
     CHECK(eaten == FALSE);
   }
+
+  TestReadonlyInputContracts();
 
   if (SUCCEEDED(init)) CoUninitialize();
   return 0;

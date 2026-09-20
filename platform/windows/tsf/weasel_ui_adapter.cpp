@@ -852,6 +852,10 @@ void WeaselUiAdapter::Hide() {
 }
 
 void WeaselUiAdapter::Update(Snapshot snapshot) {
+#ifdef LIME_TSF_TESTS
+  // State contract tests must not create popups over the user's foreground app.
+  return;
+#else
   Ensure();
   HWND hwnd = nullptr;
   {
@@ -861,6 +865,7 @@ void WeaselUiAdapter::Update(Snapshot snapshot) {
     hwnd = host_window_;
   }
   if (hwnd) PostMessageW(hwnd, kUpdateMessage, 0, 0);
+#endif
 }
 
 void WeaselUiAdapter::Ensure() {

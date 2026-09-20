@@ -101,13 +101,20 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
   if (IsPreeditKey(key)) {
     wchar_t value[2] = {PreeditChar(key), 0};
     preedit_ += value;
+    const std::wstring attempted_preedit = preedit_;
+    // RequestEdit advances the generation before entering host callbacks.
+    const uint64_t expected_edit_generation = edit_generation_ + 1;
     if (!UpdateCandidates(context)) {
-      // A live service plus a rejected TSF write lock is a transient editor
-      // condition, not a reason to leak the key to the host. Keep the
-      // attempted preedit so a following key/retry can complete it, and make
-      // the failure visible. Only fall back to English when the service path
-      // itself is unavailable.
+      // Keep the key consumed while the service is available. Retain failed
+      // edits for retry, except input rejected by a read-only context.
       if (connected_) {
+        if (!last_fetch_failed_ && last_edit_error_ == TF_E_READONLY &&
+            edit_generation_ == expected_edit_generation &&
+            preedit_ == attempted_preedit && !preedit_.empty()) {
+          // Discard only this character. A reentrant focus callback may have
+          // already cleared or replaced it, even with the same text.
+          preedit_.pop_back();
+        }
         const std::wstring reason =
             last_fetch_failed_
                 ? L"候选获取失败"
