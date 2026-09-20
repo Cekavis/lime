@@ -195,10 +195,10 @@ pub(crate) fn try_rerank_selected_candidates_with_diagnostics(
     .map(|outcome| outcome.result)
 }
 
-/// Production entry point that also applies the input-aware English-candidate policy.
+/// Production entry point that applies text, English-candidate, and Emoji policies.
 ///
 /// English candidates are useful only when Rime returns the exact pinyin text the user typed.
-/// Other English words remain available in the final Rime order, but are not sent to the model.
+/// Excluded candidates remain available in the final Rime order, but are not sent to the model.
 pub(crate) fn try_rerank_selected_candidates_with_preedit_and_limit(
     candidates: &[Candidate],
     candidate_indices: &[usize],
@@ -276,22 +276,12 @@ fn try_rerank_selected_candidates_with_scorer_and_preedit_and_limit<S: Candidate
     options: RerankOptions,
 ) -> Result<RankingOutcome, String> {
     let pool_indices =
-        selected_pool_indices(candidate_indices, candidates.len(), options.rerank_count);
-    let pool_indices = match preedit {
-        Some(preedit) => pool_indices
+        selected_pool_indices(candidate_indices, candidates.len(), options.rerank_count)
             .into_iter()
             .filter(|index| {
-                let candidate = &candidates[*index];
-                candidate_allowed_for_llm(candidate, preedit)
-                    && (!options.ignore_emoji || !contains_emoji(&candidate.commit_text))
+                candidate_allowed_for_llm(&candidates[*index], preedit, options.ignore_emoji)
             })
-            .collect::<Vec<_>>(),
-        None if options.ignore_emoji => pool_indices
-            .into_iter()
-            .filter(|index| !contains_emoji(&candidates[*index].commit_text))
-            .collect::<Vec<_>>(),
-        None => pool_indices,
-    };
+            .collect::<Vec<_>>();
     let pool_candidates = pool_indices
         .iter()
         .map(|index| candidates[*index].clone())
@@ -555,6 +545,163 @@ mod tests {
         assert_eq!(performance.candidate_count, 3);
         assert_eq!(performance.scored_count, 3);
         assert_eq!(performance.target_token_count, 3);
+    }
+
+    #[test]
+    fn text_filter_preserves_chinese_mixed_words_and_uses_commit_text() {
+        for text in [
+            "要", "的", "〇", "㐀", "𠮷", "﨑", "3D打印", "第1名", "δ函数",
+        ] {
+            for preedit in [Some("yao"), None] {
+                assert!(
+                    candidate_allowed_for_llm(&c(text), preedit, true),
+                    "Chinese candidate {text:?} must remain eligible"
+                );
+            }
+        }
+
+        assert!(!candidate_allowed_for_llm(
+            &Candidate {
+                display_text: "要".into(),
+                commit_text: "1".into(),
+            },
+            Some("yao"),
+            true,
+        ));
+        assert!(candidate_allowed_for_llm(
+            &Candidate {
+                display_text: "1".into(),
+                commit_text: "要".into(),
+            },
+            Some("yao"),
+            true,
+        ));
+    }
+
+    #[test]
+    fn numeric_and_non_english_symbol_candidates_are_not_scored_or_promoted() {
+        struct AssertingScorer {
+            expected: Vec<Candidate>,
+        }
+
+        impl CandidateScorer for AssertingScorer {
+            fn score_candidates(
+                &self,
+                _: &str,
+                candidates: &[Candidate],
+            ) -> Result<Vec<CandidateScore>, String> {
+                assert_eq!(candidates, self.expected);
+                Ok(candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        let logprob = if index == 1 { -1.0 } else { -2.0 };
+                        CandidateScore {
+                            token_ids: Vec::new(),
+                            token_logprobs: vec![logprob],
+                            logprob,
+                            mismatch: false,
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        for (preedit, first, second, excluded) in [
+            ("yao", "要", "幺", ["1", "１２", "①", "3.14", "-42"]),
+            ("de", "的", "得", ["δ", "Δ", "Ж", "∑", "。"]),
+        ] {
+            let mut candidates = vec![c(first), c(excluded[0]), c(second), c(preedit)];
+            candidates.extend(excluded[1..].iter().map(|text| c(text)));
+            candidates.push(c("范围外"));
+            let selected = (0..candidates.len()).collect::<Vec<_>>();
+            let scorer = AssertingScorer {
+                expected: vec![c(first), c(second), c(preedit)],
+            };
+
+            for input in [Some(preedit), None] {
+                let outcome = try_rerank_selected_candidates_with_scorer_and_preedit(
+                    &candidates,
+                    &selected,
+                    input,
+                    "前文",
+                    Some(&scorer),
+                    candidates.len() - 1,
+                    2,
+                )
+                .unwrap();
+
+                let expected_indices = vec![2, 0, 1, 3, 4, 5, 6, 7, 8];
+                assert_eq!(outcome.candidate_indices, expected_indices);
+                assert_eq!(
+                    outcome.result.candidates,
+                    expected_indices
+                        .iter()
+                        .map(|index| candidates[*index].clone())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    outcome
+                        .result
+                        .diagnostics
+                        .iter()
+                        .filter_map(|row| row.llm_candidate.clone())
+                        .collect::<Vec<_>>(),
+                    vec![c(second), c(first), c(preedit)]
+                );
+                assert_eq!(
+                    outcome
+                        .result
+                        .diagnostics
+                        .iter()
+                        .filter_map(|row| row.rime_candidate.clone())
+                        .collect::<Vec<_>>(),
+                    candidates
+                );
+                let performance = outcome.llm_performance.unwrap();
+                assert_eq!(performance.candidate_count, 3);
+                assert_eq!(performance.scored_count, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn all_numeric_or_symbol_candidates_skip_the_scorer_and_keep_rime_order() {
+        struct PanickingScorer;
+
+        impl CandidateScorer for PanickingScorer {
+            fn score_candidates(
+                &self,
+                _: &str,
+                _: &[Candidate],
+            ) -> Result<Vec<CandidateScore>, String> {
+                panic!("an empty text-filtered pool must not invoke the scorer");
+            }
+        }
+
+        let candidates = vec![c("1"), c("１２"), c("δ"), c("∑"), c(""), c(" "), c("1")];
+        let indices = (0..candidates.len()).collect::<Vec<_>>();
+        for preedit in [Some("yao"), Some("de"), Some("1"), Some("δ"), None] {
+            let outcome = try_rerank_selected_candidates_with_scorer_and_preedit(
+                &candidates,
+                &indices,
+                preedit,
+                "前文",
+                Some(&PanickingScorer),
+                candidates.len(),
+                3,
+            )
+            .unwrap();
+
+            assert_eq!(outcome.result.candidates, candidates);
+            assert_eq!(outcome.candidate_indices, indices);
+            assert!(outcome.llm_performance.is_none());
+            assert!(outcome
+                .result
+                .diagnostics
+                .iter()
+                .all(|row| row.llm_candidate.is_none() && row.logprobs.is_empty()));
+        }
     }
 
     #[test]

@@ -1,7 +1,45 @@
 use super::*;
 
-pub(super) fn candidate_allowed_for_llm(candidate: &Candidate, preedit: &str) -> bool {
-    !is_english_candidate(candidate) || candidate.commit_text == preedit
+pub(super) fn candidate_allowed_for_llm(
+    candidate: &Candidate,
+    preedit: Option<&str>,
+    ignore_emoji: bool,
+) -> bool {
+    let text = candidate.commit_text.as_str();
+    let has_emoji = contains_emoji(text);
+    if ignore_emoji && has_emoji {
+        return false;
+    }
+
+    let has_text = text
+        .chars()
+        .any(|character| character.is_ascii_alphabetic() || is_han_ideograph(character));
+    // Preserve the existing Emoji opt-in independently of the text filter.
+    (has_text || has_emoji)
+        && preedit.map_or(true, |preedit| {
+            !is_english_candidate(candidate) || text == preedit
+        })
+}
+
+fn is_han_ideograph(character: char) -> bool {
+    // Unicode 17.0 CJK unified/compatibility ideograph blocks, plus ideographic zero.
+    matches!(
+        character as u32,
+        0x3007
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x2CEB0..=0x2EBEF
+            | 0x2EBF0..=0x2EE5F
+            | 0x2F800..=0x2FA1F
+            | 0x30000..=0x3134F
+            | 0x31350..=0x323AF
+            | 0x323B0..=0x3347F
+    )
 }
 
 pub(super) fn is_english_candidate(candidate: &Candidate) -> bool {

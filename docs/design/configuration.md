@@ -33,6 +33,9 @@ llm_backend                 = cuda
 该前缀之后的候选补位。ASCII 英文候选还必须与原始 `preedit` 完全相等，否则只保留在
 Rime 顺序中，不送入模型。
 
+不含汉字或 ASCII 英文字母的非 Emoji 候选（如纯数字 `1`、希腊字母 `δ`、纯符号）
+固定排除出 LLM 候选池，仍保留在 Rime 顺序中；该规则无需配置，不会排除含汉字的混合词。
+
 `llm_ignore_emoji` 默认开启；开启时，提交文本包含 Emoji code point 的候选不会送入 LLM，混合中文和 Emoji 的候选也会被排除，但这些候选仍保留在最终 Rime 顺序中，不补充其他候选。关闭后恢复原有候选池。
 
 `llm_inference_count_limit` 限制每次输入可使用的候选续写推理批次数，范围为 1 到 32，默认值为 1。
