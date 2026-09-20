@@ -208,12 +208,14 @@
         },
         "logprobs": {
           "type": "array",
+          "description": "Per-token log probabilities from the shared scoring anchor, including the replayed preceding-text suffix after boundary rollback. Their sum equals logprob within floating point round-off.",
           "items": {
             "type": "number"
           }
         },
         "mismatch": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Whether joint tokenization changes this candidate's original preceding-text token boundary; all candidates use the same shared scoring anchor."
         },
         "display_candidate": {
           "anyOf": [
@@ -224,6 +226,42 @@
               "type": "null"
             }
           ]
+        }
+      }
+    },
+    "llm_boundary_rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prefix_token_count",
+        "replayed_token_count"
+      ],
+      "properties": {
+        "prefix_token_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Number of original preceding-text tokens before the shared scoring anchor, before left truncation."
+        },
+        "replayed_token_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Number of original preceding-text tokens replayed after the shared scoring anchor."
+        },
+        "prefix_text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Exact scorer-context text before the anchor; provided together with replayed_text only when raw token bytes map exactly to a UTF-8 boundary."
+        },
+        "replayed_text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Exact scorer-context text replayed from the anchor, excluding candidate text; absent together with prefix_text when the boundary cannot be mapped exactly."
         }
       }
     },
@@ -266,7 +304,8 @@
         },
         "target_token_count": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Number of scored target tokens, including replayed preceding-text suffixes after boundary rollback."
         },
         "batch_count": {
           "type": "integer",
@@ -275,6 +314,17 @@
         "mismatch_count": {
           "type": "integer",
           "minimum": 0
+        },
+        "boundary_rollback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/llm_boundary_rollback"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Request-wide rollback anchor for joint-tokenized scoring. Absent when no rollback occurred or when reading an older payload."
         },
         "context_token_count": {
           "type": "integer",
@@ -287,6 +337,16 @@
         "logits_output_count": {
           "type": "integer",
           "minimum": 0
+        },
+        "inference_count_limit": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "omitted_candidate_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
         }
       }
     },

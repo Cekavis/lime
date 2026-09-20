@@ -45,6 +45,13 @@ export interface CandidateDiagnostic {
   hasDisplayCandidate: boolean;
 }
 
+export interface BoundaryRollback {
+  prefixTokenCount: number;
+  replayedTokenCount: number;
+  prefixText: string | null;
+  replayedText: string | null;
+}
+
 export interface LlmPerformance {
   totalMs: number;
   tokenizeMs: number;
@@ -55,6 +62,7 @@ export interface LlmPerformance {
   targetTokenCount: number;
   batchCount: number;
   mismatchCount: number;
+  boundaryRollback: BoundaryRollback | null;
   contextTokenCount: number;
   decodeInputTokenCount: number;
   logprobOutputCount: number;

@@ -439,6 +439,40 @@ impl LlamaModel {
         String::from_utf8_lossy(&buf).to_string()
     }
 
+    /// Decode one token without replacing partial UTF-8 bytes. Callers that need source offsets
+    /// must join these bytes before checking UTF-8 and matching against the original input.
+    pub fn token_to_piece_bytes(
+        &self,
+        token: llama_cpp_sys_v3::llama_token,
+    ) -> Result<Vec<u8>, LlamaError> {
+        let vocab = self.get_vocab();
+        let mut buf = vec![0u8; 128];
+        loop {
+            let written = unsafe {
+                (self.backend.symbols.llama_token_to_piece)(
+                    vocab.handle,
+                    token,
+                    buf.as_mut_ptr().cast(),
+                    buf.len() as i32,
+                    0,
+                    true,
+                )
+            };
+            if written >= 0 {
+                if written as usize > buf.len() {
+                    return Err(LlamaError::Decode(written));
+                }
+                buf.truncate(written as usize);
+                return Ok(buf);
+            }
+            let required = written.checked_neg().ok_or(LlamaError::Decode(written))? as usize;
+            if required <= buf.len() {
+                return Err(LlamaError::Decode(written));
+            }
+            buf.resize(required, 0);
+        }
+    }
+
     pub fn apply_chat_template(
         &self,
         tmpl: Option<&str>,

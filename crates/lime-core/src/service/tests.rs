@@ -183,6 +183,12 @@ fn candidate_extension_appends_to_existing_history_without_new_row_or_performanc
         rime_duration_ms: Some(7),
         llm_performance: Some(LlmPerformance {
             total_ms: 11,
+            boundary_rollback: Some(lime_protocol::LlmBoundaryRollback {
+                prefix_token_count: 1,
+                replayed_token_count: 1,
+                prefix_text: Some("上".into()),
+                replayed_text: Some("文".into()),
+            }),
             ..LlmPerformance::default()
         }),
         end_to_end_duration_ms: Some(23),
@@ -227,6 +233,19 @@ fn candidate_extension_appends_to_existing_history_without_new_row_or_performanc
             .as_ref()
             .map(|value| value.total_ms),
         Some(11)
+    );
+    assert_eq!(
+        history[0]
+            .llm_performance
+            .as_ref()
+            .unwrap()
+            .boundary_rollback,
+        Some(lime_protocol::LlmBoundaryRollback {
+            prefix_token_count: 1,
+            replayed_token_count: 1,
+            prefix_text: Some("上".into()),
+            replayed_text: Some("文".into()),
+        })
     );
     assert_eq!(history[0].rime_duration_ms, Some(7));
     assert_eq!(history[0].end_to_end_duration_ms, Some(23));

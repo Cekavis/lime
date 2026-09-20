@@ -158,17 +158,37 @@ pub struct CandidateDiagnostic {
     pub rank: u32,
     pub rime_candidate: Option<Candidate>,
     pub llm_candidate: Option<Candidate>,
-    /// Aggregate log probability for `llm_candidate`, computed by the active llama.cpp model.
+    /// Aggregate log probability for `llm_candidate`, computed by the active llama.cpp model
+    /// from the request-wide shared token prefix. Includes any replayed preceding-text suffix.
     /// It is zero for Rime-only rows where no model candidate exists.
     pub logprob: f64,
     /// Per-token log probabilities from the active llama.cpp vocabulary. Their sum is the
-    /// aggregate `logprob` (within floating point round-off).
+    /// aggregate `logprob` (within floating point round-off). When boundary rollback occurs,
+    /// these cover the joint-tokenized continuation, including replayed preceding text.
     pub logprobs: Vec<f64>,
     /// Whether tokenizing `preceding_text + candidate` changes the tokenized prefix of
-    /// `preceding_text`. This remains a diagnostic flag; mismatch candidates use the same scoring
-    /// path as other candidates.
+    /// `preceding_text` at the original boundary. All candidates, including those without a
+    /// mismatch, are scored from the same shared token prefix after any boundary rollback.
     pub mismatch: bool,
     pub display_candidate: Option<Candidate>,
+}
+
+/// Request-wide token boundary used when joint tokenization changes the preceding-text suffix.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmBoundaryRollback {
+    /// Number of original preceding-text tokens before the shared scoring anchor, before
+    /// left truncation to fit the model context window.
+    pub prefix_token_count: u32,
+    /// Number of original preceding-text tokens replayed after the shared scoring anchor.
+    pub replayed_token_count: u32,
+    /// Exact preceding-text prefix before the anchor. Present together with `replayed_text`
+    /// only when raw token bytes map precisely to a UTF-8 boundary in the scorer's context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_text: Option<String>,
+    /// Exact preceding-text suffix replayed from the anchor, excluding candidate text.
+    /// Both text fields are absent when the token boundary cannot be mapped exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed_text: Option<String>,
 }
 
 /// Performance counters collected only when a request actually enters the local LLM scorer.
@@ -187,12 +207,17 @@ pub struct LlmPerformance {
     pub candidate_count: u32,
     /// Number of candidates for which a score was returned.
     pub scored_count: u32,
-    /// Number of target tokens whose log probabilities were computed.
+    /// Number of target tokens whose log probabilities were computed, including replayed
+    /// preceding-text suffixes after boundary rollback.
     pub target_token_count: u32,
     /// Number of batch decode operations.
     pub batch_count: u32,
     /// Number of scored candidates whose tokenization crosses the preceding-text boundary.
     pub mismatch_count: u32,
+    /// Shared scoring anchor when joint tokenization requires preceding-text rollback.
+    /// Absent for requests without rollback and for older payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_rollback: Option<LlmBoundaryRollback>,
     /// Number of tokens in the untruncated preceding-text prompt.
     pub context_token_count: u32,
     /// Number of token rows submitted to llama.cpp decode, summed across outer batches.

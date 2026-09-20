@@ -93,13 +93,25 @@ LlmPerformance {
   target_token_count: u32
   batch_count: u32
   mismatch_count: u32
+  boundary_rollback: LlmBoundaryRollback?
   context_token_count: u32
   decode_input_token_count: u32
   logits_output_count: u32
 }
+
+LlmBoundaryRollback {
+  prefix_token_count: u32
+  replayed_token_count: u32
+  prefix_text: string?
+  replayed_text: string?
+}
 ```
 
-前端/TSF 根据 `candidates` 数组顺序生成页码和选中状态。`diagnostics` 只供用户主动打开的测试/历史详情页使用，不应在原生候选窗口展示。启用模型时，`logprob` 与 `logprobs` 来自真实 llama.cpp vocabulary logits，且 `logprobs` 的和与 `logprob` 一致（允许浮点误差）；没有模型时该行保持 Rime-only 语义。`mismatch` 使用同一 GGUF 的 llama.cpp tokenizer 检查上文/候选边界；它只用于诊断，边界不匹配候选按其独立 tokenization 逐 token 追加到上文，并与其他候选共用评分路径。
+前端/TSF 根据 `candidates` 数组顺序生成页码和选中状态。`diagnostics` 只供用户主动打开的测试/历史详情页使用，不应在原生候选窗口展示。启用模型时，`logprob` 与 `logprobs` 来自真实 llama.cpp vocabulary logits，且 `logprobs` 的和与 `logprob` 一致（允许浮点误差）；没有模型时该行保持 Rime-only 语义。`mismatch` 使用同一 GGUF 的 llama.cpp tokenizer 检查各候选是否改变原始上文 token 边界。所有“上文＋候选”联合分词结果与单独分词的上文共用一个最长共同 token 前缀；所有候选从该点评分联合分词后缀，包括原始边界未变化的候选。所有推理批次使用相同的实际上文窗口。
+
+发生共同回退时，`llm_performance.boundary_rollback` 记录精确起点。`prefix_token_count` 是模型窗口左截断前、起点之前的原始有效上文 token 数；`replayed_token_count` 是原始上文 token 数减去该值，两者之和等于 `context_token_count`。若原始 token bytes 能精确映射到 UTF-8 上文边界，则同时返回 `prefix_text` 和 `replayed_text`，分别为 Rust scorer 实际接收/裁剪后的上文在起点前后的文本；否则两者均缺省，客户端只显示 token 位置，不推测字符位置。无回退时 `boundary_rollback` 缺省；旧载荷反序列化为 `None`，无需提升协议版本。
+
+历史详情页和测试页在表格上方用该字段显示回退位置及重算尾部，例如“一直用的是｜公司”；两个文本字段不可用时显示从第 `prefix_token_count + 1` 个上文 token 开始重算，共 `replayed_token_count` 个上文 token。回退发生后，`logprobs`、聚合 `logprob` 与 `target_token_count` 均包含重算的上文尾部；各行 `mismatch` 仍仅描述原始边界变化。
 
 ## 管理 API
 

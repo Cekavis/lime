@@ -28,7 +28,8 @@ pub use benchmark::{
 pub use error::ErrorCode;
 pub use input::{
     Candidate, CandidateDiagnostic, HandshakeRequest, HandshakeResponse, InputHistoryEntry,
-    InputHistoryPage, InputRequest, InputResponse, LlmPerformance, ServiceState,
+    InputHistoryPage, InputRequest, InputResponse, LlmBoundaryRollback, LlmPerformance,
+    ServiceState,
 };
 pub use lime_benchmark::{Dataset as BenchmarkDataset, InputMode, Report as BenchmarkReport};
 pub use management::{
@@ -161,6 +162,12 @@ mod tests {
             target_token_count: 9,
             batch_count: 2,
             mismatch_count: 1,
+            boundary_rollback: Some(LlmBoundaryRollback {
+                prefix_token_count: 5,
+                replayed_token_count: 1,
+                prefix_text: None,
+                replayed_text: None,
+            }),
             context_token_count: 6,
             decode_input_token_count: 18,
             logits_output_count: 12,
@@ -171,6 +178,59 @@ mod tests {
         assert!(!json.contains("logits_ms"));
         let decoded: LlmPerformance = serde_json::from_str(&json).expect("deserialize performance");
         assert_eq!(decoded, performance);
+    }
+
+    #[test]
+    fn legacy_llm_performance_without_boundary_rollback_remains_compatible() {
+        let performance: LlmPerformance = serde_json::from_value(serde_json::json!({
+            "total_ms": 17,
+            "tokenize_ms": 2,
+            "decode_ms": 11,
+            "candidate_count": 4,
+            "scored_count": 4,
+            "target_token_count": 9,
+            "batch_count": 2,
+            "mismatch_count": 1,
+            "context_token_count": 6,
+            "decode_input_token_count": 18,
+            "logits_output_count": 12
+        }))
+        .expect("legacy performance should deserialize");
+
+        assert_eq!(performance.boundary_rollback, None);
+        let encoded = serde_json::to_value(&performance).expect("serialize legacy performance");
+        assert!(encoded.get("boundary_rollback").is_none());
+    }
+
+    #[test]
+    fn boundary_rollback_round_trips_with_exact_text_or_token_position_only() {
+        for (prefix_text, replayed_text) in [
+            (Some(String::from("一直用的是")), Some(String::from("公司"))),
+            (None, None),
+        ] {
+            let performance = LlmPerformance {
+                context_token_count: 4,
+                boundary_rollback: Some(LlmBoundaryRollback {
+                    prefix_token_count: 3,
+                    replayed_token_count: 1,
+                    prefix_text: prefix_text.clone(),
+                    replayed_text: replayed_text.clone(),
+                }),
+                ..LlmPerformance::default()
+            };
+            let encoded = serde_json::to_value(&performance).expect("serialize boundary rollback");
+            let rollback = &encoded["boundary_rollback"];
+            assert_eq!(rollback["prefix_token_count"], 3);
+            assert_eq!(rollback["replayed_token_count"], 1);
+            assert_eq!(rollback.get("prefix_text").is_some(), prefix_text.is_some());
+            assert_eq!(
+                rollback.get("replayed_text").is_some(),
+                replayed_text.is_some()
+            );
+            let decoded: LlmPerformance =
+                serde_json::from_value(encoded).expect("deserialize boundary rollback");
+            assert_eq!(decoded, performance);
+        }
     }
 
     #[test]

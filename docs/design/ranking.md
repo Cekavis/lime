@@ -10,13 +10,22 @@
 4. 按 `commit_text` 排除不含汉字或 ASCII 英文字母的非 Emoji 候选，包括纯数字、希腊字母和纯符号（如 `1`、`１２`、`δ`、`∑`）；汉字包含 CJK 扩展/兼容汉字及 `〇`，中数、中英等混合词仍可参与。ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 完全相等时才进入 LLM；其他英文候选保留在 Rime 原始顺序中，但不参与评分。
 5. 开启 `llm_ignore_emoji` 时，包含 Emoji code point 的候选也不进入 LLM；混合中文和 Emoji 的候选同样排除，但仍保留在 Rime 原始顺序中。
 6. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
-7. 对 `preceding_text + candidate_text` 做 tokenizer 边界验证，并在诊断行记录 `mismatch`。
+7. 将每个 `preceding_text + candidate_text` 联合分词，并与单独分词的上文一起求最长共同 token
+   前缀，作为整次请求唯一的评分起点。诊断行的 `mismatch` 仍记录各候选是否改变了原始上文边界。
 8. 使用 llama.cpp backend sampler 在 GPU 上完成 softmax、目标 token gather 和 logprob 计算；主机只读取目标 token 的紧凑结果，不回传完整 vocabulary logits。运行时从本地打包目录或显式环境路径加载，不在服务运行期间下载 native code。
-9. 边界不匹配候选将 `tokenize(candidate_text)` 得到的 token 逐个追加到上文，并与正常候选共用
-   候选批量 decode 路径计算 logprob；边界不匹配只保留为诊断标记，不再改变评分路径。
+9. 从共同起点逐 token 评分每条联合分词路径的剩余部分。发生边界回退时，所有候选都重算上文
+   尾部，包括没有 `mismatch` 的候选；同一请求的所有批次使用相同起点和相同左截断后的上文。
 10. LLM 只返回完整候选的索引排序，不生成新词、不修改提交文本。
 
 拼音用于 Rime 召回，不直接写入 LLM prompt。
+
+例如，上文“一直用的是公司”的 token 为 `[一直][用][的是][公司]`，与“的”联合分词得到
+`[一直][用][的是][公司的]`，与“得”联合分词得到 `[一直][用][的是][公司][得]`。共同前缀是
+`[一直][用][的是]`；评分目标分别为 `[公司的]` 和 `[公司][得]`。各候选的 logprob 都覆盖
+同一文字位置之后的完整联合分词路径，禁止把 `[公司][的]` 作为替代路径，或让没有 mismatch
+的候选仍从“公司”之后评分。回退只改变模型内部计算，不修改上文、候选或提交文本。
+若共同前缀为空，使用 GGUF 显式声明的 BOS；没有 BOS 时使用显式 EOS 作为文档边界。
+不得把运行库默认的普通字符 token 当作 BOS；缺少合法边界 token 时明确报告评分错误。
 
 ## 候选设置
 
@@ -57,7 +66,8 @@ final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
   容量随该值配置。模型加载时 `n_seq_max` 与 `llm_rerank_count` 相同（默认均为 32），每个候选
   使用一个 zero-based sequence；候选数超过该容量时拆分为多个外层 batch。修改上下文、后端或
   重排候选检查范围后，需要下一次受控模型重载才能更新 native context 参数。
-- 平台层先按字符裁剪，Rust/llama.cpp 再按 token 后缀截断。
+- 平台层先按字符裁剪，Rust/llama.cpp 再按 token 后缀截断。token 窗口在整次请求中统一选定，
+  保留共同前缀的同一后缀，为联合分词后的目标 token 预留空间；不得按外层批次分别裁剪上文。
 - `llm_ignore_emoji` 默认开启；它只改变送入 LLM 的候选池，不影响 llama.cpp native 参数，因此切换后不需要重新加载模型。
 
 ## 候选批量推理
@@ -72,7 +82,7 @@ padding。共享上文和 packed continuation 分别只解码一次。Qwen3.5 �
 更严格的形式，需要先修改 llama.cpp 的 sequence/KV 图构建逻辑。候选 continuation 本身仍
 保持一次 ragged packed decode，且不引入 padding。
 每次输入只在候选续写批次上消耗 `llm_inference_count_limit`；达到上限后剩余候选不再送入模型。
-上文 decode 和长度为 1 的候选不消耗额度。
+共同上文 decode 和评分后缀仅含 1 个 token 的候选不消耗额度；后缀长度包含回退重算的上文。
 
 每个候选的目标 token 由 Lime 的 GPU sampler 通过 `ggml_get_rows` 直接 gather；结果从 sampler
 result tensor 读取，并按 sampler 行保存的目标 token 映射回候选。这个路径读取任意指定 token
@@ -108,6 +118,17 @@ graph 建立包含额外 warmup 成本，不能与稳态请求直接比较。
 并保留 tokenization、native decode 阶段以及送入候选数、目标 token 数、解码批次、边界不匹配数、
 上下文 token 数、decode 输入行数和紧凑 Logprob 结果行数。`decode_ms` 统计 native decode 调用；没有进入
 scorer 的请求不写入该快照。
+
+发生回退时，快照额外包含 `boundary_rollback`：`prefix_token_count` 是共同起点之前的原始
+上文 token 数（模型窗口左截断之前），`replayed_token_count` 是从该点重算的原始上文 token
+数，两者之和等于 `context_token_count`。若原始 token bytes 能精确映射到上文的 UTF-8
+边界，同时返回 `prefix_text` 与 `replayed_text`，分别是 Rust scorer 实际收到的有效上文
+在起点之前和之后的文本；否则两者都缺省，只给出准确 token 位置。无回退时整个字段缺省。
+
+历史详情页和测试页在候选表格上方显示本次回退位置。例如“一直用的是｜公司”，并说明“公司”
+与各候选一起重算；没有精确文本映射时显示从第几个上文 token 开始重算及回退 token 数，不猜测
+字符位置。`logprobs`、聚合 `logprob` 和 `target_token_count` 均包含回退后重新评分的上文尾部；
+某行的 `mismatch=false` 不表示该行免于共同回退。没有回退信息的旧载荷不显示该说明。
 
 ## 模型
 

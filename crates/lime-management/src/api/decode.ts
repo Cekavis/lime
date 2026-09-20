@@ -1,4 +1,5 @@
 import type {
+  BoundaryRollback,
   Candidate,
   CandidateDiagnostic,
   BenchmarkCase,
@@ -62,6 +63,23 @@ function logprobs(value: unknown): number[] {
   return Array.isArray(value) ? value.map(asNumber).filter((item): item is number => item !== null) : [];
 }
 
+function decodeBoundaryRollback(value: unknown): BoundaryRollback | null {
+  const item = asRecord(value);
+  const prefixTokenCount = asNumber(item?.prefix_token_count);
+  const replayedTokenCount = asNumber(item?.replayed_token_count);
+  if (prefixTokenCount === null || !Number.isInteger(prefixTokenCount) || prefixTokenCount < 0 || prefixTokenCount > 0xffff_ffff
+    || replayedTokenCount === null || !Number.isInteger(replayedTokenCount) || replayedTokenCount <= 0 || replayedTokenCount > 0xffff_ffff) return null;
+  const prefixText = string(item?.prefix_text);
+  const replayedText = string(item?.replayed_text);
+  const hasText = prefixText !== null && replayedText !== null;
+  return {
+    prefixTokenCount,
+    replayedTokenCount,
+    prefixText: hasText ? prefixText : null,
+    replayedText: hasText ? replayedText : null,
+  };
+}
+
 export function decodePerformance(value: unknown): LlmPerformance | null {
   const item = asRecord(value);
   if (!item) return null;
@@ -81,6 +99,7 @@ export function decodePerformance(value: unknown): LlmPerformance | null {
     targetTokenCount: integer(item.target_token_count),
     batchCount: integer(item.batch_count),
     mismatchCount: integer(item.mismatch_count),
+    boundaryRollback: decodeBoundaryRollback(item.boundary_rollback),
     contextTokenCount: integer(item.context_token_count),
     decodeInputTokenCount: integer(item.decode_input_token_count),
     logprobOutputCount: integer(item.logits_output_count),

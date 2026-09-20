@@ -16,6 +16,8 @@ mod scoring;
 use scoring::*;
 mod runtime;
 use runtime::*;
+#[cfg(test)]
+mod boundary_tests;
 
 use std::{
     collections::BTreeMap,
@@ -89,7 +91,6 @@ struct ScoringTimings {
     logits_output_count: usize,
     context_limit: usize,
     vocab_size: usize,
-    inference_count: usize,
 }
 
 impl ScoringTimings {
@@ -873,9 +874,8 @@ impl LlamaRuntime {
 
     /// Compute real chain log probabilities for each candidate.
     ///
-    /// Candidates are scored in shared-prefix batches. Tokenizer-boundary mismatches are retained
-    /// as diagnostics, while the candidate's standalone tokenization is appended to the context
-    /// through the same batch path as every other candidate.
+    /// Every candidate is jointly tokenized with the context. When a token crosses the cursor,
+    /// all candidates are scored from the same common token prefix, including the context tail.
     pub fn score_candidates(
         &self,
         preceding_text: &str,
@@ -919,48 +919,54 @@ impl LlamaRuntime {
         let total_started = Instant::now();
         let mut timings = ScoringTimings::default();
         let tokenize_started = Instant::now();
-        let base = self.tokenize(preceding_text)?;
-        timings.add_tokenize(tokenize_started);
-        let base_ids = base.iter().map(|token| token.id).collect::<Vec<_>>();
-        let mut plans = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            let tokenize_started = Instant::now();
-            let standalone = self.tokenize(&candidate.commit_text)?;
-            timings.add_tokenize(tokenize_started);
-            if standalone.is_empty() {
-                return Err(format!(
-                    "candidate {:?} tokenizes to an empty sequence",
-                    candidate.commit_text
-                ));
+        let tokenize = |text: &str| {
+            self.model
+                .tokenize(text, false, false)
+                .map_err(|error| format!("llama.cpp tokenize failed: {error}"))
+        };
+        let base_ids = tokenize(preceding_text)?;
+        let mut combined = Vec::with_capacity(candidates.len());
+        for (index, candidate) in candidates.iter().enumerate() {
+            if candidate.commit_text.is_empty() {
+                return Err(format!("candidate {index} has empty commit text"));
             }
-            let tokenize_started = Instant::now();
-            let combined = self.tokenize(&format!("{preceding_text}{}", candidate.commit_text))?;
-            timings.add_tokenize(tokenize_started);
-            let combined_ids = combined.iter().map(|token| token.id).collect::<Vec<_>>();
-            // A token crosses the boundary exactly when tokenizing the concatenated text changes
-            // the tokenized prefix of the preceding text. Token IDs are authoritative here;
-            // token-piece strings can contain tokenizer-specific markers (for example GPT-2's
-            // leading-space marker) and therefore must not be used as byte offsets.
-            let prefix_matches = combined_ids.len() >= base_ids.len()
-                && combined_ids[..base_ids.len()] == base_ids[..];
-            let exact_boundary = prefix_matches && combined_ids.len() > base_ids.len();
-            let mismatch = !prefix_matches;
-            let score_ids = if exact_boundary {
-                combined_ids[base_ids.len()..].to_vec()
-            } else {
-                standalone.iter().map(|token| token.id).collect()
-            };
-            if score_ids.is_empty() {
-                return Err(format!(
-                    "candidate {:?} has no tokens after context tokenization",
-                    candidate.commit_text
-                ));
-            }
-            plans.push(CandidatePlan {
-                score_ids,
-                mismatch,
-            });
+            combined.push(tokenize(&format!(
+                "{preceding_text}{}",
+                candidate.commit_text
+            ))?);
         }
+        let (prefix_len, plans) = plan_joint_candidates(&base_ids, combined)?;
+        let boundary_rollback = if prefix_len < base_ids.len() {
+            let mut prefix_bytes = Vec::new();
+            for token in &base_ids[..prefix_len] {
+                prefix_bytes.extend(
+                    self.model
+                        .token_to_piece_bytes(*token)
+                        .map_err(|error| format!("llama.cpp token piece failed: {error}"))?,
+                );
+            }
+            Some(describe_boundary_rollback(
+                preceding_text,
+                &prefix_bytes,
+                prefix_len,
+                base_ids.len(),
+            ))
+        } else {
+            None
+        };
+        timings.add_tokenize(tokenize_started);
+
+        let context_limit = self.runtime_context_tokens.min(self.context_tokens).max(4);
+        let inference_count_limit = inference_count_limit.max(1);
+        let batches = plan_scoring_batches(
+            &plans,
+            self.scoring_path,
+            self.sequence_count,
+            context_limit,
+            prefix_len,
+            inference_count_limit,
+        )?;
+        let decode_base = &base_ids[batches.base_start..prefix_len];
 
         let mut context = self
             .context
@@ -972,49 +978,9 @@ impl LlamaRuntime {
             .map_err(|_| "llama.cpp GPU sampler mutex poisoned".to_owned())?;
         let mut output = vec![None; plans.len()];
 
-        // Keep the most recent context tokens when the input is longer than the configured
-        // context.  This mirrors normal causal-LM truncation and leaves candidate tokenization
-        // unchanged, so mismatch diagnostics still refer to the full user-visible context.
-        let context_limit = self.runtime_context_tokens.min(self.context_tokens).max(4);
         timings.context_limit = context_limit;
         timings.vocab_size = self.vocab_size;
-        // Every candidate uses the same batch decode path. Exact-boundary candidates use the
-        // concatenated-text suffix; mismatch candidates use their standalone tokenization and
-        // append those ids to the preceding-text prompt. The boundary check remains diagnostic.
-        let mut candidate_indices = (0..plans.len()).collect::<Vec<_>>();
-        candidate_indices.sort_by_key(|index| (plans[*index].score_ids.len(), *index));
-        let mut chunk_start = 0;
-        let inference_count_limit = inference_count_limit.max(1);
-        let mut omitted_due_to_limit = false;
-        while chunk_start < candidate_indices.len() {
-            let remaining = candidate_indices[chunk_start..]
-                .iter()
-                .map(|index| plans[*index].clone())
-                .collect::<Vec<_>>();
-            let (chunk_len, base_budget) = match self.scoring_path {
-                ScoringPath::PackedAttention => {
-                    plan_attention_chunk(&remaining, self.sequence_count, context_limit)?
-                }
-                ScoringPath::PaddedRecurrent => plan_candidate_chunk(
-                    &remaining,
-                    self.sequence_count,
-                    context_limit,
-                    base_ids.len(),
-                )?,
-            };
-            if chunk_len == 0 {
-                return Err("candidate chunk planner produced an empty chunk".to_owned());
-            }
-            let chunk_end = chunk_start + chunk_len;
-
-            let chunk = &candidate_indices[chunk_start..chunk_end];
-            let has_continuation = chunk.iter().any(|index| plans[*index].score_ids.len() > 1);
-            if has_continuation && timings.inference_count >= inference_count_limit {
-                omitted_due_to_limit = true;
-                break;
-            }
-            let base_start = base_ids.len().saturating_sub(base_budget);
-            let decode_base = base_ids[base_start..].to_vec();
+        for chunk in &batches.indices {
             let sequences = chunk
                 .iter()
                 .map(|index| plans[*index].score_ids.clone())
@@ -1025,7 +991,7 @@ impl LlamaRuntime {
                     &self.model,
                     &mut context,
                     &mut gpu_samplers,
-                    &decode_base,
+                    decode_base,
                     &sequences,
                     self.sequence_count,
                     &mut timings,
@@ -1035,7 +1001,7 @@ impl LlamaRuntime {
                     &self.model,
                     &mut context,
                     &mut gpu_samplers,
-                    &decode_base,
+                    decode_base,
                     &sequences,
                     self.sequence_count,
                     &mut timings,
@@ -1046,11 +1012,7 @@ impl LlamaRuntime {
                 score.mismatch = plans[*plan_index].mismatch;
                 output[*plan_index] = Some(score);
             }
-            if has_continuation {
-                timings.inference_count = timings.inference_count.saturating_add(1);
-            }
             timings.batch_count = timings.batch_count.saturating_add(1);
-            chunk_start = chunk_end;
         }
 
         let scored_indices = output
@@ -1084,14 +1046,11 @@ impl LlamaRuntime {
                 decode_input_token_count: timings.decode_input_tokens.min(u32::MAX as usize) as u32,
                 logits_output_count: timings.logits_output_count.min(u32::MAX as usize) as u32,
                 inference_count_limit: Some(inference_count_limit.min(u32::MAX as usize) as u32),
-                omitted_candidate_count: if omitted_due_to_limit {
-                    candidates
-                        .len()
-                        .saturating_sub(scored_count as usize)
-                        .min(u32::MAX as usize) as u32
-                } else {
-                    0
-                },
+                omitted_candidate_count: candidates
+                    .len()
+                    .saturating_sub(scored_count as usize)
+                    .min(u32::MAX as usize) as u32,
+                boundary_rollback,
             },
         })
     }

@@ -359,6 +359,9 @@ tr:last-child td { border-bottom: 0; }
 .test-result:empty { display: none; }
 .result-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-4); color: var(--color-muted); }
 .result-summary strong { color: var(--color-foreground); }
+.boundary-rollback { margin: var(--space-4) 0 0; line-height: var(--line-height-body); overflow-wrap: anywhere; }
+.boundary-rollback-text { display: block; margin-top: var(--space-2); white-space: break-spaces; overflow-wrap: anywhere; }
+.boundary-rollback-marker, .boundary-rollback-tail { color: var(--color-accent-strong); font-weight: var(--font-weight-semibold); }
 .diagnostic-table-wrap { margin-top: var(--space-4); }
 .diagnostic-table { min-width: 960px; }
 .diagnostic-table th, .diagnostic-table td { white-space: nowrap; }

@@ -5,6 +5,7 @@ import { diagnosticsFrom } from "./api/decode";
 import { DICTIONARY_PAGE_SIZE, HISTORY_PAGE_SIZE } from "./api/types";
 import type { BenchmarkDatasetView, BenchmarkMode, BenchmarkObservation, BenchmarkReportView, BenchmarkRunState, Candidate, CandidateDiagnostic, Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, HistoryPage, InputData, LlmPerformance, ModelInfo, ModelPreset, ServiceState, ServiceStatus } from "./api/types";
 import { errorMessage, escapeHtml, formatBytes, formatDecimal, formatLogprobs, formatMilliseconds, formatTimestamp } from "./ui/format";
+import { renderBoundaryRollback } from "./ui/boundary-rollback";
 import { renderAppTemplate } from "./app/template";
 type RefreshReason = "initial" | "manual" | "poll" | "tab" | "visibility" | "mutation";
 
@@ -399,7 +400,7 @@ function diagnosticRows(data: InputData): string {
 }
 
 function diagnosticTable(data: InputData): string {
-  return '<div class="table-wrap diagnostic-table-wrap"><table class="diagnostic-table"><thead><tr><th>#</th><th>Rime 原始候选</th><th>LLM 候选</th><th>Logprob</th><th>Logprobs</th><th>Mismatch</th><th>展示候选</th></tr></thead><tbody>' + diagnosticRows(data) + "</tbody></table></div>";
+  return renderBoundaryRollback(data.llmPerformance?.boundaryRollback) + '<div class="table-wrap diagnostic-table-wrap"><table class="diagnostic-table"><thead><tr><th>#</th><th>Rime 原始候选</th><th>LLM 候选</th><th>Logprob</th><th>Logprobs</th><th>Mismatch</th><th>展示候选</th></tr></thead><tbody>' + diagnosticRows(data) + "</tbody></table></div>";
 }
 
 function llmPerformanceSummary(performance: LlmPerformance | null, rimeMs: number | null, endToEndMs: number | null): string {
