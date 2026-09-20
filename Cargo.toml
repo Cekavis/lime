@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lime-benchmark",
     "crates/lime-protocol",
     "crates/lime-ipc",
     "crates/lime-core",

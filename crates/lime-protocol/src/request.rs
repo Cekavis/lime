@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, ErrorCode, HandshakeRequest,
-    HandshakeResponse, InputHistoryPage, InputRequest, InputResponse, ModelPreset, ServiceStatus,
+    BenchmarkRunRequest, Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, ErrorCode,
+    HandshakeRequest, HandshakeResponse, InputHistoryPage, InputRequest, InputResponse,
+    ModelPreset, ServiceStatus,
 };
 
 /// Requests supported by the local service contract.
@@ -32,6 +33,10 @@ pub enum Request {
     GetInputHistoryPage { page: u32, page_size: u32 },
     WaitForInputHistory { revision: u64 },
     ClearInputHistory,
+    GetBenchmarkDataset,
+    StartBenchmark(BenchmarkRunRequest),
+    StopBenchmark,
+    GetBenchmarkStatus,
 }
 
 /// Responses supported by the local service contract.
@@ -49,6 +54,8 @@ pub enum Response {
     DictionaryPage(DictionaryPage),
     InputHistoryPage(InputHistoryPage),
     InputHistoryRevision(u64),
+    BenchmarkDataset(lime_benchmark::Dataset),
+    BenchmarkState(crate::BenchmarkRunState),
     Accepted,
     Error { code: ErrorCode },
 }

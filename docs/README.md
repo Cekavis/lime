@@ -9,6 +9,7 @@
 - [WeaselUI 集成](design/weasel-ui-integration.md)
 - [验证与发布](implementation/quality-and-release.md)
 - [构建与发布](reference/build-and-release.md)
+- [输入法 benchmark](reference/benchmark.md)
 - [机器可读契约](../contracts/README.md)
 - [Tauri 管理窗口](../crates/lime-management/README.md)
 - [Windows TSF](../platform/windows/tsf/README.md)

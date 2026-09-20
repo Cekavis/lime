@@ -1,6 +1,14 @@
 import type {
   Candidate,
   CandidateDiagnostic,
+  BenchmarkCase,
+  BenchmarkDatasetView,
+  BenchmarkMode,
+  BenchmarkObservation,
+  BenchmarkReportView,
+  BenchmarkRunState,
+  BenchmarkRunStatus,
+  BenchmarkSummary,
   Config,
   ConfigSnapshot,
   DictionaryEntry,
@@ -203,6 +211,137 @@ export function decodeDictionaryPage(value: unknown, page: number): DictionaryPa
     ? item.items.map(decodeDictionaryEntry).filter((entry): entry is DictionaryEntry => entry !== null)
     : [];
   return { items, total: integer(item?.total, items.length), page: integer(item?.page, page), pageSize: integer(item?.page_size, 100) };
+}
+
+function nullableString(value: unknown): string | null {
+  return value == null ? null : string(value);
+}
+
+function nullableNumber(value: unknown): number | null {
+  return value == null ? null : asNumber(value);
+}
+
+export function decodeBenchmarkMode(value: unknown): BenchmarkMode {
+  if (value === "initials" || value === "jianpin" || value === "first_letters") return "initials";
+  return "full";
+}
+
+function decodeBenchmarkModes(value: unknown): BenchmarkMode[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(decodeBenchmarkMode))];
+}
+
+function decodeBenchmarkCase(value: unknown): BenchmarkCase | null {
+  const item = asRecord(value);
+  const id = string(item?.id);
+  if (id === null) return null;
+  const rawSyllables = item?.syllables;
+  const syllables = Array.isArray(rawSyllables)
+    ? rawSyllables.map(string).filter((part): part is string => part !== null)
+    : typeof rawSyllables === "string" ? rawSyllables.trim().split(/\s+/).filter(Boolean) : [];
+  return {
+    id,
+    category: nullableString(item?.category),
+    context: string(item?.context) ?? string(item?.preceding_text) ?? "",
+    expected: string(item?.expected) ?? string(item?.target) ?? "",
+    syllables,
+  };
+}
+
+export function decodeBenchmarkDataset(value: unknown): BenchmarkDatasetView {
+  const item = asRecord(value);
+  const rawCases = Array.isArray(item?.cases) ? item.cases : Array.isArray(item?.items) ? item.items : [];
+  return {
+    id: nullableString(item?.id) ?? nullableString(item?.dataset_id),
+    name: nullableString(item?.name) ?? nullableString(item?.dataset_name),
+    version: nullableNumber(item?.version) ?? nullableNumber(item?.dataset_version),
+    sha256: nullableString(item?.sha256) ?? nullableString(item?.dataset_sha256),
+    cases: rawCases.map(decodeBenchmarkCase).filter((entry): entry is BenchmarkCase => entry !== null),
+  };
+}
+
+function benchmarkTop1(value: unknown): string | null {
+  const direct = string(value);
+  if (direct !== null) return direct;
+  const item = asRecord(value);
+  return string(item?.display_text) ?? string(item?.commit_text) ?? string(item?.text);
+}
+
+function decodeBenchmarkSummary(value: unknown): BenchmarkSummary | null {
+  const item = asRecord(value);
+  if (!item) return null;
+  const modeValue = item.mode ?? item.input_mode;
+  const total = integer(item.total);
+  const completed = integer(item.completed, total);
+  const accuracy = asNumber(item.accuracy);
+  return {
+    category: nullableString(item.category),
+    mode: decodeBenchmarkMode(modeValue),
+    total,
+    completed,
+    correct: integer(item.correct),
+    noPrediction: integer(item.no_prediction ?? item.noPrediction),
+    errors: integer(item.errors ?? item.error_count),
+    accuracy,
+  };
+}
+
+function decodeBenchmarkObservation(value: unknown): BenchmarkObservation | null {
+  const item = asRecord(value);
+  const caseId = string(item?.case_id) ?? string(item?.caseId);
+  if (caseId === null) return null;
+  return {
+    caseId,
+    category: nullableString(item?.category),
+    context: string(item?.context) ?? "",
+    expected: string(item?.expected) ?? "",
+    preedit: string(item?.preedit) ?? string(item?.pinyin) ?? "",
+    mode: decodeBenchmarkMode(item?.mode ?? item?.input_mode),
+    top1: benchmarkTop1(item?.top1 ?? item?.top_1 ?? item?.prediction),
+    correct: typeof item?.correct === "boolean" ? item.correct : null,
+    error: nullableString(item?.error),
+    elapsedMs: asNumber(item?.elapsed_ms ?? item?.elapsedMs),
+  };
+}
+
+export function decodeBenchmarkReport(value: unknown): BenchmarkReportView | null {
+  const item = asRecord(value);
+  if (!item) return null;
+  const rawSummaries = Array.isArray(item.summaries) ? item.summaries : [];
+  const rawObservations = Array.isArray(item.observations) ? item.observations : [];
+  return {
+    datasetId: nullableString(item.dataset_id) ?? nullableString(item.datasetId),
+    datasetName: nullableString(item.dataset_name) ?? nullableString(item.datasetName),
+    datasetVersion: nullableNumber(item.dataset_version) ?? nullableNumber(item.datasetVersion),
+    sha256: nullableString(item.sha256) ?? nullableString(item.dataset_sha256),
+    modes: decodeBenchmarkModes(item.modes),
+    summaries: rawSummaries.map(decodeBenchmarkSummary).filter((entry): entry is BenchmarkSummary => entry !== null),
+    observations: rawObservations.map(decodeBenchmarkObservation).filter((entry): entry is BenchmarkObservation => entry !== null),
+    complete: item.complete !== false,
+  };
+}
+
+export function decodeBenchmarkRunState(value: unknown): BenchmarkRunState {
+  const item = asRecord(value);
+  const rawStatus = item?.status;
+  const status: BenchmarkRunStatus = rawStatus === "running" || rawStatus === "stopping" || rawStatus === "cancelled" || rawStatus === "completed" || rawStatus === "failed"
+    ? rawStatus
+    : "idle";
+  return {
+    status,
+    runId: nullableString(item?.run_id) ?? nullableString(item?.runId),
+    datasetId: nullableString(item?.dataset_id) ?? nullableString(item?.datasetId),
+    datasetName: nullableString(item?.dataset_name) ?? nullableString(item?.datasetName),
+    datasetVersion: nullableNumber(item?.dataset_version) ?? nullableNumber(item?.datasetVersion),
+    configRevision: asNumber(item?.config_revision ?? item?.configRevision),
+    modelName: nullableString(item?.model_name) ?? nullableString(item?.modelName),
+    modelSha256: nullableString(item?.model_sha256) ?? nullableString(item?.modelSha256),
+    config: item?.config == null ? null : decodeConfigSnapshot({ revision: item?.config_revision ?? 0, config: item.config }).config,
+    total: integer(item?.total),
+    completed: integer(item?.completed),
+    report: decodeBenchmarkReport(item?.report),
+    error: nullableString(item?.error),
+  };
 }
 
 export function diagnosticsFrom(_value: unknown, rime: Candidate[], final: Candidate[]): CandidateDiagnostic[] {

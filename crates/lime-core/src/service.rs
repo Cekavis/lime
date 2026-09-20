@@ -7,6 +7,7 @@ use crate::{
         RerankOptions,
     },
 };
+mod benchmark;
 mod history;
 mod models;
 mod persistence;
@@ -111,6 +112,8 @@ pub struct CoreService {
     /// `ModelPreset::loaded`, which is a runtime-only status bit exposed to clients.
     active_model_path: Arc<Mutex<Option<String>>>,
     model_loading: Arc<std::sync::atomic::AtomicBool>,
+    benchmark: Arc<Mutex<benchmark::BenchmarkControl>>,
+    benchmark_request_id: Arc<AtomicU64>,
 }
 
 struct InputHistoryRecord<'a> {
@@ -247,6 +250,8 @@ impl CoreService {
             model_presets: Arc::new(Mutex::new(model_presets)),
             active_model_path: Arc::new(Mutex::new(active_model_path.clone())),
             model_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            benchmark: Arc::new(Mutex::new(benchmark::BenchmarkControl::new())),
+            benchmark_request_id: Arc::new(AtomicU64::new(1)),
         };
         // Restoring the last model is best-effort.  A missing model, unavailable
         // native runtime, or an incompatible GGUF must leave the service alive in
@@ -419,14 +424,34 @@ impl CoreService {
                 self.bump_history_revision();
                 Response::Accepted
             }
+            Request::GetBenchmarkDataset => Response::BenchmarkDataset(self.benchmark_dataset()),
+            Request::StartBenchmark(request) => self.start_benchmark(request),
+            Request::StopBenchmark => self.stop_benchmark(),
+            Request::GetBenchmarkStatus => Response::BenchmarkState(self.benchmark_status()),
         }
     }
 
     fn input(&self, request: InputRequest) -> Result<InputResponse, ErrorCode> {
+        self.input_with_options(request, true, true)
+    }
+
+    pub(crate) fn input_for_benchmark(
+        &self,
+        request: InputRequest,
+    ) -> Result<InputResponse, ErrorCode> {
+        self.input_with_options(request, false, false)
+    }
+
+    fn input_with_options(
+        &self,
+        request: InputRequest,
+        record_history: bool,
+        track_generation: bool,
+    ) -> Result<InputResponse, ErrorCode> {
         let input_started = Instant::now();
         let snapshot = self.config_snapshot();
         if request.config_revision != snapshot.revision {
-            if request.candidate_extension_of.is_none() {
+            if record_history && request.candidate_extension_of.is_none() {
                 self.record_input_history(InputHistoryRecord {
                     request: &request,
                     rime_candidates: Vec::new(),
@@ -441,7 +466,7 @@ impl CoreService {
             }
             return Err(ErrorCode::RequestCancelled);
         }
-        let generation = self.generation.next();
+        let generation = track_generation.then(|| self.generation.next());
         let config = snapshot.config;
         let model = self.model.lock().map_err(|_| ErrorCode::Internal)?;
         // A loaded model is active; model absence selects the Rime-only path.
@@ -475,7 +500,7 @@ impl CoreService {
         let rime_batch = match rime_result {
             Ok(batch) => batch,
             Err(code) => {
-                if request.candidate_extension_of.is_none() {
+                if record_history && request.candidate_extension_of.is_none() {
                     self.record_input_history(InputHistoryRecord {
                         request: &request,
                         rime_candidates: Vec::new(),
@@ -498,7 +523,7 @@ impl CoreService {
         } = rime_batch;
         if let Some(original_request_id) = request.candidate_extension_of {
             self.append_candidate_history(original_request_id, &request, &rime_candidates);
-            if !self.generation.is_current(generation) {
+            if !generation_is_current(&self.generation, generation) {
                 return Err(ErrorCode::RequestCancelled);
             }
             let cached = self
@@ -584,31 +609,35 @@ impl CoreService {
             })
             .collect::<Vec<_>>();
         let all_diagnostics = ranking.result.diagnostics;
-        self.candidate_cache
-            .lock()
-            .expect("candidate cache mutex poisoned")
-            .insert(
-                request.request_id,
-                CandidateCacheEntry {
-                    preedit: request.preedit.clone(),
-                    preceding_text: request.preceding_text.clone(),
-                    candidates: final_candidates.clone(),
-                    candidate_remainders: final_candidate_remainders.clone(),
-                },
-            );
+        if track_generation {
+            self.candidate_cache
+                .lock()
+                .expect("candidate cache mutex poisoned")
+                .insert(
+                    request.request_id,
+                    CandidateCacheEntry {
+                        preedit: request.preedit.clone(),
+                        preceding_text: request.preceding_text.clone(),
+                        candidates: final_candidates.clone(),
+                        candidate_remainders: final_candidate_remainders.clone(),
+                    },
+                );
+        }
         let end_to_end_duration_ms = Some(elapsed_ms(input_started.elapsed()));
-        self.record_input_history(InputHistoryRecord {
-            request: &request,
-            rime_candidates,
-            final_candidates: final_candidates.clone(),
-            diagnostics: all_diagnostics.clone(),
-            service_state,
-            model_name,
-            rime_duration_ms,
-            llm_performance: llm_performance.clone(),
-            end_to_end_duration_ms,
-        });
-        if !self.generation.is_current(generation) {
+        if record_history {
+            self.record_input_history(InputHistoryRecord {
+                request: &request,
+                rime_candidates,
+                final_candidates: final_candidates.clone(),
+                diagnostics: all_diagnostics.clone(),
+                service_state,
+                model_name,
+                rime_duration_ms,
+                llm_performance: llm_performance.clone(),
+                end_to_end_duration_ms,
+            });
+        }
+        if !generation_is_current(&self.generation, generation) {
             return Err(ErrorCode::RequestCancelled);
         }
         let visible_count =
@@ -741,6 +770,13 @@ fn now_unix_ms() -> u64 {
 
 fn elapsed_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn generation_is_current(tracker: &GenerationTracker, generation: Option<u64>) -> bool {
+    match generation {
+        Some(value) => tracker.is_current(value),
+        None => true,
+    }
 }
 
 fn model_display_name(runtime: Option<&LlamaRuntime>) -> Option<String> {

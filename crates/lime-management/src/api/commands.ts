@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { decodeConfigSnapshot, decodeDictionaryPage, decodeHistoryPage, decodeInputData, decodeModel, decodePreset, decodePresets } from "./decode";
-import { DICTIONARY_PAGE_SIZE, HISTORY_PAGE_SIZE, type Config, type ConfigSnapshot, type DictionaryEntry, type DictionaryPage, type HistoryPage, type InputData, type ModelInfo, type ModelPreset, type ServiceStatus } from "./types";
+import { decodeBenchmarkDataset, decodeBenchmarkRunState, decodeConfigSnapshot, decodeDictionaryPage, decodeHistoryPage, decodeInputData, decodeModel, decodePreset, decodePresets } from "./decode";
+import { DICTIONARY_PAGE_SIZE, HISTORY_PAGE_SIZE, type BenchmarkDatasetView, type BenchmarkRunRequest, type BenchmarkRunState, type Config, type ConfigSnapshot, type DictionaryEntry, type DictionaryPage, type HistoryPage, type InputData, type ModelInfo, type ModelPreset, type ServiceStatus } from "./types";
 
 export async function getConfig(): Promise<ConfigSnapshot> {
   return decodeConfigSnapshot(await invoke<unknown>("get_config"));
@@ -80,4 +80,26 @@ export async function waitForHistory(revision: number): Promise<number> {
 
 export async function clearHistory(): Promise<void> {
   await invoke("clear_input_history");
+}
+
+export async function getBenchmarkDataset(): Promise<BenchmarkDatasetView> {
+  return decodeBenchmarkDataset(await invoke<unknown>("get_benchmark_dataset"));
+}
+
+export async function startBenchmark(request: BenchmarkRunRequest): Promise<BenchmarkRunState> {
+  return decodeBenchmarkRunState(await invoke<unknown>("start_benchmark", { request }));
+}
+
+// Keep the command-layer name aligned with the original benchmark design while
+// using the asynchronous start/status protocol exposed by the management service.
+export async function runBenchmark(request: BenchmarkRunRequest): Promise<BenchmarkRunState> {
+  return startBenchmark(request);
+}
+
+export async function stopBenchmark(): Promise<void> {
+  await invoke("stop_benchmark");
+}
+
+export async function getBenchmarkStatus(): Promise<BenchmarkRunState> {
+  return decodeBenchmarkRunState(await invoke<unknown>("get_benchmark_status"));
 }

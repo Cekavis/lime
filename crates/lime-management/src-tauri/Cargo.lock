@@ -1650,6 +1650,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lime-benchmark"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "lime-ipc"
 version = "0.1.0"
 dependencies = [
@@ -1671,6 +1680,7 @@ dependencies = [
 name = "lime-protocol"
 version = "0.1.0"
 dependencies = [
+ "lime-benchmark",
  "serde",
 ]
 

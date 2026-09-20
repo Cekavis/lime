@@ -1,9 +1,9 @@
 import "./style.css";
 
-import { clearDictionary, clearHistory, deleteModelPreset, getConfig, getDictionaryPage, getHistoryPage, getStatus, importDictionary, listModelPresets, loadModel, renameModelPreset, saveModelPreset, selectModelPreset, setConfig, testInput, unloadModel, waitForHistory } from "./api/commands";
+import { clearDictionary, clearHistory, deleteModelPreset, getBenchmarkDataset, getBenchmarkStatus, getConfig, getDictionaryPage, getHistoryPage, getStatus, importDictionary, listModelPresets, loadModel, renameModelPreset, saveModelPreset, selectModelPreset, setConfig, startBenchmark, stopBenchmark, testInput, unloadModel, waitForHistory } from "./api/commands";
 import { diagnosticsFrom } from "./api/decode";
 import { DICTIONARY_PAGE_SIZE, HISTORY_PAGE_SIZE } from "./api/types";
-import type { Candidate, CandidateDiagnostic, Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, HistoryPage, InputData, LlmPerformance, ModelInfo, ModelPreset, ServiceState, ServiceStatus } from "./api/types";
+import type { BenchmarkDatasetView, BenchmarkMode, BenchmarkObservation, BenchmarkReportView, BenchmarkRunState, Candidate, CandidateDiagnostic, Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, HistoryPage, InputData, LlmPerformance, ModelInfo, ModelPreset, ServiceState, ServiceStatus } from "./api/types";
 import { errorMessage, escapeHtml, formatBytes, formatDecimal, formatLogprobs, formatMilliseconds, formatTimestamp } from "./ui/format";
 import { renderAppTemplate } from "./app/template";
 type RefreshReason = "initial" | "manual" | "poll" | "tab" | "visibility" | "mutation";
@@ -46,6 +46,28 @@ let currentHistory: InputData[] = [];
 let currentHistoryPage = 1;
 let currentHistoryTotal = 0;
 let currentPresets: ModelPreset[] = [];
+let benchmarkDataset: BenchmarkDatasetView | null = null;
+let benchmarkDatasetLoaded = false;
+let benchmarkState: BenchmarkRunState = {
+  status: "idle",
+  runId: null,
+  datasetId: null,
+  datasetName: null,
+  datasetVersion: null,
+  configRevision: null,
+  modelName: null,
+  modelSha256: null,
+  config: null,
+  total: 0,
+  completed: 0,
+  report: null,
+  error: null,
+};
+let benchmarkRenderedReportKey = "";
+let benchmarkRefreshInFlight: Promise<void> | null = null;
+let benchmarkRefreshQueued = false;
+let benchmarkRefreshEpoch = 0;
+let benchmarkMutationEpoch = 0;
 
 let configFormDirty = false;
 let pendingConfigSnapshot: ConfigSnapshot | null = null;
@@ -443,6 +465,182 @@ function renderHistory(page: HistoryPage, options: { force?: boolean } = {}) {
   const next = query<HTMLButtonElement>("[data-history-next]");
   if (previous) previous.disabled = visiblePage <= 1;
   if (next) next.disabled = visiblePage >= totalPages;
+}
+
+const benchmarkStatusLabels: Record<BenchmarkRunState["status"], string> = {
+  idle: "未开始",
+  running: "评测中",
+  stopping: "停止中",
+  cancelled: "已停止",
+  completed: "已完成",
+  failed: "失败",
+};
+
+function benchmarkModeLabel(mode: BenchmarkMode): string {
+  return mode === "full" ? "全拼" : "首拼";
+}
+
+function benchmarkCategoryLabel(category: string | null): string {
+  return category && category.trim() ? category : "未分类";
+}
+
+function benchmarkTabActive(): boolean {
+  return query<HTMLElement>(".shell")?.dataset.activeTab === "benchmark";
+}
+
+function renderBenchmarkDataset(dataset: BenchmarkDatasetView) {
+  const target = query<HTMLElement>("[data-benchmark-corpora]");
+  if (!target) return;
+  const counts = new Map<string, number>();
+  for (const item of dataset.cases) {
+    const category = item.category ?? "";
+    counts.set(category, (counts.get(category) ?? 0) + 1);
+  }
+  const categories = [...counts.keys()].sort((left, right) => benchmarkCategoryLabel(left).localeCompare(benchmarkCategoryLabel(right), "zh-CN"));
+  const previous = new Set(all<HTMLInputElement>("[data-benchmark-category]").filter((input) => input.checked).map((input) => input.value));
+  if (!categories.length) {
+    target.innerHTML = '<p class="muted">暂无可用语料。</p>';
+    return;
+  }
+  const preserveSelection = previous.size > 0;
+  target.innerHTML = categories.map((category) => {
+    const value = escapeHtml(category);
+    const checked = preserveSelection ? previous.has(category) : true;
+    return '<label class="check-option"><input data-benchmark-category type="checkbox" value="' + value + '"' + (checked ? " checked" : "") + ' /><span>' + escapeHtml(benchmarkCategoryLabel(category)) + ' <small class="muted">' + counts.get(category) + ' 条</small></span></label>';
+  }).join("");
+}
+
+function benchmarkAccuracy(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const normalized = value > 1 ? value / 100 : value;
+  return formatDecimal(Math.max(0, Math.min(1, normalized)) * 100) + "%";
+}
+
+function benchmarkSummaryRows(report: BenchmarkReportView): string {
+  if (!report.summaries.length) return '<tr><td colspan="8" class="muted">暂无汇总</td></tr>';
+  return report.summaries.map((summary) => {
+    return '<tr><td>' + escapeHtml(benchmarkCategoryLabel(summary.category)) + '</td><td>' + benchmarkModeLabel(summary.mode) + '</td><td class="mono numeric">' + summary.total + '</td><td class="mono numeric">' + summary.completed + '</td><td class="mono numeric">' + summary.correct + '</td><td class="mono numeric">' + summary.noPrediction + '</td><td class="mono numeric">' + summary.errors + '</td><td class="mono numeric">' + benchmarkAccuracy(summary.accuracy) + '</td></tr>';
+  }).join("");
+}
+
+function benchmarkObservationRows(observations: BenchmarkObservation[]): string {
+  return observations.map((observation) => {
+    const outcome = observation.error ? "错误" : observation.correct === true ? "正确" : observation.correct === false ? "不正确" : "—";
+    const outcomeClass = observation.error || observation.correct === false ? "benchmark-observation-error" : observation.correct === true ? "benchmark-observation-match" : "";
+    const errorText = observation.error ? "：" + observation.error : "";
+    return '<tr class="' + outcomeClass + '"><td>' + escapeHtml(benchmarkCategoryLabel(observation.category)) + '</td><td>' + benchmarkModeLabel(observation.mode) + '</td><td>' + escapeHtml(observation.context || "（空）") + '</td><td class="mono">' + escapeHtml(observation.preedit || "—") + '</td><td>' + escapeHtml(observation.expected || "—") + '</td><td>' + escapeHtml(observation.top1 || "—") + '</td><td>' + escapeHtml(outcome + errorText) + '</td></tr>';
+  }).join("");
+}
+
+function renderBenchmarkReport(report: BenchmarkReportView, state: BenchmarkRunState) {
+  const key = JSON.stringify(report);
+  if (key === benchmarkRenderedReportKey) return;
+  benchmarkRenderedReportKey = key;
+  const summary = query<HTMLElement>("[data-benchmark-summary]");
+  const details = query<HTMLElement>("[data-benchmark-details]");
+  const datasetLabel = report.datasetName || state.datasetName;
+  const modelLabel = state.modelName;
+  const configLabel = state.config
+    ? "重排 " + state.config.llm_rerank_count + " · 采纳 " + state.config.llm_effective_count + " · 上下文 " + state.config.llm_context_token_limit
+    : "";
+  if (summary) {
+    const meta = [datasetLabel ? "语料集：" + datasetLabel : "", modelLabel ? "模型：" + modelLabel : "", configLabel ? "配置：" + configLabel : ""].filter(Boolean).join(" · ");
+    const runError = state.error ? '<p class="notice-inline error">' + escapeHtml(state.error) + '</p>' : "";
+    summary.innerHTML = runError + (meta ? '<p class="benchmark-report-meta muted">' + escapeHtml(meta) + '</p>' : "") + '<div class="table-wrap benchmark-summary-wrap"><table class="benchmark-summary-table"><thead><tr><th>语料</th><th>模式</th><th>样本</th><th>完成</th><th>正确</th><th>无结果</th><th>错误</th><th>准确率</th></tr></thead><tbody>' + benchmarkSummaryRows(report) + '</tbody></table></div>';
+  }
+  if (!details) return;
+  const failed = report.observations.filter((observation) => observation.error || observation.correct === false);
+  const examples = (failed.length ? failed : report.observations).slice(0, 40);
+  details.innerHTML = examples.length
+    ? '<div class="table-wrap benchmark-observations-wrap"><table class="benchmark-observations-table"><thead><tr><th>语料</th><th>模式</th><th>上文</th><th>拼音</th><th>目标</th><th>首位结果</th><th>结果</th></tr></thead><tbody>' + benchmarkObservationRows(examples) + '</tbody></table></div>'
+    : '<p class="muted">暂无错误记录。</p>';
+}
+
+function renderBenchmarkState(state: BenchmarkRunState) {
+  const badge = query<HTMLElement>("[data-benchmark-status]");
+  if (badge) {
+    badge.textContent = benchmarkStatusLabels[state.status];
+    badge.dataset.benchmarkState = state.status;
+  }
+  const total = Math.max(0, state.total);
+  const completed = Math.max(0, Math.min(total || state.completed, state.completed));
+  const percentage = total > 0 ? Math.max(0, Math.min(100, completed / total * 100)) : 0;
+  const bar = query<HTMLElement>("[data-benchmark-progress-bar]");
+  if (bar) bar.style.width = percentage + "%";
+  const label = query<HTMLElement>("[data-benchmark-progress-label]");
+  if (label) label.textContent = state.status === "failed" ? "评测失败" : benchmarkStatusLabels[state.status];
+  const count = query<HTMLElement>("[data-benchmark-progress-count]");
+  if (count) count.textContent = completed + " / " + total;
+  const run = query<HTMLButtonElement>("[data-benchmark-run]");
+  if (run) run.disabled = state.status === "running" || state.status === "stopping";
+  const stop = query<HTMLButtonElement>("[data-benchmark-stop]");
+  if (stop) stop.disabled = state.status !== "running";
+  const exportButton = query<HTMLButtonElement>("[data-benchmark-export]");
+  if (exportButton) exportButton.disabled = state.report === null;
+  if (state.report) renderBenchmarkReport(state.report, state);
+  else if (state.status === "failed") {
+    const summary = query<HTMLElement>("[data-benchmark-summary]");
+    if (summary) summary.innerHTML = '<p class="notice-inline error">' + escapeHtml(state.error || "评测失败") + '</p>';
+  }
+}
+
+function renderBenchmarkReadError(message: string) {
+  const target = query<HTMLElement>("[data-benchmark-corpora]");
+  if (target && !benchmarkDatasetLoaded) target.innerHTML = '<p class="notice-inline error">' + escapeHtml(message) + '</p>';
+  const summary = query<HTMLElement>("[data-benchmark-summary]");
+  if (summary && !benchmarkState.report) summary.innerHTML = '<p class="notice-inline error">' + escapeHtml(message) + '</p>';
+}
+
+function clearBenchmarkReportView(message = "评测进行中，完成后显示结果。") {
+  const summary = query<HTMLElement>("[data-benchmark-summary]");
+  if (summary) summary.innerHTML = '<p class="muted">' + escapeHtml(message) + '</p>';
+  const details = query<HTMLElement>("[data-benchmark-details]");
+  if (details) details.innerHTML = "";
+}
+
+async function performBenchmarkRefresh(epoch: number, reason: RefreshReason) {
+  const mutationAtStart = benchmarkMutationEpoch;
+  if (!benchmarkDatasetLoaded) {
+    const dataset = await getBenchmarkDataset();
+    if (epoch !== benchmarkRefreshEpoch || mutationAtStart !== benchmarkMutationEpoch) return;
+    benchmarkDataset = dataset;
+    benchmarkDatasetLoaded = true;
+    renderBenchmarkDataset(dataset);
+  }
+  const state = await getBenchmarkStatus();
+  if (epoch !== benchmarkRefreshEpoch || mutationAtStart !== benchmarkMutationEpoch) return;
+  benchmarkState = state;
+  renderBenchmarkState(state);
+  if (state.status === "failed" && state.error && (reason === "initial" || reason === "manual" || reason === "tab")) setNotice(state.error, "error");
+}
+
+function requestBenchmarkRefresh(reason: RefreshReason = "poll"): Promise<void> {
+  if (!benchmarkTabActive()) return Promise.resolve();
+  if (benchmarkRefreshInFlight) {
+    benchmarkRefreshQueued = true;
+    return benchmarkRefreshInFlight;
+  }
+  const epoch = ++benchmarkRefreshEpoch;
+  const task = performBenchmarkRefresh(epoch, reason).catch((error) => {
+    if (benchmarkTabActive()) {
+      const message = errorMessage(error);
+      renderBenchmarkReadError(message);
+      if (reason === "initial" || reason === "manual" || reason === "tab") {
+        setNotice(message, "error");
+        recordOperation("读取评测失败");
+      }
+    }
+  });
+  let tracked: Promise<void>;
+  tracked = task.finally(() => {
+    if (benchmarkRefreshInFlight === tracked) benchmarkRefreshInFlight = null;
+    if (benchmarkRefreshQueued) {
+      benchmarkRefreshQueued = false;
+      if (benchmarkTabActive()) void requestBenchmarkRefresh("poll");
+    }
+  });
+  benchmarkRefreshInFlight = tracked;
+  return tracked;
 }
 
 function renderHistoryDetail(entry: InputData) {
@@ -950,6 +1148,83 @@ query<HTMLButtonElement>("[data-test-clear]")?.addEventListener("click", () => {
   if (request) request.textContent = "尚未请求";
 });
 
+function selectedBenchmarkModes(): BenchmarkMode[] {
+  return all<HTMLInputElement>("[data-benchmark-mode]")
+    .filter((input) => input.checked)
+    .map((input) => input.value)
+    .filter((value): value is BenchmarkMode => value === "full" || value === "initials");
+}
+
+function selectedBenchmarkCategories(): string[] {
+  return all<HTMLInputElement>("[data-benchmark-category]")
+    .filter((input) => input.checked)
+    .map((input) => input.value);
+}
+
+query<HTMLFormElement>("[data-benchmark-form]")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const modes = selectedBenchmarkModes();
+  const categories = selectedBenchmarkCategories();
+  if (!modes.length) return setNotice("至少选择一种拼音模式", "error");
+  if (!categories.length) return setNotice("至少选择一类语料", "error");
+  const actionEpoch = ++benchmarkMutationEpoch;
+  markMutation();
+  try {
+    const state = await startBenchmark({ modes, categories });
+    if (actionEpoch !== benchmarkMutationEpoch) return;
+    benchmarkState = state;
+    benchmarkRenderedReportKey = "";
+    clearBenchmarkReportView();
+    renderBenchmarkState(state);
+    setNotice("评测已开始", "success");
+    recordOperation("评测已开始");
+    void requestBenchmarkRefresh("mutation");
+  } catch (error) {
+    setNotice(errorMessage(error), "error");
+    recordOperation("启动评测失败");
+  }
+});
+
+query<HTMLButtonElement>("[data-benchmark-stop]")?.addEventListener("click", async () => {
+  if (benchmarkState.status !== "running") return;
+  const actionEpoch = ++benchmarkMutationEpoch;
+  markMutation();
+  try {
+    await stopBenchmark();
+    if (actionEpoch !== benchmarkMutationEpoch) return;
+    benchmarkState = { ...benchmarkState, status: "stopping" };
+    renderBenchmarkState(benchmarkState);
+    setNotice("正在停止评测", "info");
+    recordOperation("正在停止评测");
+    void requestBenchmarkRefresh("mutation");
+  } catch (error) {
+    setNotice(errorMessage(error), "error");
+    recordOperation("停止评测失败");
+  }
+});
+
+query<HTMLButtonElement>("[data-benchmark-export]")?.addEventListener("click", () => {
+  if (!benchmarkState.report) return;
+  const payload = {
+    dataset: benchmarkDataset,
+    report: benchmarkState.report,
+    status: benchmarkState.status,
+    model: benchmarkState.modelName,
+    modelSha256: benchmarkState.modelSha256,
+    config: benchmarkState.config,
+    configRevision: benchmarkState.configRevision,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "lime-benchmark.json";
+  link.click();
+  URL.revokeObjectURL(url);
+  setNotice("评测报告已导出", "success");
+  recordOperation("评测报告已导出");
+});
+
 query<HTMLTableSectionElement>("[data-history-table]")?.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   const row = target.closest<HTMLElement>("[data-history-index]");
@@ -1027,6 +1302,7 @@ for (const tab of all<HTMLButtonElement>("[data-tab]")) {
     for (const panel of all<HTMLElement>("[data-panel]")) panel.classList.toggle("is-hidden", panel.dataset.panel !== name);
     flushDeferredRenders();
     void requestRefresh("tab");
+    if (name === "benchmark") void requestBenchmarkRefresh("tab");
   });
 }
 
@@ -1040,10 +1316,14 @@ function validateEntry(value: unknown): DictionaryEntry {
 }
 
 window.addEventListener("beforeunload", () => { historyWatchStopped = true; });
-document.addEventListener("visibilitychange", () => { void requestRefresh("visibility"); });
+document.addEventListener("visibilitychange", () => {
+  void requestRefresh("visibility");
+  if (benchmarkTabActive()) void requestBenchmarkRefresh("visibility");
+});
 
 window.setInterval(() => {
   void requestRefresh("poll");
+  if (benchmarkTabActive()) void requestBenchmarkRefresh("poll");
 }, REFRESH_INTERVAL_MS);
 
 void requestRefresh("initial");

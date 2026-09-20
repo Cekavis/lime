@@ -1,14 +1,12 @@
 [package]
-name = "lime-protocol"
+name = "lime-benchmark"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Versioned wire contracts shared by Lime clients and the Rust core service"
+description = "Offline pinyin input benchmark data and scoring primitives for Lime"
 
 [dependencies]
-lime-benchmark = { path = "../lime-benchmark" }
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+sha2.workspace = true

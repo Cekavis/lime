@@ -1073,6 +1073,58 @@
               }
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get_benchmark_dataset"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "start_benchmark"
+            },
+            "payload": {
+              "$ref": "#/$defs/benchmark_run_request"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "stop_benchmark"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get_benchmark_status"
+            }
+          }
         }
       ]
     },
@@ -1265,6 +1317,38 @@
               }
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "benchmark_dataset"
+            },
+            "payload": {
+              "$ref": "#/$defs/benchmark_dataset"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "benchmark_state"
+            },
+            "payload": {
+              "$ref": "#/$defs/benchmark_run_state"
+            }
+          }
         }
       ]
     },
@@ -1423,6 +1507,393 @@
           "anyOf": [
             {
               "$ref": "#/$defs/error_code"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "benchmark_input_mode": {
+      "type": "string",
+      "enum": [
+        "full",
+        "initials"
+      ]
+    },
+    "benchmark_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "category",
+        "context",
+        "expected",
+        "syllables"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "expected": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "syllables": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z]+$"
+          }
+        }
+      }
+    },
+    "benchmark_dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "version",
+        "cases"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5000,
+          "items": {
+            "$ref": "#/$defs/benchmark_case"
+          }
+        }
+      }
+    },
+    "benchmark_run_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modes",
+        "categories"
+      ],
+      "properties": {
+        "modes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/benchmark_input_mode"
+          }
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "benchmark_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "category",
+        "context",
+        "expected",
+        "preedit",
+        "mode",
+        "top1",
+        "correct",
+        "error",
+        "elapsed_ms"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "context": {
+          "type": "string"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "preedit": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/benchmark_input_mode"
+        },
+        "top1": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correct": {
+          "type": "boolean"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "elapsed_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "benchmark_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "mode",
+        "total",
+        "completed",
+        "correct",
+        "no_prediction",
+        "errors",
+        "accuracy"
+      ],
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/benchmark_input_mode"
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "correct": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "no_prediction": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accuracy": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "benchmark_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset_id",
+        "dataset_name",
+        "dataset_version",
+        "dataset_sha256",
+        "modes",
+        "summaries",
+        "observations",
+        "complete"
+      ],
+      "properties": {
+        "dataset_id": {
+          "type": "string"
+        },
+        "dataset_name": {
+          "type": "string"
+        },
+        "dataset_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dataset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "modes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/benchmark_input_mode"
+          }
+        },
+        "summaries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/benchmark_summary"
+          }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/benchmark_observation"
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "benchmark_run_status": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "running",
+        "stopping",
+        "cancelled",
+        "completed",
+        "failed"
+      ]
+    },
+    "benchmark_run_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "dataset_id",
+        "dataset_name",
+        "dataset_version",
+        "config_revision",
+        "total",
+        "completed"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/benchmark_run_status"
+        },
+        "dataset_id": {
+          "type": "string"
+        },
+        "dataset_name": {
+          "type": "string"
+        },
+        "dataset_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "config_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/config"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/benchmark_report"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
             },
             {
               "type": "null"

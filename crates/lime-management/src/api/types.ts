@@ -83,5 +83,80 @@ export interface ServiceStatus { state: ServiceState; config: ConfigSnapshot; mo
 export interface DictionaryEntry { pinyin: string; text: string; weight: number; }
 export interface DictionaryPage { items: DictionaryEntry[]; total: number; page: number; pageSize: number; }
 
+export type BenchmarkMode = "full" | "initials";
+export type BenchmarkRunStatus = "idle" | "running" | "stopping" | "cancelled" | "completed" | "failed";
+
+export interface BenchmarkRunRequest {
+  modes: BenchmarkMode[];
+  categories: string[];
+}
+
+export interface BenchmarkCase {
+  id: string;
+  category: string | null;
+  context: string;
+  expected: string;
+  syllables: string[];
+}
+
+export interface BenchmarkDatasetView {
+  id: string | null;
+  name: string | null;
+  version: number | null;
+  sha256: string | null;
+  cases: BenchmarkCase[];
+}
+
+export interface BenchmarkSummary {
+  category: string | null;
+  mode: BenchmarkMode;
+  total: number;
+  completed: number;
+  correct: number;
+  noPrediction: number;
+  errors: number;
+  accuracy: number | null;
+}
+
+export interface BenchmarkObservation {
+  caseId: string;
+  category: string | null;
+  context: string;
+  expected: string;
+  preedit: string;
+  mode: BenchmarkMode;
+  top1: string | null;
+  correct: boolean | null;
+  error: string | null;
+  elapsedMs: number | null;
+}
+
+export interface BenchmarkReportView {
+  datasetId: string | null;
+  datasetName: string | null;
+  datasetVersion: number | null;
+  sha256: string | null;
+  modes: BenchmarkMode[];
+  summaries: BenchmarkSummary[];
+  observations: BenchmarkObservation[];
+  complete: boolean;
+}
+
+export interface BenchmarkRunState {
+  status: BenchmarkRunStatus;
+  runId: string | null;
+  datasetId: string | null;
+  datasetName: string | null;
+  datasetVersion: number | null;
+  configRevision: number | null;
+  modelName: string | null;
+  modelSha256: string | null;
+  config: Config | null;
+  total: number;
+  completed: number;
+  report: BenchmarkReportView | null;
+  error: string | null;
+}
+
 export const DICTIONARY_PAGE_SIZE = 100;
 export const HISTORY_PAGE_SIZE = 100;

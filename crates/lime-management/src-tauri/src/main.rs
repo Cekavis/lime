@@ -3,8 +3,9 @@
 mod ipc;
 
 use lime_protocol::{
-    Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, InputHistoryPage,
-    InputRequest, ModelInfo, ModelPreset, Request, Response, ServiceStatus,
+    BenchmarkDataset, BenchmarkRunRequest, BenchmarkRunState, Config, ConfigSnapshot,
+    DictionaryEntry, DictionaryPage, InputHistoryPage, InputRequest, ModelInfo, ModelPreset,
+    Request, Response, ServiceStatus,
     DICTIONARY_PAGE_SIZE, INPUT_HISTORY_PAGE_SIZE,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -183,6 +184,38 @@ fn clear_input_history() -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn get_benchmark_dataset() -> Result<BenchmarkDataset, String> {
+    match ipc::call(Request::GetBenchmarkDataset)? {
+        Response::BenchmarkDataset(value) => Ok(value),
+        _ => Err("unexpected get_benchmark_dataset response".to_owned()),
+    }
+}
+
+#[tauri::command]
+fn start_benchmark(request: BenchmarkRunRequest) -> Result<BenchmarkRunState, String> {
+    match ipc::call(Request::StartBenchmark(request))? {
+        Response::BenchmarkState(value) => Ok(value),
+        _ => Err("unexpected start_benchmark response".to_owned()),
+    }
+}
+
+#[tauri::command]
+fn stop_benchmark() -> Result<(), String> {
+    match ipc::call(Request::StopBenchmark)? {
+        Response::BenchmarkState(_) | Response::Accepted => Ok(()),
+        _ => Err("unexpected stop_benchmark response".to_owned()),
+    }
+}
+
+#[tauri::command]
+fn get_benchmark_status() -> Result<BenchmarkRunState, String> {
+    match ipc::call(Request::GetBenchmarkStatus)? {
+        Response::BenchmarkState(value) => Ok(value),
+        _ => Err("unexpected get_benchmark_status response".to_owned()),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -204,6 +237,10 @@ fn main() {
             get_input_history_page,
             wait_for_input_history,
             clear_input_history,
+            get_benchmark_dataset,
+            start_benchmark,
+            stop_benchmark,
+            get_benchmark_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lime management window");

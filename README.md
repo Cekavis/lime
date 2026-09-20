@@ -12,6 +12,7 @@ Lime 是本地优先的中文拼音输入法。Windows TSF 负责实时按键与
 - [管理界面设计](docs/design/ui.md)
 - [WeaselUI 集成](docs/design/weasel-ui-integration.md)
 - [构建与发布](docs/reference/build-and-release.md)
+- [输入法 benchmark](docs/reference/benchmark.md)
 - [机器可读契约](contracts/README.md)
 - [Tauri 管理窗口](crates/lime-management/README.md)
 - [Windows TSF](platform/windows/tsf/README.md)
