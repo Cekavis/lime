@@ -239,6 +239,13 @@ class EditContextStub final : public ITfContext {
     return S_OK;
   }
   void DiscardQueuedSessions() { queued_.clear(); }
+  void RunNextQueuedSession() {
+    CHECK(!queued_.empty());
+    ComPtr<ITfEditSession> session = queued_.front();
+    queued_.erase(queued_.begin());
+    const HRESULT result = session->DoEditSession(1);
+    CHECK(SUCCEEDED(result) || result == E_FAIL);
+  }
 
   HRESULT STDMETHODCALLTYPE InWriteSession(TfClientId, BOOL* value) override {
     *value = FALSE; return S_OK;
@@ -311,6 +318,113 @@ class InputContract final {
   TextService service;
   ComPtr<EditContextStub> context;
 };
+
+bool DispatchKeyDown(TextService& service, ITfContext* context, WPARAM key,
+                     LPARAM lparam = 0) {
+  BOOL probe_eaten = FALSE;
+  CHECK(SUCCEEDED(service.OnTestKeyDown(context, key, lparam, &probe_eaten)));
+  if (!probe_eaten) return false;
+  BOOL eaten = FALSE;
+  CHECK(SUCCEEDED(service.OnKeyDown(context, key, lparam, &eaten)));
+  CHECK(eaten == TRUE);
+  return true;
+}
+
+bool DispatchKeyUp(TextService& service, ITfContext* context, WPARAM key,
+                   LPARAM lparam = 0) {
+  BOOL probe_eaten = FALSE;
+  CHECK(SUCCEEDED(service.OnTestKeyUp(context, key, lparam, &probe_eaten)));
+  if (!probe_eaten) return false;
+  BOOL eaten = FALSE;
+  CHECK(SUCCEEDED(service.OnKeyUp(context, key, lparam, &eaten)));
+  CHECK(eaten == TRUE);
+  return true;
+}
+
+void TestBareLeftShiftToggles() {
+  EditContextStub context;
+  TextService service;
+  CHECK(DispatchKeyDown(service, &context, VK_LSHIFT));
+  CHECK(service.ShiftDownMaskForTest() != 0);
+  CHECK(service.ShiftPendingMaskForTest() != 0);
+  CHECK(DispatchKeyUp(service, &context, VK_LSHIFT));
+  CHECK(service.ShiftDownMaskForTest() == 0);
+  CHECK(service.ShiftPendingMaskForTest() == 0);
+  CHECK(service.AsciiModeForTest());
+
+  CHECK(DispatchKeyDown(service, &context, VK_LSHIFT));
+  CHECK(DispatchKeyUp(service, &context, VK_LSHIFT));
+  CHECK(!service.AsciiModeForTest());
+}
+
+void TestLeftShiftChordDoesNotPoisonNextTap() {
+  EditContextStub context;
+  TextService service;
+  CHECK(DispatchKeyDown(service, &context, VK_LSHIFT));
+  CHECK(service.ShiftPendingMaskForTest() != 0);
+  CHECK(!DispatchKeyDown(service, &context, VK_F1));
+  CHECK(service.ShiftPendingMaskForTest() == 0);
+
+  // The pass-through release is not followed by OnKeyUp in TSF's two-stage
+  // dispatch, so OnTestKeyUp must clear the physical Shift state itself.
+  CHECK(!DispatchKeyUp(service, &context, VK_LSHIFT));
+  CHECK(service.ShiftDownMaskForTest() == 0);
+  CHECK(!service.AsciiModeForTest());
+
+  CHECK(DispatchKeyDown(service, &context, VK_LSHIFT));
+  CHECK(DispatchKeyUp(service, &context, VK_LSHIFT));
+  CHECK(service.AsciiModeForTest());
+}
+
+void TestShiftStateResetsOnFocusAndDeactivate() {
+  EditContextStub context;
+  TextService service;
+  CHECK(DispatchKeyDown(service, &context, VK_LSHIFT));
+  CHECK(service.ShiftDownMaskForTest() != 0);
+  CHECK(SUCCEEDED(service.OnSetFocus(FALSE)));
+  CHECK(service.ShiftDownMaskForTest() == 0);
+  CHECK(service.ShiftPendingMaskForTest() == 0);
+
+  CHECK(DispatchKeyDown(service, &context, VK_LSHIFT));
+  CHECK(DispatchKeyUp(service, &context, VK_LSHIFT));
+  CHECK(service.AsciiModeForTest());
+  CHECK(SUCCEEDED(service.Deactivate()));
+  CHECK(service.ShiftDownMaskForTest() == 0);
+  CHECK(service.ShiftPendingMaskForTest() == 0);
+  CHECK(!service.AsciiModeForTest());
+}
+
+void TestUnavailableContextPassesThrough() {
+  TextService service;
+  BOOL eaten = TRUE;
+  CHECK(SUCCEEDED(service.OnTestKeyDown(nullptr, 'F', 0, &eaten)));
+  CHECK(eaten == FALSE);
+  eaten = TRUE;
+  CHECK(SUCCEEDED(service.OnKeyDown(nullptr, 'F', 0, &eaten)));
+  CHECK(eaten == FALSE);
+  eaten = TRUE;
+  CHECK(SUCCEEDED(service.OnTestKeyDown(nullptr, VK_LSHIFT, 0, &eaten)));
+  CHECK(eaten == FALSE);
+  eaten = TRUE;
+  CHECK(SUCCEEDED(service.OnKeyDown(nullptr, VK_LSHIFT, 0, &eaten)));
+  CHECK(eaten == FALSE);
+  eaten = TRUE;
+  CHECK(SUCCEEDED(service.OnTestKeyUp(nullptr, VK_LSHIFT, 0, &eaten)));
+  CHECK(eaten == FALSE);
+  eaten = TRUE;
+  CHECK(SUCCEEDED(service.OnKeyUp(nullptr, VK_LSHIFT, 0, &eaten)));
+  CHECK(eaten == FALSE);
+  CHECK(service.PreeditForTest().empty());
+  CHECK(!service.CompositionActiveForTest());
+}
+
+void TestShiftInputContracts() {
+  ScopedKeyboardState keyboard;
+  TestUnavailableContextPassesThrough();
+  TestBareLeftShiftToggles();
+  TestLeftShiftChordDoesNotPoisonNextTap();
+  TestShiftStateResetsOnFocusAndDeactivate();
+}
 
 void TestReadonlyFirstKey() {
   // Both RequestEditSession HRESULT channels can report a read-only context.
@@ -393,6 +507,34 @@ void TestReadonlyAfterReentrantNewInput() {
   }
 }
 
+void TestUnavailableEditFailureDoesNotBuffer() {
+  InputContract input;
+  input.context->next_error = E_FAIL;
+  input.context->error_in_session = false;
+  BOOL eaten = TRUE;
+  CHECK(SUCCEEDED(input.service.OnKeyDown(input.context.Get(), 'N', 0, &eaten)));
+  CHECK(eaten == FALSE);
+  CHECK(input.service.PreeditForTest().empty());
+  CHECK(!input.service.CompositionActiveForTest());
+  CHECK(!input.service.TerminalEditPendingForTest());
+
+  input.Press('I');
+  input.pipe.ExpectPreedits({"n", "i"});
+}
+
+void TestAsyncEditFailureDoesNotBuffer() {
+  InputContract input;
+  input.Press('N');
+  CHECK(input.service.PreeditForTest() == L"n");
+  input.context->RunNextQueuedSession();
+  CHECK(input.service.PreeditForTest().empty());
+  CHECK(!input.service.CompositionActiveForTest());
+  CHECK(!input.service.TerminalEditPendingForTest());
+
+  input.Press('I');
+  input.pipe.ExpectPreedits({"n", "i"});
+}
+
 void TestReadonlyInputContracts() {
   ScopedKeyboardState keyboard;
   const long references_before = g_module_references.load();
@@ -403,6 +545,8 @@ void TestReadonlyInputContracts() {
   TestFetchFailureDoesNotReuseReadonly();
   TestReadonlyAfterFocusCleared();
   TestReadonlyAfterReentrantNewInput();
+  TestUnavailableEditFailureDoesNotBuffer();
+  TestAsyncEditFailureDoesNotBuffer();
   CHECK(g_module_references.load() == references_before);
 }
 

@@ -99,15 +99,27 @@ bool TextService::HandleKey(ITfContext* context, WPARAM key) {
     return false;
   }
   if (IsPreeditKey(key)) {
+    const bool had_composition = composition_ != nullptr;
     wchar_t value[2] = {PreeditChar(key), 0};
     preedit_ += value;
     const std::wstring attempted_preedit = preedit_;
     // RequestEdit advances the generation before entering host callbacks.
     const uint64_t expected_edit_generation = edit_generation_ + 1;
     if (!UpdateCandidates(context)) {
-      // Keep the key consumed while the service is available. Retain failed
-      // edits for retry, except input rejected by a read-only context.
+      // A stale or non-editable TSF context must never turn a browser shortcut
+      // into buffered Lime text.  Drop the local composition and return the
+      // key to the host; transient lock/read-only errors retain the existing
+      // retry behavior below.
       if (connected_) {
+        const bool context_changed =
+            composition_context_ && composition_context_.Get() != context;
+        const bool host_unavailable =
+            !had_composition || context_changed || IsKeyboardDisabled(context);
+        if (!last_fetch_failed_ && IsUnavailableEditError(last_edit_error_) &&
+            (host_unavailable || last_edit_error_ != E_FAIL)) {
+          DropUnavailableContext();
+          return false;
+        }
         if (!last_fetch_failed_ && last_edit_error_ == TF_E_READONLY &&
             edit_generation_ == expected_edit_generation &&
             preedit_ == attempted_preedit && !preedit_.empty()) {

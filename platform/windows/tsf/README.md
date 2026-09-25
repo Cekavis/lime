@@ -35,11 +35,11 @@ TSF DLL 和静态链接进来的 WeaselUI 使用 MSVC 静态运行库：Release 
 
 Telegram 7.2.x 的输入框是 Qt `QTextEdit`。当 TSF range 返回空前文时，适配层在 edit session 结束后通过独立的 UI Automation MTA 查询当前获得焦点的 Qt 编辑控件，只读取 bounded `TextPattern2` caret 前缀；查询失败、密码框或焦点变化时保持 `context_available=false`，不会读取文档范围、聊天列表或预输入内容。Qt 的 `IMR_RECONVERTSTRING` 会改变选区，因此不用于前文读取。
 
-`OnTestKeyDown` 只做轻量探测，不在探测阶段打开 TSF edit session 或请求服务；Telegram 的 Qt 控件例外地会在这里预热一个不阻塞的 UIA MTA 查询，但不会读取文本或等待结果。UIA 结果完成后缓存，后续按键读取缓存；如果查询仍在进行，当前按键继续按无上文处理，不阻塞输入路径。部分宿主会在探测回调期间持有 TSF 锁，候选读取和组合更新仍统一在 `OnKeyDown` 中执行。
+`OnTestKeyDown` 只做轻量探测，不在探测阶段打开 TSF edit session 或请求服务；它先检查 Weasel 同样使用的焦点、`GUID_COMPARTMENT_KEYBOARD_DISABLED`、`GUID_COMPARTMENT_EMPTYCONTEXT` 和只读状态，并拒绝不能创建 composition 的虚空 TSF context。Telegram 的 Qt 控件例外地会在这里预热一个不阻塞的 UIA MTA 查询，但不会读取文本或等待结果。UIA 结果完成后缓存，后续按键读取缓存；如果查询仍在进行，当前按键继续按无上文处理，不阻塞输入路径。部分宿主会在探测回调期间持有 TSF 锁，候选读取和组合更新仍统一在 `OnKeyDown` 中执行。
 
 TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使用 `TF_ES_READWRITE` 的 ASYNCDONTCARE 调度：宿主允许时同步执行，否则由 TSF 排队。`StartComposition` 即使返回 `S_OK` 也可能通过空的 `ppComposition` 表示宿主拒绝组合；适配层会检查这一点并显示明确错误。
 
-新增拼音的写会话被 `TF_E_READONLY` 拒绝时，丢弃本次新增字符，保留此前有效的拼音，并继续消费该按键、显示只读提示；被丢弃的字符不会混入下一次正常输入。其他编辑失败仍保留输入供后续按键重试；候选获取失败不复用此前的编辑错误作丢弃判断。
+新增拼音的写会话被 `TF_E_READONLY` 拒绝时，丢弃本次新增字符，保留此前有效的拼音，并继续消费该按键、显示只读提示；被丢弃的字符不会混入下一次正常输入。焦点门禁已确认 context 不可用，或出现断开、无 selection、宿主拒绝 composition 等不可用 context 错误时，清空 Lime 的本地组合状态并把当前按键交还宿主，避免浏览器失焦后缓存按键在下一个输入框回放；已有有效 composition 遇单独的暂时性 `E_FAIL` 仍保留可重试状态。
 
 中文模式下的独立标点（空格除外）即使没有现有拼音组合串，也会建立并立即结束一个短生命周期 TSF composition；无组合串和候选时的独立空格透传给宿主，让视频播放器等宿主继续响应播放/暂停快捷键。有候选或组合串时，空格的 keydown/keyup 成对由 TSF 消费，用于选择候选或提交组合。不在按键回调中直接调用 `ITfInsertAtSelection` 修改宿主 selection，避免 Chromium/WebView2 等文本上下文的重入崩溃。
 

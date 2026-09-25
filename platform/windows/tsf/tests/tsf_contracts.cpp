@@ -24,6 +24,12 @@ int wmain() {
 
   {
     TextService service;
+    ComPtr<ITfThreadMgrEventSink> thread_sink;
+    CHECK(SUCCEEDED(service.QueryInterface(IID_PPV_ARGS(&thread_sink))));
+    ComPtr<ITfThreadFocusSink> focus_sink;
+    CHECK(SUCCEEDED(service.QueryInterface(IID_PPV_ARGS(&focus_sink))));
+    ComPtr<ITfTextEditSink> edit_sink;
+    CHECK(SUCCEEDED(service.QueryInterface(IID_PPV_ARGS(&edit_sink))));
     ComPtr<ITfDisplayAttributeProvider> provider;
     CHECK(SUCCEEDED(service.QueryInterface(IID_PPV_ARGS(&provider))));
 
@@ -69,6 +75,7 @@ int wmain() {
     CHECK(eaten == FALSE);
   }
 
+  TestShiftInputContracts();
   TestReadonlyInputContracts();
 
   if (SUCCEEDED(init)) CoUninitialize();

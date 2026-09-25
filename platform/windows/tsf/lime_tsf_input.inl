@@ -71,6 +71,10 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
                                    BOOL* eaten) {
   if (!eaten) return E_POINTER;
   *eaten = FALSE;
+  if (IsKeyboardDisabled(context)) {
+    DropUnavailableContext();
+    return S_OK;
+  }
   struct SpaceKeyupProbe final {
     TextService* owner;
     WPARAM key;
@@ -228,8 +232,14 @@ HRESULT TextService::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lpara
   }
   return S_OK;
 }
-HRESULT TextService::OnTestKeyUp(ITfContext*, WPARAM key, LPARAM lparam, BOOL* eaten) {
+HRESULT TextService::OnTestKeyUp(ITfContext* context, WPARAM key, LPARAM lparam,
+                                 BOOL* eaten) {
   if (!eaten) return E_POINTER;
+  if (IsKeyboardDisabled(context)) {
+    DropUnavailableContext();
+    *eaten = FALSE;
+    return S_OK;
+  }
   if (ShouldConsumeSpaceKeyUp(key, space_keyup_pending_)) {
     *eaten = TRUE;
     return S_OK;
@@ -245,13 +255,27 @@ HRESULT TextService::OnTestKeyUp(ITfContext*, WPARAM key, LPARAM lparam, BOOL* e
     *eaten = FALSE;
     return S_OK;
   }
-  *eaten = (bit != 0 && (shift_pending_mask_ & bit) != 0) ? TRUE : FALSE;
+  const bool pending = bit != 0 && (shift_pending_mask_ & bit) != 0;
+  if (bit != 0 && !pending) {
+    // A non-Shift key cancels a possible toggle in OnTestKeyDown/OnKeyDown.
+    // The host then sees this key-up as pass-through and may skip OnKeyUp, so
+    // clear the physical Shift state here instead of waiting for a callback
+    // that will never arrive.  This mirrors the right-Shift cleanup above and
+    // prevents a Shift+key chord from poisoning all later bare Shift taps.
+    shift_down_mask_ &= static_cast<uint8_t>(~bit);
+    left_shift_down_tick_ = 0;
+  }
+  *eaten = pending ? TRUE : FALSE;
   return S_OK;
 }
 HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
                                BOOL* eaten) {
   if (!eaten) return E_POINTER;
   *eaten = FALSE;
+  if (IsKeyboardDisabled(context)) {
+    DropUnavailableContext();
+    return S_OK;
+  }
   struct SpaceKeyupResult final {
     TextService* owner;
     WPARAM key;
@@ -350,6 +374,11 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
 HRESULT TextService::OnKeyUp(ITfContext* context, WPARAM key, LPARAM lparam,
                              BOOL* eaten) {
   if (!eaten) return E_POINTER;
+  if (IsKeyboardDisabled(context)) {
+    DropUnavailableContext();
+    *eaten = FALSE;
+    return S_OK;
+  }
   try {
     if (ShouldConsumeSpaceKeyUp(key, space_keyup_pending_)) {
       space_keyup_pending_ = false;
@@ -411,6 +440,14 @@ bool TextService::ToggleAsciiMode(ITfContext* context) {
     // complete synchronously so a queued terminal edit cannot swallow the
     // next ASCII key before the mode has actually changed.
     if (!RequestEdit(composition_owner, Action::Commit, preedit_, true)) {
+      const bool context_changed =
+          composition_context_ && composition_context_.Get() != context;
+      if (IsUnavailableEditError(last_edit_error_) &&
+          (context_changed || IsKeyboardDisabled(context) ||
+           last_edit_error_ != E_FAIL)) {
+        DropUnavailableContext();
+        return false;
+      }
       const std::wstring reason = last_edit_error_ == S_OK
                                       ? L"切换模式时无法提交组合串"
                                       : EditErrorText(last_edit_error_);

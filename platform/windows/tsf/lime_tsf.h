@@ -21,11 +21,15 @@ extern std::atomic<long> g_module_references;
 
 class CandidateUiElement;
 struct CandidateAnchorSession;
+struct DetachedCompositionEndSession;
 struct AccessibleContextState;
 
 class TextService final : public ITfTextInputProcessorEx,
+                          public ITfThreadMgrEventSink,
                           public ITfKeyEventSink,
+                          public ITfThreadFocusSink,
                           public ITfCompositionSink,
+                          public ITfTextEditSink,
                           public ITfDisplayAttributeProvider,
                           public ITfTextLayoutSink {
  public:
@@ -47,6 +51,15 @@ class TextService final : public ITfTextInputProcessorEx,
   HRESULT STDMETHODCALLTYPE Deactivate() override;
   HRESULT STDMETHODCALLTYPE ActivateEx(ITfThreadMgr* thread_manager, TfClientId client_id,
                                         DWORD flags) override;
+
+  // ITfThreadMgrEventSink
+  HRESULT STDMETHODCALLTYPE OnInitDocumentMgr(ITfDocumentMgr* document_manager) override;
+  HRESULT STDMETHODCALLTYPE OnUninitDocumentMgr(ITfDocumentMgr* document_manager) override;
+  HRESULT STDMETHODCALLTYPE OnSetFocus(ITfDocumentMgr* focused_document_manager,
+                                        ITfDocumentMgr* previous_document_manager) override;
+  HRESULT STDMETHODCALLTYPE OnPushContext(ITfContext* context) override;
+  HRESULT STDMETHODCALLTYPE OnPopContext(ITfContext* context) override;
+
   HRESULT STDMETHODCALLTYPE OnSetFocus(BOOL foreground) override;
   HRESULT STDMETHODCALLTYPE OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM lparam,
                                           BOOL* eaten) override;
@@ -57,8 +70,16 @@ class TextService final : public ITfTextInputProcessorEx,
   HRESULT STDMETHODCALLTYPE OnKeyUp(ITfContext* context, WPARAM key, LPARAM lparam,
                                     BOOL* eaten) override;
   HRESULT STDMETHODCALLTYPE OnPreservedKey(ITfContext* context, REFGUID guid, BOOL* eaten) override;
+
+  // ITfThreadFocusSink
+  HRESULT STDMETHODCALLTYPE OnSetThreadFocus() override;
+  HRESULT STDMETHODCALLTYPE OnKillThreadFocus() override;
+
   HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie cookie,
                                                      ITfComposition* composition) override;
+  HRESULT STDMETHODCALLTYPE OnEndEdit(ITfContext* context,
+                                      TfEditCookie read_only_cookie,
+                                      ITfEditRecord* edit_record) override;
   HRESULT STDMETHODCALLTYPE OnLayoutChange(ITfContext* context,
                                             TfLayoutCode code,
                                             ITfContextView* view) override;
@@ -76,12 +97,21 @@ class TextService final : public ITfTextInputProcessorEx,
   bool IsEditCurrent(uint64_t generation) const { return generation == edit_generation_; }
   void CompleteEditSession(Action action, uint64_t generation, bool succeeded);
   uint32_t ContextLimit() const { return context_limit_; }
+#ifdef LIME_TSF_TESTS
+  uint8_t ShiftDownMaskForTest() const { return shift_down_mask_; }
+  uint8_t ShiftPendingMaskForTest() const { return shift_pending_mask_; }
+  bool AsciiModeForTest() const { return ascii_mode_; }
+  const std::wstring& PreeditForTest() const { return preedit_; }
+  bool CompositionActiveForTest() const { return composition_ != nullptr; }
+  bool TerminalEditPendingForTest() const { return terminal_edit_pending_; }
+#endif
 
  private:
   friend class CandidateUiElement;
   friend struct CandidateAnchorSession;
 
   bool HandleKey(ITfContext* context, WPARAM key);
+  bool IsKeyboardDisabled(ITfContext* context) const;
   bool ToggleAsciiMode(ITfContext* context);
   bool IsImeKey(WPARAM key) const;
   bool IsPrintable(WPARAM key) const;
@@ -106,6 +136,13 @@ class TextService final : public ITfTextInputProcessorEx,
   void LearnCandidate(std::wstring_view pinyin, std::wstring_view text);
   void ClearPendingPartialSelection();
   bool ResolvePendingCancellation();
+  void DropUnavailableContext();
+  void QueueDetachedCompositionEnd(ITfContext* context,
+                                   ITfComposition* composition);
+  void RetryDetachedCompositionEnds();
+  void UnadviseThreadSinks();
+  void AdviseTextEditSink(ITfContext* context);
+  void UnadviseTextEditSink();
   bool RequestEdit(ITfContext* context, Action action, const std::wstring& text,
                    bool synchronous = false,
                    const std::wstring& remainder = {});
@@ -134,7 +171,11 @@ class TextService final : public ITfTextInputProcessorEx,
   Microsoft::WRL::ComPtr<ITfKeystrokeMgr> keystroke_manager_;
   TfClientId client_id_ = TF_CLIENTID_NULL;
   DWORD activation_flags_ = 0;
+  DWORD thread_mgr_event_sink_cookie_ = TF_INVALID_COOKIE;
+  DWORD thread_focus_sink_cookie_ = TF_INVALID_COOKIE;
+  DWORD text_edit_sink_cookie_ = TF_INVALID_COOKIE;
   Microsoft::WRL::ComPtr<ITfComposition> composition_;
+  std::vector<Microsoft::WRL::ComPtr<DetachedCompositionEndSession>> detached_ends_;
   TfGuidAtom display_attribute_atom_ = TF_INVALID_GUIDATOM;
   Microsoft::WRL::ComPtr<CandidateUiElement> candidate_ui_;
   bool candidate_ui_external_ = true;
@@ -144,6 +185,8 @@ class TextService final : public ITfTextInputProcessorEx,
   Microsoft::WRL::ComPtr<ITfContext> composition_context_;
   Microsoft::WRL::ComPtr<ITfSource> layout_source_;
   DWORD layout_sink_cookie_ = TF_INVALID_COOKIE;
+  Microsoft::WRL::ComPtr<ITfSource> text_edit_sink_source_;
+  Microsoft::WRL::ComPtr<ITfContext> text_edit_sink_context_;
   std::wstring preedit_;
   std::wstring preceding_preview_;
   // A result belongs to one composition.  Clearing the state drops our

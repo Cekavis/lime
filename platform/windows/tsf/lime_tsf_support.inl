@@ -26,6 +26,21 @@ std::wstring EditErrorText(HRESULT hr) {
   }
 }
 
+bool IsUnavailableEditError(HRESULT hr) {
+  switch (hr) {
+    case E_FAIL:
+    case E_POINTER:
+    case E_NOINTERFACE:
+    case TF_E_NOSELECTION:
+    case TF_E_NOOBJECT:
+    case TF_E_DISCONNECTED:
+    case TF_E_COMPOSITION_REJECTED:
+      return true;
+    default:
+      return false;
+  }
+}
+
 std::wstring PreviewText(std::wstring_view text, uint32_t limit) {
   if (limit == 0 || text.empty()) return {};
   if (text.size() <= limit) return std::wstring(text);

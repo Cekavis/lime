@@ -179,10 +179,7 @@ bool TextService::EnsureComposition(ITfContext* context, TfEditCookie cookie) {
     // caret at its end.  EndComposition is best-effort here; the original
     // edit error is retained for the caller.
     const HRESULT selection_error = last_edit_error_;
-    composition_->EndComposition(cookie);
-    UnadviseLayoutSink();
-    composition_.Reset();
-    composition_context_.Reset();
+    EndComposition(cookie);
     last_edit_error_ = selection_error;
     return false;
   }
@@ -292,14 +289,25 @@ bool TextService::CommitPartialComposition(TfEditCookie cookie,
 }
 bool TextService::EndComposition(TfEditCookie cookie) {
   if (!composition_) return true;
+  const uint64_t generation = edit_generation_;
+  ComPtr<ITfComposition> old_composition = composition_;
+  ComPtr<ITfContext> old_context = composition_context_;
   ClearCompositionDisplayAttribute(cookie);
-  const HRESULT result = composition_->EndComposition(cookie);
-  if (SUCCEEDED(result)) {
-    UnadviseLayoutSink();
-    composition_.Reset();
-    composition_context_.Reset();
+  UnadviseLayoutSink();
+  composition_.Reset();
+  composition_context_.Reset();
+  // EndComposition may synchronously terminate the old object or reenter a
+  // new input. Neither callback may clear the next composition or generation.
+  const HRESULT result = old_composition->EndComposition(cookie);
+  if (FAILED(result) && IsEditCurrent(generation) && !composition_) {
+    composition_ = old_composition;
+    composition_context_ = old_context;
+    AdviseLayoutSink(old_context.Get());
   }
-  if (FAILED(result)) last_edit_error_ = result;
+  if (FAILED(result)) {
+    if (IsEditCurrent(generation)) last_edit_error_ = result;
+    else QueueDetachedCompositionEnd(old_context.Get(), old_composition.Get());
+  }
   return SUCCEEDED(result);
 }
 

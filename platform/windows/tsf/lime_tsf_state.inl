@@ -1,3 +1,106 @@
+bool TextService::IsKeyboardDisabled(ITfContext* context) const {
+  // TSF may still invoke the key sink while the focused application has no
+  // editable document.  Treat a missing callback context as host-owned input
+  // immediately; this check must happen before the service or Rime sees the
+  // key.
+  if (!context) return true;
+
+  // Empty browser text stores can remain focused but explicitly become
+  // read-only. GetStatus does not request an edit lock.
+  TF_STATUS status{};
+  if (SUCCEEDED(context->GetStatus(&status)) &&
+      (status.dwDynamicFlags & TF_SD_READONLY) != 0) return true;
+
+  // Unit contracts call the sink directly without activating a thread manager.
+  // A non-null context is sufficient for those isolated tests; production
+  // callbacks always have an activated manager and use the stronger checks
+  // below.
+  if (!thread_manager_) return false;
+
+  Microsoft::WRL::ComPtr<ITfDocumentMgr> focused_document_manager;
+  if (FAILED(thread_manager_->GetFocus(&focused_document_manager)) ||
+      !focused_document_manager) {
+    return true;
+  }
+  Microsoft::WRL::ComPtr<ITfContext> focused_context;
+  if (FAILED(focused_document_manager->GetTop(&focused_context)) ||
+      !focused_context) {
+    return true;
+  }
+  // The key sink context must be the current top context. A browser can keep
+  // invoking a sink for the previous text store after focus moved to a blank
+  // document; accepting that stale pointer is what buffers shortcut letters.
+  if (focused_context.Get() != context) return true;
+  Microsoft::WRL::ComPtr<ITfDocumentMgr> context_document_manager;
+  if (FAILED(context->GetDocumentMgr(&context_document_manager)) ||
+      !context_document_manager ||
+      context_document_manager.Get() != focused_document_manager.Get()) {
+    return true;
+  }
+
+  // Keep Weasel's compartment checks as the authoritative disabled signal,
+  // then reject dummy TSF contexts that cannot create a composition at all.
+  // This is the common shape exposed by non-editor windows such as players;
+  // do not infer it from TF_SS_TRANSITORY, which real browser text stores use.
+  Microsoft::WRL::ComPtr<ITfContextComposition> composition;
+  if (FAILED(context->QueryInterface(IID_PPV_ARGS(&composition))) ||
+      !composition) {
+    return true;
+  }
+
+  Microsoft::WRL::ComPtr<ITfCompartmentMgr> compartments;
+  if (SUCCEEDED(focused_context.As(&compartments)) && compartments) {
+    const auto compartment_is_set = [&](REFGUID guid) {
+      Microsoft::WRL::ComPtr<ITfCompartment> compartment;
+      if (FAILED(compartments->GetCompartment(guid, &compartment)) ||
+          !compartment) {
+        return false;
+      }
+      VARIANT value{};
+      const HRESULT hr = compartment->GetValue(&value);
+      const bool set = SUCCEEDED(hr) && value.vt == VT_I4 && value.lVal != 0;
+      VariantClear(&value);
+      return set;
+    };
+    // Match Weasel: these compartments are the host's authoritative signal
+    // that the focused context cannot receive keyboard input.
+    if (compartment_is_set(GUID_COMPARTMENT_KEYBOARD_DISABLED) ||
+        compartment_is_set(GUID_COMPARTMENT_EMPTYCONTEXT)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void TextService::DropUnavailableContext() {
+  // Detach before calling the host. Old writes become stale, while cleanup
+  // retains its own references and cannot cancel the next editor's input.
+  ComPtr<ITfContext> old_context = composition_context_;
+  ComPtr<ITfComposition> old_composition = composition_;
+  ++edit_generation_;
+  UnadviseLayoutSink();
+  composition_.Reset();
+  composition_context_.Reset();
+  active_context_.Reset();
+  ClearCompositionState();
+  shift_down_mask_ = 0;
+  shift_pending_mask_ = 0;
+  left_shift_down_tick_ = 0;
+  right_shift_down_tick_ = 0;
+  last_chinese_input_was_digit_ = false;
+  space_keyup_pending_ = false;
+  single_quote_open_ = false;
+  double_quote_open_ = false;
+  passthrough_notified_ = false;
+  last_edit_error_ = S_OK;
+  if (old_context && old_composition) {
+    QueueDetachedCompositionEnd(old_context.Get(), old_composition.Get());
+  } else {
+    RetryDetachedCompositionEnds();
+  }
+}
+
 void TextService::RefreshConfigRevision(ITfContext* context) {
   std::string body;
   if (!g_pipe.Request(R"({"kind":"get_status"})", body)) { connected_ = false; return; }

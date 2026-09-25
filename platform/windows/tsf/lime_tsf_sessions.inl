@@ -1,3 +1,45 @@
+// Focus-loss cleanup owns the old objects, just as Weasel's end-composition
+// session does. It must not depend on the next editor's input generation.
+struct DetachedCompositionEndSession final : ITfEditSession {
+  std::atomic<ULONG> references{1};
+  ComPtr<ITfContext> context;
+  ComPtr<ITfComposition> composition;
+  bool queued = false;
+  bool finished = false;
+  DetachedCompositionEndSession(ITfContext* ctx, ITfComposition* value)
+      : context(ctx), composition(value) { ++g_module_references; }
+  ~DetachedCompositionEndSession() { --g_module_references; }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (iid != IID_IUnknown && iid != IID_ITfEditSession) return E_NOINTERFACE;
+    *out = static_cast<ITfEditSession*>(this);
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG value = --references;
+    if (!value) delete this;
+    return value;
+  }
+  HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
+    queued = false;
+    if (finished) return S_OK;
+    ComPtr<ITfRange> range;
+    HRESULT result = composition->GetRange(&range);
+    if (SUCCEEDED(result) && range) {
+      ComPtr<ITfProperty> property;
+      if (SUCCEEDED(context->GetProperty(GUID_PROP_ATTRIBUTE, &property)) &&
+          property) property->Clear(cookie, range.Get());
+      result = range->SetText(cookie, 0, L"", 0);
+    }
+    const HRESULT ended = composition->EndComposition(cookie);
+    finished = SUCCEEDED(ended);
+    return FAILED(ended) ? ended : result;
+  }
+};
+
 struct CandidateAnchorSession final : ITfEditSession {
   std::atomic<ULONG> references{1};
   TextService* owner;
