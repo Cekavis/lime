@@ -7,7 +7,7 @@
 1. Rime/雾凇拼音根据 `preedit` 召回候选。
 2. 平台按需请求候选页面前缀；服务在模型启用时可额外读取前 `llm_rerank_count` 个 Rime 候选完成排序，但响应只返回请求的前缀。翻页超出已读取范围后，再请求更长的前缀，不预先遍历完整候选列表；这类扩展请求只追加 Rime 候选、不重新调用 LLM，并保持已返回的最终排序前缀。
 3. 检查前 `llm_rerank_count` 个 Rime 候选的 `commit_text_preview`；预览仍包含未消费输入的候选不送入 LLM，也不从该范围之后补位。
-4. 按 `commit_text` 排除不含汉字或 ASCII 英文字母的非 Emoji 候选，包括纯数字、希腊字母和纯符号（如 `1`、`１２`、`δ`、`∑`）；汉字包含 CJK 扩展/兼容汉字及 `〇`，中数、中英等混合词仍可参与。ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 完全相等时才进入 LLM；其他英文候选保留在 Rime 原始顺序中，但不参与评分。
+4. 按 `commit_text` 排除不含汉字或 ASCII 英文字母的非 Emoji 候选，包括纯数字、希腊字母和纯符号（如 `1`、`１２`、`δ`、`∑`）；汉字包含 CJK 扩展/兼容汉字及 `〇`，中数、中英等混合词仍可参与。ASCII 英文候选只有在 `commit_text` 与原始 `preedit` 忽略 ASCII 大小写后相等时才进入 LLM；其他英文候选保留在 Rime 原始顺序中，但不参与评分。
 5. 开启 `llm_ignore_emoji` 时，包含 Emoji code point 的候选也不进入 LLM；混合中文和 Emoji 的候选同样排除，但仍保留在 Rime 原始顺序中。
 6. `preceding_text` 为空时跳过 LLM，直接返回 Rime 原始顺序；该路径不依赖已加载的模型运行时。
 7. 将每个 `preceding_text + candidate_text` 联合分词，并与单独分词的上文一起求最长共同 token
@@ -43,12 +43,12 @@
 ```text
 complete_pool = candidates_whose_preview_consumes_all_input(first_N_rime_candidates)
 llm_pool = complete_pool - non_emoji_candidates_without_han_or_ascii_letters
-llm_pool = llm_pool - english_candidates_unless_commit_equals_preedit
+llm_pool = llm_pool - english_candidates_unless_commit_equals_preedit_ignoring_ascii_case
 llm_pool = llm_pool - emoji_candidates_when_llm_ignore_emoji
 final = llm_top_k(llm_pool) + rime_candidates_without(llm_top_k)
 ```
 
-未完整消费输入、被文本/英文策略排除或被 Emoji 设置排除的候选不会被 LLM 提升，但仍保留在最终候选列表中；排除候选不会触发其他候选补位。文本筛选也适用于未提供 `preedit` 的重排入口；筛选后候选池为空时跳过 LLM，保留 Rime 原始顺序且不产生 LLM 性能快照。英文放行条件是原始字符串的严格相等比较，不忽略大小写、空格或连字符，也不能绕过数字/符号筛选。Emoji 仍只由 `llm_ignore_emoji` 控制；判断按提交文本中的 code point 进行，因此混合中文和 Emoji 的候选也会被该设置排除。其余候选严格保持 Rime 原始顺序。重复、越界或无法解析的索引丢弃；完整候选或有效结果少于 K 时不补造候选。
+未完整消费输入、被文本/英文策略排除或被 Emoji 设置排除的候选不会被 LLM 提升，但仍保留在最终候选列表中；排除候选不会触发其他候选补位。文本筛选也适用于未提供 `preedit` 的重排入口；筛选后候选池为空时跳过 LLM，保留 Rime 原始顺序且不产生 LLM 性能快照。英文放行条件是原始字符串忽略 ASCII 大小写后相等，空格或连字符仍需严格一致，也不能绕过数字/符号筛选。Emoji 仍只由 `llm_ignore_emoji` 控制；判断按提交文本中的 code point 进行，因此混合中文和 Emoji 的候选也会被该设置排除。其余候选严格保持 Rime 原始顺序。重复、越界或无法解析的索引丢弃；完整候选或有效结果少于 K 时不补造候选。
 
 ## 时序与降级
 

@@ -17,7 +17,7 @@ pub(super) fn candidate_allowed_for_llm(
     // Preserve the existing Emoji opt-in independently of the text filter.
     (has_text || has_emoji)
         && preedit.map_or(true, |preedit| {
-            !is_english_candidate(candidate) || text == preedit
+            !is_english_candidate(candidate) || text.eq_ignore_ascii_case(preedit)
         })
 }
 

@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn english_candidates_are_scored_only_when_they_equal_the_preedit() {
+    fn english_candidates_are_scored_only_when_they_equal_the_preedit_ignoring_ascii_case() {
         use std::cell::RefCell;
 
         struct RecordingScorer {
@@ -502,22 +502,34 @@ mod tests {
             }
         }
 
-        let candidates = vec![c("你好"), c("hello"), c("nihao"), c("3D打印"), c("ni-hao")];
+        let candidates = vec![
+            c("你好"),
+            c("mac"),
+            c("macos"),
+            c("macOS"),
+            c("MACOS"),
+            c("3D打印"),
+            c("mac-os"),
+            c("macos2"),
+        ];
         let scorer = RecordingScorer {
             seen: RefCell::new(Vec::new()),
         };
         let result = try_rerank_selected_candidates_with_scorer_and_preedit(
             &candidates,
-            &[0, 1, 2, 3, 4],
-            Some("nihao"),
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+            Some("macos"),
             "前文",
             Some(&scorer),
-            5,
+            8,
             2,
         )
         .unwrap();
 
-        assert_eq!(scorer.seen.into_inner(), vec!["你好", "nihao", "3D打印"]);
+        assert_eq!(
+            scorer.seen.into_inner(),
+            vec!["你好", "macos", "macOS", "MACOS", "3D打印"]
+        );
         assert_eq!(
             result
                 .result
@@ -526,25 +538,25 @@ mod tests {
                 .filter_map(|row| row.llm_candidate.as_ref())
                 .map(|candidate| candidate.commit_text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["你好", "nihao", "3D打印"]
+            vec!["你好", "macos", "macOS", "MACOS", "3D打印"]
         );
         assert!(result
             .result
             .candidates
             .iter()
-            .any(|candidate| candidate.commit_text == "hello"));
+            .any(|candidate| candidate.commit_text == "mac"));
         assert!(result
             .result
             .candidates
             .iter()
-            .any(|candidate| candidate.commit_text == "ni-hao"));
+            .any(|candidate| candidate.commit_text == "mac-os"));
         let performance = result
             .llm_performance
             .as_ref()
             .expect("scored candidates should have performance");
-        assert_eq!(performance.candidate_count, 3);
-        assert_eq!(performance.scored_count, 3);
-        assert_eq!(performance.target_token_count, 3);
+        assert_eq!(performance.candidate_count, 5);
+        assert_eq!(performance.scored_count, 5);
+        assert_eq!(performance.target_token_count, 5);
     }
 
     #[test]
