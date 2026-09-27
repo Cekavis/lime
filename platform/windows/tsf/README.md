@@ -37,6 +37,8 @@ Telegram 7.2.x 的输入框是 Qt `QTextEdit`。当 TSF range 返回空前文时
 
 `OnTestKeyDown` 只做轻量探测，不在探测阶段打开 TSF edit session 或请求服务；它先检查 Weasel 同样使用的焦点、`GUID_COMPARTMENT_KEYBOARD_DISABLED`、`GUID_COMPARTMENT_EMPTYCONTEXT` 和只读状态，并拒绝不能创建 composition 的虚空 TSF context。Telegram 的 Qt 控件例外地会在这里预热一个不阻塞的 UIA MTA 查询，但不会读取文本或等待结果。UIA 结果完成后缓存，后续按键读取缓存；如果查询仍在进行，当前按键继续按无上文处理，不阻塞输入路径。部分宿主会在探测回调期间持有 TSF 锁，候选读取和组合更新仍统一在 `OnKeyDown` 中执行。
 
+MPC-BE 的播放画面可能仍有可写的默认 IME context。适配层额外检查当前线程的原生焦点：仅窗口类为 `MPC-BE` 的主窗口，以及该窗口下 `Afx:` 类、控件 ID 为 `AFX_IDW_PANE_FIRST`（`0xe900`）的直接子播放视图，按非编辑区域透传所有按键并清理旧组合状态；不改变中英文模式、不请求候选、不创建组合串。打开文件、搜索、播放列表命名等编辑控件不匹配此规则；不沿祖先或 owner 禁用整个应用。这是基于 [MPC-BE 1.9.0 窗口定义](https://github.com/Aleksoid1978/MPC-BE/blob/1.9.0/include/mpc_defines.h#L23)及其[播放视图创建与焦点路由](https://github.com/Aleksoid1978/MPC-BE/blob/1.9.0/src/apps/mplayerc/MainFrm.cpp#L715)的兼容规则，不是通用输入框检测，也不涵盖独立的独占全屏窗口。未知窗口继续使用原有 TSF 门禁，不能仅凭缺少 Win32 caret 或 `TF_SS_TRANSITORY` 禁用输入。
+
 TSF 的 `RequestEditSession` 结果以 `phrSession` 输出参数为准，并使用 `TF_ES_READWRITE` 的 ASYNCDONTCARE 调度：宿主允许时同步执行，否则由 TSF 排队。`StartComposition` 即使返回 `S_OK` 也可能通过空的 `ppComposition` 表示宿主拒绝组合；适配层会检查这一点并显示明确错误。
 
 新增拼音的写会话被 `TF_E_READONLY` 拒绝时，丢弃本次新增字符，保留此前有效的拼音，并继续消费该按键、显示只读提示；被丢弃的字符不会混入下一次正常输入。焦点门禁已确认 context 不可用，或出现断开、无 selection、宿主拒绝 composition 等不可用 context 错误时，清空 Lime 的本地组合状态并把当前按键交还宿主，避免浏览器失焦后缓存按键在下一个输入框回放；已有有效 composition 遇单独的暂时性 `E_FAIL` 仍保留可重试状态。

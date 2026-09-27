@@ -17,6 +17,7 @@ using Microsoft::WRL::ComPtr;
 } while (false)
 
 #include "tsf_readonly_contracts.h"
+#include "tsf_focus_contracts.h"
 
 int wmain() {
   const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -77,6 +78,7 @@ int wmain() {
 
   TestShiftInputContracts();
   TestReadonlyInputContracts();
+  TestMpcPlaybackFocusContracts();
 
   if (SUCCEEDED(init)) CoUninitialize();
   return 0;

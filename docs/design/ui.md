@@ -16,6 +16,8 @@
 
 `OnTestKeyDown` 只做不进入 edit session 的上下文门禁和按键归属判断；它读取当前焦点、Weasel 的禁用/空上下文 compartments、只读状态以及 composition 能力，但不访问 IPC。候选读取和写入组合串在 `OnKeyDown` 的 edit session 中完成，避免宿主在 probe 回调期间持有锁而造成 `TF_E_LOCKED`。
 
+MPC-BE 主窗口及其直接子播放视图获得原生键盘焦点时，即使 Windows 提供了可写的默认 IME context，也直接透传字母、标点、Shift 等按键，清理遗留组合状态，并保留当前中英文模式。此兼容规则仅匹配播放区域，文件名、搜索等编辑控件继续正常输入中文；独立的独占全屏窗口暂不在匹配范围内。不以临时 context 或缺少系统 caret 作为通用的非输入框判断。
+
 TSF 写入组合串时以 `RequestEditSession` 的 `phrSession` 结果为准，使用 `TF_ES_READWRITE` 的 ASYNCDONTCARE 调度。`StartComposition` 的 `S_OK` 不代表一定创建了组合，必须同时检查 `ppComposition`；宿主拒绝时显示明确诊断而不是静默透传。取消会先清空组合范围再结束组合，并把 selection 折叠到组合末端；未完成的异步取消会继续吞键，避免 Esc 或后续字母泄漏到宿主。
 
 新增拼音被只读上下文以 `TF_E_READONLY` 拒绝时，丢弃本次新增字符，继续消费按键并显示只读提示；此前有效的拼音保留，下一次可编辑输入不携带被丢弃的字符。焦点门禁已确认 context 不可用，或出现断开、无 selection、宿主拒绝 composition 等不可用 context 错误时，清空本地组合状态并透传当前按键，避免失焦后的输入在新编辑器中回放；已有有效 composition 遇单独的暂时性 `E_FAIL` 仍保留可重试状态。回滚必须尊重请求期间的焦点清理，不得恢复已清空的输入状态。

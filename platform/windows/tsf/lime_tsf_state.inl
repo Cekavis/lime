@@ -1,9 +1,41 @@
+namespace {
+
+bool IsMpcPlaybackWindow(HWND window) {
+  if (!window) return false;
+  wchar_t class_name[256]{};
+  const int length = GetClassNameW(window, class_name, ARRAYSIZE(class_name));
+  if (length == 0) return false;
+  const std::wstring_view name(class_name, length);
+  if (name == L"MPC-BE") return true;
+
+  // MPC-BE's CMainFrame::OnSetFocus forwards to its CChildView, a direct
+  // Afx child with AFX_IDW_PANE_FIRST. Its default IME context can still be
+  // writable despite the view having no editor. Match that exact surface,
+  // not the process/ancestor: dialogs and nested edits must keep working.
+  constexpr int kMfcFirstPane = 0xe900;
+  if (!name.starts_with(L"Afx:") || GetDlgCtrlID(window) != kMfcFirstPane ||
+      (GetWindowLongPtrW(window, GWL_STYLE) & WS_CHILD) == 0) {
+    return false;
+  }
+  HWND parent = GetAncestor(window, GA_PARENT);
+  const int parent_length = GetClassNameW(parent, class_name, ARRAYSIZE(class_name));
+  return parent_length > 0 &&
+         std::wstring_view(class_name, parent_length) == L"MPC-BE";
+}
+
+}  // namespace
+
 bool TextService::IsKeyboardDisabled(ITfContext* context) const {
   // TSF may still invoke the key sink while the focused application has no
   // editable document.  Treat a missing callback context as host-owned input
   // immediately; this check must happen before the service or Rime sees the
   // key.
   if (!context) return true;
+
+  // Use the current thread's actual focus, not the context view, which may
+  // still describe the previous editor or Windows' floating IME window.
+  // This also runs before IPC, edit sessions and mode-switch handling.
+  if (IsMpcPlaybackWindow(GetFocus())) return true;
 
   // Empty browser text stores can remain focused but explicitly become
   // read-only. GetStatus does not request an edit lock.
@@ -12,9 +44,8 @@ bool TextService::IsKeyboardDisabled(ITfContext* context) const {
       (status.dwDynamicFlags & TF_SD_READONLY) != 0) return true;
 
   // Unit contracts call the sink directly without activating a thread manager.
-  // A non-null context is sufficient for those isolated tests; production
-  // callbacks always have an activated manager and use the stronger checks
-  // below.
+  // They still exercise the native-focus and read-only gates above;
+  // production callbacks also use the manager checks below.
   if (!thread_manager_) return false;
 
   Microsoft::WRL::ComPtr<ITfDocumentMgr> focused_document_manager;
@@ -40,8 +71,8 @@ bool TextService::IsKeyboardDisabled(ITfContext* context) const {
 
   // Keep Weasel's compartment checks as the authoritative disabled signal,
   // then reject dummy TSF contexts that cannot create a composition at all.
-  // This is the common shape exposed by non-editor windows such as players;
-  // do not infer it from TF_SS_TRANSITORY, which real browser text stores use.
+  // A default IME context can still support composition without an editor.
+  // Do not infer editability from TF_SS_TRANSITORY either: browsers use it.
   Microsoft::WRL::ComPtr<ITfContextComposition> composition;
   if (FAILED(context->QueryInterface(IID_PPV_ARGS(&composition))) ||
       !composition) {
