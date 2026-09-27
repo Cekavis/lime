@@ -15,6 +15,14 @@ export interface Config {
 
 export interface ConfigSnapshot { revision: number; config: Config; }
 
+export interface ModelMemorySummary {
+  modelBytes: number | null;
+  contextBytes: number | null;
+  computeBytes: number | null;
+  totalBytes: number | null;
+  backend: string | null;
+}
+
 export interface ModelInfo {
   path: string | null;
   sizeBytes: number | null;
@@ -22,6 +30,7 @@ export interface ModelInfo {
   loaded: boolean;
   scoringPath: "attention" | "recurrent" | null;
   memory: Record<string, number>;
+  memorySummary: ModelMemorySummary | null;
 }
 
 export interface ModelPreset {

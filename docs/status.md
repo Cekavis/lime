@@ -1,6 +1,6 @@
 # 项目状态
 
-日期：2026-09-08
+日期：2026-09-27
 
 Lime 当前以 Windows 10 22H2+ x64 为首要交付目标。实时输入链路是同步请求：TSF 发送输入快照，Rust 服务获取 Rime 候选并在已加载模型时完成 LLM 排序后返回最终候选。服务不可用时 TSF 进入英文、数字和标点透传；没有模型时保持 Rime-only。
 
@@ -20,4 +20,4 @@ Lime 当前以 Windows 10 22H2+ x64 为首要交付目标。实时输入链路�
 - CUDA 与 CPU patched llama.cpp 的真实 GGUF logits smoke test。
 - NSIS 安装、升级、卸载和用户数据保留。
 
-前端保持现有 vanilla DOM 实现。组件化 UI、生成 TypeScript DTO 和更细的 TSF 文件拆分记录为后续改进方向。
+管理前端已迁移到 React + Tailwind CSS 4 + shadcn/ui，拆分为共享组件、页面、状态协调与 IPC 层；支持响应式窗口和浅色/深色主题，移除独立诊断页。模型与设置合页，初始化内存/显存按设备常显；测试与历史的候选及评分合并在一张表中。生成 TypeScript DTO 和更细的 TSF 文件拆分仍为后续改进方向。

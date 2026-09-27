@@ -35,6 +35,10 @@ export function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+export function asByteCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 function integer(value: unknown, fallback = 0): number {
   return Math.max(0, Math.trunc(asNumber(value) ?? fallback));
 }
@@ -183,11 +187,10 @@ export function decodeModel(value: unknown): ModelInfo {
   const item = asRecord(value);
   const memory = asRecord(item?.initialization_memory);
   const breakdown = asRecord(memory?.breakdown);
-  const flattened: Record<string, number> = {};
-  for (const [key, value] of Object.entries(breakdown ?? {})) {
-    const parsed = asNumber(value);
-    if (parsed !== null) flattened[key] = parsed;
-  }
+  const flattened: Record<string, number> = Object.fromEntries(Object.entries(breakdown ?? {}).flatMap(([key, value]) => {
+    const parsed = asByteCount(value);
+    return parsed === null ? [] : [[key, parsed]];
+  }));
   return {
     path: string(item?.path),
     sizeBytes: asNumber(item?.size_bytes),
@@ -195,6 +198,13 @@ export function decodeModel(value: unknown): ModelInfo {
     loaded: item?.loaded === true,
     scoringPath: item?.scoring_path === "attention" || item?.scoring_path === "recurrent" ? item.scoring_path : null,
     memory: flattened,
+    memorySummary: memory ? {
+      modelBytes: asByteCount(memory.model_bytes),
+      contextBytes: asByteCount(memory.context_bytes),
+      computeBytes: asByteCount(memory.compute_bytes),
+      totalBytes: asByteCount(memory.total_bytes),
+      backend: string(memory.backend),
+    } : null,
   };
 }
 

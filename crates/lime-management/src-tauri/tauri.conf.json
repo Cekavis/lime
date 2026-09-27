@@ -13,9 +13,9 @@
     "windows": [
       {
         "title": "Lime",
-        "width": 520,
-        "height": 720,
-        "minWidth": 480,
+        "width": 1040,
+        "height": 760,
+        "minWidth": 420,
         "minHeight": 480,
         "resizable": true
       }

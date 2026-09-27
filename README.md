@@ -26,7 +26,8 @@ cargo check --workspace
 cargo check -p lime-ipc -p lime-service
 cargo test --workspace
 cargo check --manifest-path crates/lime-management/src-tauri/Cargo.toml
-npm --prefix crates/lime-management run build
+powershell.exe -Command "npm --prefix crates/lime-management test"
+powershell.exe -Command "npm --prefix crates/lime-management run build"
 ```
 
 Tauri 检查会验证发布资源路径；先运行资源准备脚本，或在本地创建 `out/windows-x64/staging/app/` 下的占位资源目录。
