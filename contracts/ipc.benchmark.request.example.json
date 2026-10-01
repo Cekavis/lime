@@ -2,8 +2,14 @@
   "kind": "start_benchmark",
   "payload": {
     "models": [
-      "本地模型 A",
-      "本地模型 B"
+      {
+        "kind": "preset",
+        "name": "本地模型 A"
+      },
+      {
+        "kind": "preset",
+        "name": "本地模型 B"
+      }
     ],
     "modes": [
       "full",
@@ -18,6 +24,10 @@
         "llm_rerank_count": 32,
         "preceding_text_char_limit": 128
       }
+    ],
+    "corpora": [
+      "知乎",
+      "经典文章"
     ]
   }
 }

@@ -158,6 +158,7 @@ impl CoreService {
         rime_dir: Option<PathBuf>,
         schema_override: Option<String>,
     ) -> Self {
+        let benchmark_rime_dir = rime_dir.clone();
         if let Some(dir) = &data_dir {
             let _ = fs::create_dir_all(dir);
         }
@@ -249,7 +250,10 @@ impl CoreService {
             model_presets: Arc::new(Mutex::new(model_presets)),
             active_model_path: Arc::new(Mutex::new(active_model_path.clone())),
             model_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            benchmark: Arc::new(Mutex::new(benchmark::BenchmarkControl::new())),
+            benchmark: Arc::new(Mutex::new(benchmark::BenchmarkControl::new(
+                data_dir.as_deref(),
+                benchmark_rime_dir.as_deref(),
+            ))),
         };
         // Restoring the last model is best-effort.  A missing model, unavailable
         // native runtime, or an incompatible GGUF must leave the service alive in
@@ -426,6 +430,13 @@ impl CoreService {
             Request::StartBenchmark(request) => self.start_benchmark(request),
             Request::StopBenchmark => self.stop_benchmark(),
             Request::GetBenchmarkStatus => Response::BenchmarkState(self.benchmark_status()),
+            Request::GetBenchmarkErrors {
+                key,
+                page,
+                page_size,
+            } => self.benchmark_errors(&key, page, page_size),
+            Request::ClearBenchmarkResults => self.clear_benchmark_results(),
+            Request::RerunBenchmarkItem { key } => self.rerun_benchmark_item(&key),
         }
     }
 

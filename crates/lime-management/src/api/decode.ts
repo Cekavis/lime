@@ -3,12 +3,16 @@ import type {
   Candidate,
   CandidateDiagnostic,
   BenchmarkCorpus,
+  BenchmarkCorpusCell,
   BenchmarkDatasetView,
+  BenchmarkErrorPage,
+  BenchmarkModelSelection,
   BenchmarkMode,
   BenchmarkObservation,
   BenchmarkReportView,
   BenchmarkResult,
   BenchmarkRunState,
+  BenchmarkQueueItem,
   BenchmarkRunStatus,
   BenchmarkSummary,
   Config,
@@ -265,23 +269,91 @@ function decodeBenchmarkCorpus(value: unknown): BenchmarkCorpus | null {
   const item = asRecord(value);
   const id = string(item?.id);
   if (id === null) return null;
-  return {
+  const corpus: BenchmarkCorpus = {
     id,
     name: string(item?.name) ?? id,
     characters: integer(item?.characters),
     cases: integer(item?.cases),
+  };
+  if (item?.articles !== undefined) corpus.documents = integer(item.articles);
+  else if (item?.documents !== undefined) corpus.documents = integer(item.documents);
+  return corpus;
+}
+
+export function decodeBenchmarkModel(value: unknown): BenchmarkModelSelection | null {
+  if (value === "rime_only" || value === "rime" || value === "RimeOnly") return { kind: "rime_only" };
+  const item = asRecord(value);
+  const kind = string(item?.kind) ?? string(item?.type);
+  if (kind === "rime_only" || kind === "rime" || kind === "RimeOnly") return { kind: "rime_only" };
+  const name = string(item?.name) ?? string(item?.preset) ?? string(item?.model_name);
+  if (kind === "preset" || name !== null) return name === null ? null : { kind: "preset", name };
+  return null;
+}
+
+function modelName(value: unknown): string {
+  const model = decodeBenchmarkModel(value);
+  return model?.kind === "rime_only" ? "仅 Rime" : model?.name ?? "";
+}
+
+function decodeBenchmarkCell(value: unknown): BenchmarkCorpusCell | null {
+  const item = asRecord(value);
+  const corpusId = string(item?.corpus_id) ?? string(item?.corpusId) ?? string(item?.category) ?? string(item?.id);
+  if (corpusId === null) return null;
+  const id = string(item?.key) ?? string(item?.id) ?? `${corpusId}`;
+  const rawSummary = item?.summary == null ? null : decodeBenchmarkSummary(item.summary);
+  const directTotal = asNumber(item?.total);
+  const directCompleted = asNumber(item?.completed);
+  const directCorrect = asNumber(item?.correct);
+  const directDenominator = directCompleted ?? directTotal;
+  const directIncorrect = directDenominator !== null && directCorrect !== null
+    ? Math.max(0, Math.trunc(directDenominator) - Math.trunc(directCorrect))
+    : null;
+  const summaryIncorrect = rawSummary
+    ? Math.max(0, rawSummary.completed - rawSummary.correct)
+    : null;
+  const incorrect = directIncorrect ?? summaryIncorrect;
+  const summary = rawSummary
+    ? { ...rawSummary, errors: incorrect ?? rawSummary.errors }
+    : (item?.total !== undefined ? {
+    category: corpusId,
+    mode: "full" as BenchmarkMode,
+    total: integer(item?.total),
+    completed: integer(item?.completed, integer(item?.total)),
+    correct: integer(item?.correct),
+    noPrediction: integer(item?.no_prediction ?? item?.noPrediction),
+    errors: incorrect ?? integer(item?.errors ?? item?.error_count),
+    accuracy: nullableNumber(item?.accuracy),
+  } : null);
+  const explicitErrorCount = item?.error_count ?? item?.errorCount;
+  return {
+    key: id,
+    id,
+    corpusId,
+    summary,
+    errorCount: explicitErrorCount !== undefined && explicitErrorCount !== null
+      ? integer(explicitErrorCount)
+      : incorrect ?? integer(item?.errors ?? asRecord(item?.summary)?.errors),
+    status: item?.status === "pending" ? "pending" : decodeBenchmarkStatus(item?.status),
+    error: nullableString(item?.error),
   };
 }
 
 export function decodeBenchmarkDataset(value: unknown): BenchmarkDatasetView {
   const item = asRecord(value);
   const rawCorpora = Array.isArray(item?.corpora) ? item.corpora : [];
-  return {
+  const dataset: BenchmarkDatasetView = {
     id: nullableString(item?.id) ?? nullableString(item?.dataset_id),
     name: nullableString(item?.name) ?? nullableString(item?.dataset_name),
     version: nullableNumber(item?.version) ?? nullableNumber(item?.dataset_version),
     corpora: rawCorpora.map(decodeBenchmarkCorpus).filter((entry): entry is BenchmarkCorpus => entry !== null),
   };
+  const sha256 = nullableString(item?.sha256) ?? nullableString(item?.dataset_sha256);
+  if (sha256 !== null) dataset.sha256 = sha256;
+  const directory = nullableString(item?.directory) ?? nullableString(item?.corpus_directory) ?? nullableString(item?.corpusDir);
+  if (directory !== null) dataset.directory = directory;
+  const error = nullableString(item?.error) ?? nullableString(item?.load_error) ?? nullableString(item?.loadError);
+  if (error !== null) dataset.error = error;
+  return dataset;
 }
 
 function benchmarkTop1(value: unknown): string | null {
@@ -354,19 +426,58 @@ function decodeBenchmarkResult(value: unknown): BenchmarkResult | null {
   const id = string(item?.id);
   if (id === null) return null;
   const configuration = asRecord(item?.configuration);
+  const mode = decodeBenchmarkMode(item?.mode);
+  const rawCells = Array.isArray(item?.cells)
+    ? item.cells
+    : Array.isArray(item?.corpus_cells) ? item.corpus_cells : Array.isArray(item?.corpusCells) ? item.corpusCells : [];
   return {
     id,
     modelName: string(item?.model_name) ?? "",
+    model: decodeBenchmarkModel(item?.model ?? item?.model_selection ?? item?.model_name),
     modelSha256: nullableString(item?.model_sha256),
     configuration: {
       llm_rerank_count: integer(configuration?.llm_rerank_count),
       preceding_text_char_limit: integer(configuration?.preceding_text_char_limit),
     },
-    mode: decodeBenchmarkMode(item?.mode),
+    mode,
     config: item?.config == null ? null : decodeConfigSnapshot({ revision: 0, config: item.config }).config,
     status: item?.status === "pending" ? "pending" : decodeBenchmarkStatus(item?.status),
     report: decodeBenchmarkReport(item?.report),
     error: nullableString(item?.error),
+    corpusCells: rawCells
+      .map(decodeBenchmarkCell).filter((entry): entry is BenchmarkCorpusCell => entry !== null),
+  };
+}
+
+function decodeBenchmarkCurrent(value: unknown) {
+  const item = asRecord(value);
+  if (!item) return null;
+  return {
+    itemId: nullableString(item.key) ?? nullableString(item.item_id) ?? nullableString(item.itemId) ?? nullableString(item.id),
+    model: decodeBenchmarkModel(item.model ?? item.model_selection),
+    modelName: nullableString(item.model_name) ?? nullableString(item.modelName) ?? modelName(item.model),
+    corpusId: nullableString(item.corpus_id) ?? nullableString(item.corpusId) ?? nullableString(item.corpus),
+    processed: integer(item.processed ?? item.completed),
+    total: integer(item.total),
+    rate: nullableNumber(item.rate ?? item.rate_per_second ?? item.words_per_second),
+    etaSeconds: nullableNumber(item.eta_seconds ?? item.etaSeconds ?? item.estimated_seconds),
+  };
+}
+
+function decodeBenchmarkQueueItem(value: unknown): BenchmarkQueueItem | null {
+  const item = asRecord(value);
+  const id = string(item?.key) ?? string(item?.id) ?? string(item?.item_id);
+  if (id === null) return null;
+  const rawStatus = string(item?.status);
+  const status = rawStatus === "running" || rawStatus === "completed" || rawStatus === "cancelled" || rawStatus === "failed"
+    ? rawStatus : "waiting";
+  return {
+    key: id,
+    id,
+    model: decodeBenchmarkModel(item?.model ?? item?.model_selection),
+    modelName: nullableString(item?.model_name) ?? nullableString(item?.modelName) ?? modelName(item?.model),
+    corpusId: nullableString(item?.corpus_id) ?? nullableString(item?.corpusId) ?? nullableString(item?.corpus),
+    status,
   };
 }
 
@@ -383,7 +494,22 @@ export function decodeBenchmarkRunState(value: unknown): BenchmarkRunState {
     total: integer(item?.total),
     completed: integer(item?.completed),
     results: rawResults.map(decodeBenchmarkResult).filter((entry): entry is BenchmarkResult => entry !== null),
+    current: decodeBenchmarkCurrent(item?.current ?? item?.current_item ?? item?.progress),
+    queue: (Array.isArray(item?.queue) ? item.queue : Array.isArray(item?.waiting) ? item.waiting : [])
+      .map(decodeBenchmarkQueueItem).filter((entry): entry is BenchmarkQueueItem => entry !== null),
     error: nullableString(item?.error),
+  };
+}
+
+export function decodeBenchmarkErrorPage(value: unknown, page: number): BenchmarkErrorPage {
+  const item = asRecord(value);
+  const rawItems = Array.isArray(item?.items) ? item.items : Array.isArray(item?.observations) ? item.observations : [];
+  const items = rawItems.map(decodeBenchmarkObservation).filter((entry): entry is BenchmarkObservation => entry !== null);
+  return {
+    items,
+    total: integer(item?.total, items.length),
+    page: integer(item?.page, page),
+    pageSize: integer(item?.page_size ?? item?.pageSize, 50),
   };
 }
 

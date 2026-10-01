@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BenchmarkRunRequest, Config, ConfigSnapshot, DictionaryEntry, DictionaryPage, ErrorCode,
-    HandshakeRequest, HandshakeResponse, InputHistoryPage, InputRequest, InputResponse,
-    ModelPreset, ServiceStatus,
+    BenchmarkErrorPage, BenchmarkRunRequest, Config, ConfigSnapshot, DictionaryEntry,
+    DictionaryPage, ErrorCode, HandshakeRequest, HandshakeResponse, InputHistoryPage, InputRequest,
+    InputResponse, ModelPreset, ServiceStatus,
 };
 
 /// Requests supported by the local service contract.
@@ -18,25 +18,59 @@ pub enum Request {
     SetConfig(Config),
     GetStatus,
     GetWeaselTheme,
-    LoadModel { path: String },
+    LoadModel {
+        path: String,
+    },
     UnloadModel,
     ListModelPresets,
-    SaveModelPreset { name: String, path: String },
-    RenameModelPreset { name: String, new_name: String },
-    DeleteModelPreset { name: String },
-    SelectModelPreset { name: String },
-    Learn { pinyin: String, text: String },
+    SaveModelPreset {
+        name: String,
+        path: String,
+    },
+    RenameModelPreset {
+        name: String,
+        new_name: String,
+    },
+    DeleteModelPreset {
+        name: String,
+    },
+    SelectModelPreset {
+        name: String,
+    },
+    Learn {
+        pinyin: String,
+        text: String,
+    },
     ExportDictionary,
-    GetDictionaryPage { page: u32, page_size: u32 },
-    ImportDictionary { entries: Vec<DictionaryEntry> },
+    GetDictionaryPage {
+        page: u32,
+        page_size: u32,
+    },
+    ImportDictionary {
+        entries: Vec<DictionaryEntry>,
+    },
     ClearDictionary,
-    GetInputHistoryPage { page: u32, page_size: u32 },
-    WaitForInputHistory { revision: u64 },
+    GetInputHistoryPage {
+        page: u32,
+        page_size: u32,
+    },
+    WaitForInputHistory {
+        revision: u64,
+    },
     ClearInputHistory,
     GetBenchmarkDataset,
     StartBenchmark(BenchmarkRunRequest),
     StopBenchmark,
     GetBenchmarkStatus,
+    GetBenchmarkErrors {
+        key: String,
+        page: u32,
+        page_size: u32,
+    },
+    ClearBenchmarkResults,
+    RerunBenchmarkItem {
+        key: String,
+    },
 }
 
 /// Responses supported by the local service contract.
@@ -56,6 +90,7 @@ pub enum Response {
     InputHistoryRevision(u64),
     BenchmarkDataset(lime_benchmark::DatasetInfo),
     BenchmarkState(crate::BenchmarkRunState),
+    BenchmarkErrors(BenchmarkErrorPage),
     Accepted,
     Error { code: ErrorCode },
 }

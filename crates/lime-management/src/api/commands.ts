@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { decodeBenchmarkDataset, decodeBenchmarkRunState, decodeConfigSnapshot, decodeDictionaryPage, decodeHistoryPage, decodeInputData, decodeModel, decodePreset, decodePresets } from "./decode";
-import { DICTIONARY_PAGE_SIZE, HISTORY_PAGE_SIZE, type BenchmarkDatasetView, type BenchmarkRunRequest, type BenchmarkRunState, type Config, type ConfigSnapshot, type DictionaryEntry, type DictionaryPage, type HistoryPage, type InputData, type ModelInfo, type ModelPreset, type ServiceStatus } from "./types";
+import { decodeBenchmarkDataset, decodeBenchmarkErrorPage, decodeBenchmarkRunState, decodeConfigSnapshot, decodeDictionaryPage, decodeHistoryPage, decodeInputData, decodeModel, decodePreset, decodePresets } from "./decode";
+import { BENCHMARK_ERROR_PAGE_SIZE, DICTIONARY_PAGE_SIZE, HISTORY_PAGE_SIZE, type BenchmarkDatasetView, type BenchmarkErrorPage, type BenchmarkRunRequest, type BenchmarkRunState, type Config, type ConfigSnapshot, type DictionaryEntry, type DictionaryPage, type HistoryPage, type InputData, type ModelInfo, type ModelPreset, type ServiceStatus } from "./types";
 
 export async function getConfig(): Promise<ConfigSnapshot> {
   return decodeConfigSnapshot(await invoke<unknown>("get_config"));
@@ -102,4 +102,20 @@ export async function stopBenchmark(): Promise<void> {
 
 export async function getBenchmarkStatus(): Promise<BenchmarkRunState> {
   return decodeBenchmarkRunState(await invoke<unknown>("get_benchmark_status"));
+}
+
+export async function getBenchmarkErrors(itemId: string, page: number, pageSize = BENCHMARK_ERROR_PAGE_SIZE): Promise<BenchmarkErrorPage> {
+  return decodeBenchmarkErrorPage(await invoke<unknown>("get_benchmark_errors", {
+    key: itemId,
+    page,
+    pageSize,
+  }), page);
+}
+
+export async function clearBenchmarkResults(): Promise<void> {
+  await invoke("clear_benchmark_results");
+}
+
+export async function rerunBenchmarkItem(itemId: string): Promise<void> {
+  await invoke("rerun_benchmark_item", { key: itemId });
 }

@@ -3,7 +3,7 @@
 mod ipc;
 
 use lime_protocol::{
-    BenchmarkDataset, BenchmarkRunRequest, BenchmarkRunState, Config, ConfigSnapshot,
+    BenchmarkDataset, BenchmarkErrorPage, BenchmarkRunRequest, BenchmarkRunState, Config, ConfigSnapshot,
     DictionaryEntry, DictionaryPage, InputHistoryPage, InputRequest, ModelInfo, ModelPreset,
     Request, Response, ServiceStatus,
     DICTIONARY_PAGE_SIZE, INPUT_HISTORY_PAGE_SIZE,
@@ -216,6 +216,34 @@ fn get_benchmark_status() -> Result<BenchmarkRunState, String> {
     }
 }
 
+#[tauri::command]
+fn get_benchmark_errors(key: String, page: u32, page_size: Option<u32>) -> Result<BenchmarkErrorPage, String> {
+    match ipc::call(Request::GetBenchmarkErrors {
+        key,
+        page,
+        page_size: page_size.unwrap_or(50),
+    })? {
+        Response::BenchmarkErrors(value) => Ok(value),
+        _ => Err("unexpected get_benchmark_errors response".to_owned()),
+    }
+}
+
+#[tauri::command]
+fn clear_benchmark_results() -> Result<(), String> {
+    match ipc::call(Request::ClearBenchmarkResults)? {
+        Response::Accepted => Ok(()),
+        _ => Err("unexpected clear_benchmark_results response".to_owned()),
+    }
+}
+
+#[tauri::command]
+fn rerun_benchmark_item(key: String) -> Result<(), String> {
+    match ipc::call(Request::RerunBenchmarkItem { key })? {
+        Response::BenchmarkState(_) | Response::Accepted => Ok(()),
+        _ => Err("unexpected rerun_benchmark_item response".to_owned()),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -241,6 +269,9 @@ fn main() {
             start_benchmark,
             stop_benchmark,
             get_benchmark_status,
+            get_benchmark_errors,
+            clear_benchmark_results,
+            rerun_benchmark_item,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lime management window");

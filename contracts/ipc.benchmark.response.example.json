@@ -2,9 +2,9 @@
   "kind": "benchmark_state",
   "payload": {
     "status": "running",
-    "dataset_id": "lime-real-text-v1",
-    "dataset_name": "知乎与经典文章逐词评测",
-    "dataset_version": 1,
+    "dataset_id": "lime-user-corpus",
+    "dataset_name": "用户语料",
+    "dataset_version": 2,
     "config_revision": 1,
     "total": 684520,
     "completed": 0,
@@ -29,7 +29,37 @@
           "llm_ignore_emoji": true,
           "llm_backend": "cuda"
         },
-        "status": "idle"
+        "status": "running",
+        "model": {
+          "kind": "preset",
+          "name": "本地模型 A"
+        },
+        "cells": [
+          {
+            "key": "example-key-1-1",
+            "corpus_id": "知乎",
+            "status": "running",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          },
+          {
+            "key": "example-key-1-2",
+            "corpus_id": "经典文章",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          }
+        ]
       },
       {
         "id": "run-2",
@@ -51,7 +81,37 @@
           "llm_ignore_emoji": true,
           "llm_backend": "cuda"
         },
-        "status": "idle"
+        "status": "idle",
+        "model": {
+          "kind": "preset",
+          "name": "本地模型 A"
+        },
+        "cells": [
+          {
+            "key": "example-key-2-1",
+            "corpus_id": "知乎",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          },
+          {
+            "key": "example-key-2-2",
+            "corpus_id": "经典文章",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          }
+        ]
       },
       {
         "id": "run-3",
@@ -73,7 +133,37 @@
           "llm_ignore_emoji": true,
           "llm_backend": "cuda"
         },
-        "status": "idle"
+        "status": "idle",
+        "model": {
+          "kind": "preset",
+          "name": "本地模型 A"
+        },
+        "cells": [
+          {
+            "key": "example-key-3-1",
+            "corpus_id": "知乎",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          },
+          {
+            "key": "example-key-3-2",
+            "corpus_id": "经典文章",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          }
+        ]
       },
       {
         "id": "run-4",
@@ -95,7 +185,37 @@
           "llm_ignore_emoji": true,
           "llm_backend": "cuda"
         },
-        "status": "idle"
+        "status": "idle",
+        "model": {
+          "kind": "preset",
+          "name": "本地模型 A"
+        },
+        "cells": [
+          {
+            "key": "example-key-4-1",
+            "corpus_id": "知乎",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          },
+          {
+            "key": "example-key-4-2",
+            "corpus_id": "经典文章",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          }
+        ]
       },
       {
         "id": "run-5",
@@ -117,7 +237,37 @@
           "llm_ignore_emoji": true,
           "llm_backend": "cuda"
         },
-        "status": "idle"
+        "status": "idle",
+        "model": {
+          "kind": "preset",
+          "name": "本地模型 B"
+        },
+        "cells": [
+          {
+            "key": "example-key-5-1",
+            "corpus_id": "知乎",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          },
+          {
+            "key": "example-key-5-2",
+            "corpus_id": "经典文章",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          }
+        ]
       },
       {
         "id": "run-6",
@@ -139,7 +289,37 @@
           "llm_ignore_emoji": true,
           "llm_backend": "cuda"
         },
-        "status": "idle"
+        "status": "idle",
+        "model": {
+          "kind": "preset",
+          "name": "本地模型 B"
+        },
+        "cells": [
+          {
+            "key": "example-key-6-1",
+            "corpus_id": "知乎",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          },
+          {
+            "key": "example-key-6-2",
+            "corpus_id": "经典文章",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          }
+        ]
       },
       {
         "id": "run-7",
@@ -161,7 +341,37 @@
           "llm_ignore_emoji": true,
           "llm_backend": "cuda"
         },
-        "status": "idle"
+        "status": "idle",
+        "model": {
+          "kind": "preset",
+          "name": "本地模型 B"
+        },
+        "cells": [
+          {
+            "key": "example-key-7-1",
+            "corpus_id": "知乎",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          },
+          {
+            "key": "example-key-7-2",
+            "corpus_id": "经典文章",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          }
+        ]
       },
       {
         "id": "run-8",
@@ -183,7 +393,145 @@
           "llm_ignore_emoji": true,
           "llm_backend": "cuda"
         },
-        "status": "idle"
+        "status": "idle",
+        "model": {
+          "kind": "preset",
+          "name": "本地模型 B"
+        },
+        "cells": [
+          {
+            "key": "example-key-8-1",
+            "corpus_id": "知乎",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          },
+          {
+            "key": "example-key-8-2",
+            "corpus_id": "经典文章",
+            "status": "pending",
+            "total": 1000,
+            "completed": 0,
+            "correct": 0,
+            "no_prediction": 0,
+            "errors": 0,
+            "accuracy": null,
+            "error": null
+          }
+        ]
+      }
+    ],
+    "rime_snapshot_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "current": {
+      "key": "example-key-1-1",
+      "model_name": "本地模型 A",
+      "corpus_id": "知乎",
+      "completed": 0,
+      "total": 1000,
+      "rate_per_second": null,
+      "eta_seconds": null
+    },
+    "queue": [
+      {
+        "key": "example-key-1-1",
+        "model_name": "本地模型 A",
+        "corpus_id": "知乎",
+        "status": "running"
+      },
+      {
+        "key": "example-key-1-2",
+        "model_name": "本地模型 A",
+        "corpus_id": "经典文章",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-2-1",
+        "model_name": "本地模型 A",
+        "corpus_id": "知乎",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-2-2",
+        "model_name": "本地模型 A",
+        "corpus_id": "经典文章",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-3-1",
+        "model_name": "本地模型 A",
+        "corpus_id": "知乎",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-3-2",
+        "model_name": "本地模型 A",
+        "corpus_id": "经典文章",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-4-1",
+        "model_name": "本地模型 A",
+        "corpus_id": "知乎",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-4-2",
+        "model_name": "本地模型 A",
+        "corpus_id": "经典文章",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-5-1",
+        "model_name": "本地模型 B",
+        "corpus_id": "知乎",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-5-2",
+        "model_name": "本地模型 B",
+        "corpus_id": "经典文章",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-6-1",
+        "model_name": "本地模型 B",
+        "corpus_id": "知乎",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-6-2",
+        "model_name": "本地模型 B",
+        "corpus_id": "经典文章",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-7-1",
+        "model_name": "本地模型 B",
+        "corpus_id": "知乎",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-7-2",
+        "model_name": "本地模型 B",
+        "corpus_id": "经典文章",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-8-1",
+        "model_name": "本地模型 B",
+        "corpus_id": "知乎",
+        "status": "pending"
+      },
+      {
+        "key": "example-key-8-2",
+        "model_name": "本地模型 B",
+        "corpus_id": "经典文章",
+        "status": "pending"
       }
     ]
   }

@@ -43,9 +43,13 @@
     llm_performance: { total_ms: 20, tokenize_ms: 1, decode_ms: 19, candidate_count: 3, scored_count: 3, target_token_count: 6, batch_count: 1, mismatch_count: 1, context_token_count: 8, decode_input_token_count: 14, logits_output_count: 6, inference_count_limit: 1, omitted_candidate_count: 0, boundary_rollback: { prefix_token_count: 3, replayed_token_count: 1, prefix_text: "你好，", replayed_text: "这个" } },
   });
   let history = Array.from({ length: 102 }, (_, index) => response("shijie", "你好，这个", index));
-  const dataset = { id: "qa-corpus", name: "测试语料", version: 1, corpora: [{ id: "zhihu", name: "知乎", characters: 42000, cases: 12000 }, { id: "classics", name: "经典文章", characters: 44000, cases: 16000 }] };
-  const benchmarkResult = (name, index = 0) => ({ id: String(index), model_name: name, mode: "full", status: "completed", configuration: { llm_rerank_count: 32, preceding_text_char_limit: 128 }, config, model_sha256: "qa-model", report: { complete: true, modes: ["full"], summaries: [null, "zhihu", "classics"].map((category) => ({ category, mode: "full", accuracy: 0.83 - index * 0.04 })), observations: [{ case_id: "qa-1", category: "zhihu", mode: "full", context: "你好，这个", preedit: "shijie", expected: "世界", top1: "时节", correct: false }] } });
-  let benchmark = { status: "completed", dataset_id: dataset.id, total: 100, completed: 100, results: presets.map((preset, i) => benchmarkResult(preset.name, i)) };
+  const dataset = { id: "qa-corpus", name: "测试语料", version: 1, sha256: "qa-corpus", directory: "C:\\Lime\\corpora", corpora: [{ id: "zhihu", name: "知乎", characters: 42000, cases: 12000, articles: 3 }, { id: "classics", name: "经典文章", characters: 44000, cases: 16000, articles: 4 }] };
+  const benchmarkResult = (model, index = 0, status = "completed") => {
+    const selection = typeof model === "string" ? { kind: "preset", name: model } : model;
+    const modelName = selection.kind === "rime_only" ? "仅 Rime" : selection.name;
+    return { id: `${modelName}-${index}`, model: selection, model_name: modelName, mode: "full", status, configuration: { llm_rerank_count: 32, preceding_text_char_limit: 128 }, config, model_sha256: "qa-model", cells: dataset.corpora.map((corpus) => ({ key: `${modelName}-${corpus.id}`, corpus_id: corpus.id, status, total: corpus.cases, completed: status === "completed" ? corpus.cases : 25, correct: Math.round(corpus.cases * (0.83 - index * 0.04)), no_prediction: 0, errors: Math.round(corpus.cases * 0.17), accuracy: 0.83 - index * 0.04 })), report: { complete: status === "completed", modes: ["full"], summaries: [null, "zhihu", "classics"].map((category) => ({ category, mode: "full", accuracy: 0.83 - index * 0.04 })), observations: [{ case_id: "qa-1", category: "zhihu", mode: "full", context: "你好，这个", preedit: "shijie", expected: "世界", top1: "时节", correct: false }] } };
+  };
+  let benchmark = { status: "completed", dataset_id: dataset.id, total: 100, completed: 100, results: presets.map((preset, i) => benchmarkResult(preset.name, i)), current: null, queue: [] };
   const page = (items, args) => ({ items: items.slice((args.page - 1) * args.pageSize, args.page * args.pageSize), total: items.length, page: args.page, page_size: args.pageSize });
   window.__TAURI_INTERNALS__ = {
     invoke: async (command, args = {}) => {
@@ -70,8 +74,11 @@
         case "test_input": { const result = response(args.preedit, args.precedingText); history.unshift(result); historyRevision++; return result; }
         case "get_benchmark_dataset": return dataset;
         case "get_benchmark_status": return structuredClone(benchmark);
-        case "start_benchmark": benchmark = { ...benchmark, status: "running", completed: 25, results: args.request.models.map((name, index) => ({ ...benchmarkResult(name, index), status: "running" })) }; return structuredClone(benchmark);
+        case "start_benchmark": { const selections = args.request.models ?? []; const results = selections.map((selection, index) => ({ ...benchmarkResult(selection, index, "running"), mode: args.request.modes?.[0] ?? "full" })); benchmark = { ...benchmark, status: "running", completed: 25, results, current: { key: results[0]?.cells[0]?.key ?? "", model_name: results[0]?.model_name ?? "", corpus_id: results[0]?.cells[0]?.corpus_id ?? "", completed: 25, total: results[0]?.cells[0]?.total ?? 0, rate_per_second: 12.5, eta_seconds: 30 }, queue: results.flatMap((result) => result.cells.map((cell) => ({ key: cell.key, model_name: result.model_name, corpus_id: cell.corpus_id, status: "pending" }))) }; return structuredClone(benchmark); }
         case "stop_benchmark": benchmark = { ...benchmark, status: "cancelled" }; return;
+        case "get_benchmark_errors": return { key: args.key, page: args.page, page_size: args.pageSize, total: 1, items: [{ case_id: "qa-1", category: "zhihu", mode: "full", context: "你好，这个", preedit: "shijie", expected: "世界", top1: "时节", correct: false, error: "首位不匹配" }] };
+        case "clear_benchmark_results": benchmark = { ...benchmark, results: [], total: 0, completed: 0 }; return;
+        case "rerun_benchmark_item": benchmark = { ...benchmark, status: "running" }; return;
         default: throw new Error("Unsupported QA command: " + command);
       }
     },

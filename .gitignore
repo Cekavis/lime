@@ -46,6 +46,13 @@ logs/
 !/tools/*.psm1
 !/tools/prepare-benchmark-corpus.py
 
+# Developer-only benchmark corpus snapshots. The application reads user copies
+# from %LOCALAPPDATA%\Lime\benchmark\corpora; these files are only fixtures for
+# local development and must never be packaged or committed.
+crates/lime-benchmark/data/corpora/
+crates/lime-benchmark/data/sources/
+crates/lime-benchmark/data/corpus.json
+
 # Large upstream Rime text assets are fetched and verified by the release scripts.
 # Keep only the project-facing documentation, license, and Weasel theme in Git.
 third_party/rime/*

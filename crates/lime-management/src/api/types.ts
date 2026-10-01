@@ -103,10 +103,16 @@ export interface DictionaryPage { items: DictionaryEntry[]; total: number; page:
 export type BenchmarkMode = "full" | "initials";
 export type BenchmarkRunStatus = "idle" | "running" | "stopping" | "cancelled" | "completed" | "failed";
 
+/** A model source selected for a benchmark run. */
+export type BenchmarkModelSelection =
+  | { kind: "rime_only" }
+  | { kind: "preset"; name: string };
+
 export interface BenchmarkRunRequest {
   modes: BenchmarkMode[];
-  models: string[];
+  models: BenchmarkModelSelection[];
   configurations: BenchmarkConfiguration[];
+  corpora: string[];
 }
 
 export interface BenchmarkConfiguration {
@@ -119,12 +125,16 @@ export interface BenchmarkCorpus {
   name: string;
   characters: number;
   cases: number;
+  documents?: number;
 }
 
 export interface BenchmarkDatasetView {
   id: string | null;
   name: string | null;
   version: number | null;
+  sha256?: string | null;
+  directory?: string | null;
+  error?: string | null;
   corpora: BenchmarkCorpus[];
 }
 
@@ -163,9 +173,21 @@ export interface BenchmarkReportView {
   complete: boolean;
 }
 
+export interface BenchmarkCorpusCell {
+  /** Stable persisted item id used by error paging and single-item reruns. */
+  key: string;
+  id: string;
+  corpusId: string;
+  summary: BenchmarkSummary | null;
+  errorCount: number;
+  status: BenchmarkRunStatus | "pending";
+  error: string | null;
+}
+
 export interface BenchmarkResult {
   id: string;
   modelName: string;
+  model: BenchmarkModelSelection | null;
   modelSha256: string | null;
   configuration: BenchmarkConfiguration;
   mode: BenchmarkMode;
@@ -173,6 +195,34 @@ export interface BenchmarkResult {
   status: BenchmarkRunStatus | "pending";
   error: string | null;
   report: BenchmarkReportView | null;
+  corpusCells: BenchmarkCorpusCell[];
+}
+
+export interface BenchmarkCurrentProgress {
+  itemId: string | null;
+  model: BenchmarkModelSelection | null;
+  modelName: string | null;
+  corpusId: string | null;
+  processed: number;
+  total: number;
+  rate: number | null;
+  etaSeconds: number | null;
+}
+
+export interface BenchmarkQueueItem {
+  key: string;
+  id: string;
+  model: BenchmarkModelSelection | null;
+  modelName: string | null;
+  corpusId: string | null;
+  status: "waiting" | "running" | "completed" | "cancelled" | "failed";
+}
+
+export interface BenchmarkErrorPage {
+  items: BenchmarkObservation[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
 export interface BenchmarkRunState {
@@ -185,8 +235,11 @@ export interface BenchmarkRunState {
   total: number;
   completed: number;
   results: BenchmarkResult[];
+  current: BenchmarkCurrentProgress | null;
+  queue: BenchmarkQueueItem[];
   error: string | null;
 }
 
 export const DICTIONARY_PAGE_SIZE = 100;
 export const HISTORY_PAGE_SIZE = 100;
+export const BENCHMARK_ERROR_PAGE_SIZE = 50;

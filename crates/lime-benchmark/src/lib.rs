@@ -11,7 +11,11 @@ use std::collections::{HashMap, HashSet};
 mod corpus;
 pub use corpus::{
     builtin_dataset, builtin_dataset_info, builtin_dataset_sha256,
-    builtin_dataset_with_context_limit, visit_builtin_cases, CorpusInfo, DatasetInfo,
+    builtin_dataset_with_context_limit, corpus_info, corpus_sha256, dataset_from_corpus_dir,
+    dataset_from_corpus_dir_for_categories, dataset_from_corpus_dir_with_context_limit,
+    default_corpus_dir, load_corpus, load_corpus_with_pinyin_dictionary, visit_builtin_cases,
+    visit_corpus_cases, visit_selected_corpus_cases, Corpus, CorpusInfo, DatasetInfo,
+    PinyinDictionary, CORPUS_VERSION,
 };
 
 const MAX_CASES: usize = 250_000;
@@ -29,7 +33,7 @@ pub struct Dataset {
     pub cases: Vec<Case>,
 }
 
-/// One expected Chinese continuation and its frozen pinyin syllables.
+/// One expected Chinese continuation and its runtime-validated pinyin syllables.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
@@ -38,6 +42,10 @@ pub struct Case {
     pub context: String,
     pub expected: String,
     pub syllables: Vec<String>,
+    /// Whether this is the first Chinese word in its article. First-word cases have empty
+    /// context and must be scored through the Rime path without an LLM request.
+    #[serde(default)]
+    pub first_word: bool,
 }
 
 /// The two preedit forms measured by the benchmark.
@@ -151,7 +159,11 @@ pub fn validate_case(case: &Case) -> Result<(), String> {
         return Err(format!("case {} category must not be empty", case.id));
     }
     let context_chars = case.context.chars().count();
-    if context_chars == 0 {
+    if case.first_word {
+        if context_chars != 0 {
+            return Err(format!("case {} first-word context must be empty", case.id));
+        }
+    } else if context_chars == 0 {
         return Err(format!("case {} context must not be empty", case.id));
     }
     if context_chars > MAX_CONTEXT_CHARS {
@@ -434,6 +446,8 @@ fn is_chinese_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn case(id: &str, category: &str, context: &str, expected: &str, syllables: &[&str]) -> Case {
         Case {
@@ -442,6 +456,7 @@ mod tests {
             context: context.to_owned(),
             expected: expected.to_owned(),
             syllables: syllables.iter().map(|value| (*value).to_owned()).collect(),
+            first_word: false,
         }
     }
 
@@ -458,16 +473,32 @@ mod tests {
     }
 
     #[test]
-    fn bundled_dataset_is_valid_and_has_two_real_text_categories() {
-        let dataset = builtin_dataset().expect("bundled dataset should validate");
+    fn runtime_fixture_dataset_is_valid_and_has_two_categories() {
+        let root = std::env::temp_dir().join(format!(
+            "lime-benchmark-lib-fixture-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("zhihu")).unwrap();
+        fs::create_dir_all(root.join("classics")).unwrap();
+        fs::write(root.join("zhihu").join("one.txt"), "知乎文章测试").unwrap();
+        fs::write(root.join("classics").join("one.txt"), "经典文章测试").unwrap();
+        let dataset = dataset_from_corpus_dir(&root).expect("runtime fixture should validate");
         validate_dataset(&dataset).unwrap();
-        assert_eq!(dataset.cases.len(), 85_565);
+        assert!(dataset.cases.len() > 0);
+        assert!(dataset
+            .cases
+            .iter()
+            .any(|case| case.first_word && case.context.is_empty()));
         let categories: HashSet<_> = dataset
             .cases
             .iter()
             .map(|case| case.category.as_str())
             .collect();
         assert_eq!(categories, HashSet::from(["zhihu", "classics"]));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -486,6 +517,16 @@ mod tests {
         value.cases[1].syllables[0] = "LV".to_owned();
         assert!(validate_dataset(&value).is_err());
         value.cases[1].id = value.cases[0].id.clone();
+        assert!(validate_dataset(&value).is_err());
+    }
+
+    #[test]
+    fn first_word_allows_only_empty_context() {
+        let mut value = tiny_dataset();
+        value.cases[0].context.clear();
+        value.cases[0].first_word = true;
+        validate_dataset(&value).unwrap();
+        value.cases[0].context = "前文".into();
         assert!(validate_dataset(&value).is_err());
     }
 

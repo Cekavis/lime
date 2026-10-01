@@ -1188,6 +1188,81 @@
               "const": "get_benchmark_status"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "get_benchmark_errors"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "page",
+                "page_size"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "page": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "page_size": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 500
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "clear_benchmark_results"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "rerun_benchmark_item"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
         }
       ]
     },
@@ -1412,6 +1487,22 @@
               "$ref": "#/$defs/benchmark_run_state"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "benchmark_errors"
+            },
+            "payload": {
+              "$ref": "#/$defs/benchmark_error_page"
+            }
+          }
         }
       ]
     },
@@ -1606,7 +1697,6 @@
         },
         "context": {
           "type": "string",
-          "minLength": 1,
           "maxLength": 4096
         },
         "expected": {
@@ -1621,6 +1711,9 @@
             "type": "string",
             "pattern": "^[a-z]+$"
           }
+        },
+        "first_word": {
+          "type": "boolean"
         }
       }
     },
@@ -1631,6 +1724,9 @@
         "id",
         "name",
         "version",
+        "sha256",
+        "directory",
+        "error",
         "corpora"
       ],
       "properties": {
@@ -1646,10 +1742,33 @@
           "type": "integer",
           "minimum": 0
         },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "const": ""
+            }
+          ]
+        },
+        "directory": {
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "corpora": {
           "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
+          "minItems": 0,
           "items": {
             "$ref": "#/$defs/benchmark_corpus"
           }
@@ -1662,7 +1781,8 @@
       "required": [
         "modes",
         "models",
-        "configurations"
+        "configurations",
+        "corpora"
       ],
       "properties": {
         "modes": {
@@ -1676,18 +1796,58 @@
           "type": "array",
           "minItems": 1,
           "items": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/$defs/benchmark_model_selection"
           }
         },
         "configurations": {
           "type": "array",
-          "minItems": 1,
+          "minItems": 0,
           "items": {
             "$ref": "#/$defs/benchmark_configuration"
           }
+        },
+        "corpora": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
+    },
+    "benchmark_model_selection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "rime_only"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "const": "preset"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
     },
     "benchmark_observation": {
       "type": "object",
@@ -1894,7 +2054,8 @@
         "config_revision",
         "total",
         "completed",
-        "results"
+        "results",
+        "queue"
       ],
       "properties": {
         "status": {
@@ -1932,6 +2093,22 @@
             "$ref": "#/$defs/benchmark_result"
           }
         },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/benchmark_progress"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queue": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/benchmark_queue_item"
+          }
+        },
         "rime_snapshot_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
@@ -1948,7 +2125,9 @@
         "id",
         "name",
         "characters",
-        "cases"
+        "cases",
+        "articles",
+        "sha256"
       ],
       "properties": {
         "id": {
@@ -1966,6 +2145,14 @@
         "cases": {
           "type": "integer",
           "minimum": 0
+        },
+        "articles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
       }
     },
@@ -1994,16 +2181,21 @@
       "additionalProperties": false,
       "required": [
         "id",
+        "model",
         "model_name",
         "configuration",
         "mode",
         "config",
-        "status"
+        "status",
+        "cells"
       ],
       "properties": {
         "id": {
           "type": "string",
           "minLength": 1
+        },
+        "model": {
+          "$ref": "#/$defs/benchmark_model_selection"
         },
         "model_name": {
           "type": "string",
@@ -2022,14 +2214,233 @@
           "$ref": "#/$defs/benchmark_run_status"
         },
         "model_sha256": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "report": {
           "$ref": "#/$defs/benchmark_report"
         },
         "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/benchmark_result_cell"
+          }
+        }
+      }
+    },
+    "benchmark_result_cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "corpus_id",
+        "status",
+        "total",
+        "completed",
+        "correct",
+        "no_prediction",
+        "errors",
+        "accuracy",
+        "error"
+      ],
+      "properties": {
+        "key": {
           "type": "string"
+        },
+        "corpus_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "$ref": "#/$defs/benchmark_cell_status"
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "correct": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "no_prediction": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accuracy": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "benchmark_cell_status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "cancelled",
+        "completed",
+        "failed"
+      ]
+    },
+    "benchmark_progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "model_name",
+        "corpus_id",
+        "completed",
+        "total",
+        "rate_per_second",
+        "eta_seconds"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "corpus_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rate_per_second": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eta_seconds": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "benchmark_queue_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "model_name",
+        "corpus_id",
+        "status"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "model_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "corpus_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "$ref": "#/$defs/benchmark_cell_status"
+        }
+      }
+    },
+    "benchmark_error_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "items",
+        "page",
+        "page_size",
+        "total"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/benchmark_observation"
+          }
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     }

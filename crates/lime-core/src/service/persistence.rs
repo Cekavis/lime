@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, io, path::Path};
+use std::{collections::BTreeMap, fs, io, io::Write, path::Path};
 
 use lime_protocol::{Config, ModelPreset};
 
@@ -47,7 +47,7 @@ pub(crate) fn persist_config(data_dir: Option<&Path>, config: &Config) -> Result
         config,
     })
     .map_err(io::Error::other)?;
-    atomic_write(dir, "config.json", bytes)
+    atomic_write_file(dir, "config.json", bytes)
 }
 
 pub(crate) fn persist_model_state(
@@ -65,22 +65,27 @@ pub(crate) fn persist_model_state(
         active_model_path,
     })
     .map_err(io::Error::other)?;
-    atomic_write(dir, "model-presets.json", bytes)
+    atomic_write_file(dir, "model-presets.json", bytes)
 }
 
-fn atomic_write(dir: &Path, file_name: &str, bytes: Vec<u8>) -> Result<(), io::Error> {
+pub(crate) fn atomic_write_file(
+    dir: &Path,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<(), io::Error> {
     fs::create_dir_all(dir)?;
     let target = dir.join(file_name);
     let temp = dir.join(format!("{file_name}.tmp"));
-    fs::write(&temp, bytes)?;
-    match fs::rename(&temp, &target) {
-        Ok(()) => Ok(()),
-        Err(_) if target.exists() => {
-            fs::remove_file(&target)?;
-            fs::rename(temp, target)
-        }
-        Err(error) => Err(error),
-    }
+    let mut file = fs::File::create(&temp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp, &target)
+}
+
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 pub(crate) fn load_config(path: &Path) -> Option<Config> {
@@ -99,4 +104,27 @@ pub(crate) fn load_model_state(path: &Path) -> Option<LoadedModelPresets> {
         active_model_path: persisted.active_model_path.filter(|path| !path.is_empty()),
         presets: persisted.presets,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn atomic_write_replaces_existing_file_without_leftover_temporary_file() {
+        let root = std::env::temp_dir().join(format!(
+            "lime-atomic-write-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        atomic_write_file(&root, "index.json", b"first".to_vec()).unwrap();
+        atomic_write_file(&root, "index.json", b"second".to_vec()).unwrap();
+        assert_eq!(fs::read(root.join("index.json")).unwrap(), b"second");
+        assert!(!root.join("index.json.tmp").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

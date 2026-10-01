@@ -10,3 +10,6 @@ description = "Offline pinyin input benchmark data and scoring primitives for Li
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# Pin text-processing data together with PROCESSOR_FINGERPRINT in corpus.rs.
+jieba-rs = "=0.7.0"
+pinyin = { version = "=0.11.0", default-features = false, features = ["plain"] }

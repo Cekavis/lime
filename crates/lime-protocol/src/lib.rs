@@ -22,9 +22,10 @@ mod management;
 mod request;
 
 pub use benchmark::{
-    BenchmarkConfiguration, BenchmarkResult, BenchmarkRunRequest, BenchmarkRunState,
-    BenchmarkRunStatus, Case as BenchmarkCase, Observation as BenchmarkObservation,
-    Summary as BenchmarkSummary,
+    BenchmarkCellStatus, BenchmarkConfiguration, BenchmarkErrorPage, BenchmarkModelSelection,
+    BenchmarkProgress, BenchmarkQueueItem, BenchmarkResult, BenchmarkResultCell,
+    BenchmarkRunRequest, BenchmarkRunState, BenchmarkRunStatus, Case as BenchmarkCase,
+    Observation as BenchmarkObservation, Summary as BenchmarkSummary,
 };
 pub use error::ErrorCode;
 pub use input::{
@@ -349,18 +350,46 @@ mod tests {
     fn benchmark_messages_round_trip() {
         let request = Request::StartBenchmark(BenchmarkRunRequest {
             modes: vec![InputMode::Full, InputMode::Initials],
-            models: vec!["local model".into()],
+            models: vec![BenchmarkModelSelection::Preset {
+                name: "local model".into(),
+            }],
             configurations: vec![BenchmarkConfiguration {
                 llm_rerank_count: 32,
                 preceding_text_char_limit: 128,
             }],
+            corpora: vec!["知乎".into()],
         });
         let encoded = serde_json::to_string(&request).expect("serialize benchmark request");
         let decoded: Request =
             serde_json::from_str(&encoded).expect("deserialize benchmark request");
         assert_eq!(decoded, request);
 
-        let dataset = lime_benchmark::builtin_dataset_info().expect("bundled benchmark dataset");
+        let dataset = lime_benchmark::DatasetInfo {
+            id: "benchmark".into(),
+            name: "语料".into(),
+            version: lime_benchmark::CORPUS_VERSION,
+            directory: "C:/corpora".into(),
+            error: None,
+            sha256: "0".repeat(64),
+            corpora: vec![
+                lime_benchmark::CorpusInfo {
+                    id: "知乎".into(),
+                    name: "知乎".into(),
+                    characters: 1,
+                    cases: 1,
+                    articles: 1,
+                    sha256: "1".repeat(64),
+                },
+                lime_benchmark::CorpusInfo {
+                    id: "经典文章".into(),
+                    name: "经典文章".into(),
+                    characters: 1,
+                    cases: 1,
+                    articles: 1,
+                    sha256: "2".repeat(64),
+                },
+            ],
+        };
         let response = Response::BenchmarkDataset(dataset.clone());
         let encoded = serde_json::to_string(&response).expect("serialize benchmark dataset");
         let decoded: Response =

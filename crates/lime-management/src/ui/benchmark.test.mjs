@@ -38,8 +38,8 @@ function wireResult(id, accuracy, overrides = {}) {
 }
 
 test("decodes corpus directory without transferring or inventing case text", () => {
-  const corpora = [{ id: "zhihu", name: "知乎", characters: 42000, cases: 12000 }, { id: "classics", name: "经典文章", characters: 44000, cases: 16000 }];
-  assert.deepEqual(decodeBenchmarkDataset({ id: "benchmark", name: "语料", version: 2, corpora }), { id: "benchmark", name: "语料", version: 2, corpora });
+  const corpora = [{ id: "zhihu", name: "知乎", characters: 42000, cases: 12000, articles: 3 }, { id: "classics", name: "经典文章", characters: 44000, cases: 16000, articles: 4 }];
+  assert.deepEqual(decodeBenchmarkDataset({ id: "benchmark", name: "语料", version: 2, sha256: "dataset", directory: "C:/corpora", corpora }), { id: "benchmark", name: "语料", version: 2, sha256: "dataset", directory: "C:/corpora", corpora: corpora.map(({ articles, ...corpus }) => ({ ...corpus, documents: articles })) });
 });
 
 test("decodes every matrix result and keeps export metadata and error context", () => {
@@ -72,4 +72,70 @@ test("uses the requested corpus and mode, withholds partial and invalid accuracy
   assert.equal(benchmarkResultAccuracy({ ...result, mode: "initials" }), null);
   assert.equal(benchmarkResultAccuracy({ ...result, report: { ...result.report, complete: false } }), null);
   assert.equal(benchmarkResultAccuracy({ ...result, report: { ...result.report, summaries: [{ category: null, mode: "full", accuracy: NaN }] } }), null);
+});
+
+test("decodes Rime-only rows, corpus cells, current progress and queue", () => {
+  const { results, current, queue } = decodeBenchmarkRunState({
+    status: "running",
+    results: [{
+      id: "row",
+      model: { kind: "rime_only" },
+      model_name: "仅 Rime",
+      configuration: { llm_rerank_count: 32, preceding_text_char_limit: 128 },
+      mode: "full",
+      status: "completed",
+      cells: [{ key: "cell-key", corpus_id: "zhihu", status: "completed", total: 10, completed: 10, correct: 8, no_prediction: 0, errors: 2, accuracy: 0.8 }],
+    }],
+    current: { key: "next", model_name: "仅 Rime", corpus_id: "classics", completed: 3, total: 10, rate_per_second: 12.5, eta_seconds: 1 },
+    queue: [{ key: "queued", model_name: "local", corpus_id: "zhihu", status: "pending" }],
+  });
+  assert.deepEqual(results[0].model, { kind: "rime_only" });
+  assert.equal(results[0].corpusCells[0].id, "cell-key");
+  assert.equal(results[0].corpusCells[0].summary.accuracy, 0.8);
+  assert.equal(current.itemId, "next");
+  assert.equal(current.processed, 3);
+  assert.equal(current.rate, 12.5);
+  assert.equal(queue[0].id, "queued");
+  assert.equal(queue[0].status, "waiting");
+});
+
+test("does not count unprocessed partial cases as errors", () => {
+  const { results } = decodeBenchmarkRunState({ results: [{
+    id: "row",
+    model: { kind: "rime_only" },
+    configuration: { llm_rerank_count: 1, preceding_text_char_limit: 128 },
+    mode: "full",
+    status: "running",
+    cells: [{ key: "cell", corpus_id: "zhihu", status: "running", total: 100, completed: 10, correct: 7, no_prediction: 1, errors: 1, accuracy: null }],
+  }] });
+  assert.equal(results[0].corpusCells[0].errorCount, 3);
+  assert.equal(results[0].corpusCells[0].summary.errors, 3);
+});
+
+test("derives cell error count from incorrect cases instead of inference errors", () => {
+  const { results } = decodeBenchmarkRunState({ results: [{
+    id: "row",
+    model: { kind: "rime_only" },
+    configuration: { llm_rerank_count: 1, preceding_text_char_limit: 128 },
+    mode: "full",
+    status: "completed",
+    cells: [{ key: "cell", corpus_id: "zhihu", status: "completed", total: 10, completed: 10, correct: 7, no_prediction: 1, errors: 1, accuracy: 0.7 }],
+  }] });
+  const cell = results[0].corpusCells[0];
+  assert.equal(cell.errorCount, 3);
+  assert.equal(cell.summary.errors, 3);
+});
+
+test("keeps an empty user corpus directory and loader error visible", () => {
+  assert.deepEqual(decodeBenchmarkDataset({ id: "benchmark", name: "用户语料", version: 1, directory: "", error: "未发现 txt 文件", corpora: [] }), {
+    id: "benchmark", name: "用户语料", version: 1, directory: "", error: "未发现 txt 文件", corpora: [],
+  });
+});
+
+test("decodes paginated error pages without requiring report snapshots", async () => {
+  const { decodeBenchmarkErrorPage } = await loadTypeScript("../api/decode.ts");
+  const page = decodeBenchmarkErrorPage({ page: 2, page_size: 50, total: 75, items: [{ case_id: "case-2", context: "上文", preedit: "shijie", expected: "世界", top1: "时节", correct: false, error: "首位不匹配" }] }, 1);
+  assert.equal(page.page, 2);
+  assert.equal(page.total, 75);
+  assert.equal(page.items[0].caseId, "case-2");
 });
